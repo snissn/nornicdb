@@ -9,6 +9,12 @@ import type { GridCellTemplateContext, GridColumnDef, GridOptions, GridRecord, U
 import { ExpandableCell } from "../common/ExpandableCell";
 import { extractNodeFromResult } from "../../utils/nodeUtils";
 
+type QueryResultNodeData = {
+  id: string;
+  labels: string[];
+  properties: Record<string, unknown>;
+};
+
 interface QueryResultsTableProps {
   cypherResult: {
     results: Array<{
@@ -20,7 +26,7 @@ interface QueryResultsTableProps {
     }>;
   } | null;
   selectedNodeIds: Set<string>;
-  onNodeSelect: (nodeData: { id: string; labels: string[]; properties: Record<string, unknown> }) => void;
+  onNodeSelect: (nodeData: QueryResultNodeData) => void;
   onSelectionChange: (nodeIds: string[]) => void;
 }
 
@@ -44,7 +50,7 @@ export function QueryResultsTable({
 
     const nextGridData: GridRecord[] = result.data.map((row, rowIndex) => {
       let nodeId: string | null = null;
-      let nodeData: { id: string; labels: string[]; properties: Record<string, unknown> } | null = null;
+      let nodeData: QueryResultNodeData | null = null;
 
       for (const cell of row.row) {
         if (cell && typeof cell === "object") {
@@ -73,13 +79,26 @@ export function QueryResultsTable({
       return record;
     });
 
-    const nextColumnDefs: GridColumnDef[] = nextColumns.map((column) => ({
+    const nextColumnDefs: GridColumnDef[] = [
+      {
+        name: "__select__",
+        displayName: "Select",
+        field: "__select__",
+        width: "96px",
+        headerRenderer: () => "",
+        sortable: false,
+        filterable: false,
+        enableCellEdit: false,
+      },
+      ...nextColumns.map((column) => ({
         name: column,
         displayName: column,
         field: column,
+        enableCellEdit: false,
         type: "object" as const,
         width: "minmax(12rem, 1fr)",
-      }));
+      })),
+    ];
 
     return {
       columnDefs: nextColumnDefs,
@@ -98,6 +117,7 @@ export function QueryResultsTable({
       enableCellEdit: false,
       enableRowSelection: true,
       enableRowHeaderSelection: true,
+      enableFullRowSelection: true,
       enableSelectAll: true,
       enableSelectionBatchEvent: true,
       isRowSelectable: (row) => Boolean(row.entity.__nodeId),
@@ -166,27 +186,35 @@ export function QueryResultsTable({
     }
   }, [gridApi, gridData, selectedNodeIds]);
 
-  const renderCell = (ctx: GridCellTemplateContext) => {
+  const renderSelectCell = (ctx: GridCellTemplateContext) => {
     const row = ctx.row as GridRecord & {
-      __nodeId?: string | null;
-      __nodeData?: { id: string; labels: string[]; properties: Record<string, unknown> } | null;
+      __nodeData?: QueryResultNodeData | null;
     };
     const nodeData = row.__nodeData ?? null;
 
+    if (!nodeData) {
+      return <div className="text-xs text-norse-fog py-1">-</div>;
+    }
+
+    return (
+      <div className="py-1" onClick={(event) => event.stopPropagation()}>
+        <button
+          type="button"
+          onClick={() => onNodeSelect(nodeData)}
+          className="inline-flex items-center rounded-full border border-nornic-primary/40 bg-nornic-primary/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-nornic-primary hover:border-nornic-primary hover:bg-nornic-primary/20 hover:text-white"
+        >
+          Select
+        </button>
+      </div>
+    );
+  };
+
+  const renderCell = (ctx: GridCellTemplateContext) => {
     const value = ctx.value;
 
     if (value && typeof value === "object") {
       return (
-        <div className="font-mono text-xs py-1 space-y-1">
-          {nodeData ? (
-            <button
-              type="button"
-              onClick={() => onNodeSelect(nodeData)}
-              className="text-[11px] uppercase tracking-wide text-nornic-primary hover:text-white"
-            >
-              Open
-            </button>
-          ) : null}
+        <div className="font-mono text-xs py-1">
           <ExpandableCell data={value} />
         </div>
       );
@@ -199,27 +227,16 @@ export function QueryResultsTable({
           ? "-"
           : String(value);
 
-    const clickable = Boolean(nodeData);
-
     return (
-      <button
-        type="button"
-        onClick={() => {
-          if (nodeData) {
-            onNodeSelect(nodeData);
-          }
-        }}
-        disabled={!clickable}
-        className={`w-full text-left font-mono text-xs py-1 ${clickable ? "cursor-pointer hover:text-white" : "cursor-default"}`}
-      >
+      <div className="w-full text-left font-mono text-xs py-1">
         {displayValue}
-      </button>
+      </div>
     );
   };
 
   const cellRenderers = useMemo(
-    () => Object.fromEntries(columnDefs.map(({ name }) => [name, renderCell])),
-    [columnDefs, renderCell],
+    () => Object.fromEntries(columnDefs.map(({ name }) => [name, name === "__select__" ? renderSelectCell : renderCell])),
+    [columnDefs, renderCell, renderSelectCell],
   );
 
   return (

@@ -9,9 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@ornery/ui-grid-core": "^1.0.2",
-    "@ornery/ui-grid-react": "^1.0.2",
-    "@ornery/ui-grid-vanilla": "^1.0.2",
+    "@ornery/ui-grid-core": "^1.0.5",
+    "@ornery/ui-grid-react": "^1.0.5",
+    "@ornery/ui-grid-vanilla": "^1.0.5",
     "lucide-react": "^1.14.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
