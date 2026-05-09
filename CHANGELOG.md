@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.45] - 2026-05-08
+
+### Added
+
+- **Broader hot-path coverage for `UNWIND MATCH SET` updates**:
+  - added a batched `UNWIND` + `MATCH` + `SET` hot path so more update-heavy Cypher write workloads can stay on the optimized execution path.
+
+### Changed
+
+- **Browser query-results grid behavior**:
+  - updated the web UI to `@ornery/ui-grid-*` `1.0.5`, bringing the latest resize and scroll tracking behavior from the new grid runtime.
+  - query-results selection now relies on the grid's per-column opt-out behavior for the synthetic Select column, so hidden sort and group controls follow the legacy ui-grid behavior instead of rendering as disabled header buttons.
+
+- **Cypher write-path routing**:
+  - tightened `MATCH ... SET` hot-path routing so optimized update execution only applies when uniqueness guarantees are present, reducing incorrect fast-path routing for ambiguous match shapes.
+
+- **Maintenance and dependency refreshes**:
+  - refreshed UI grid dependencies from the `1.0.4` line to `1.0.5` and regenerated the UI lockfile to match the published package graph.
+  - updated package metadata and peer-dependency wiring in the UI package so installs resolve cleanly against the latest grid release.
+  - folded in mainline merge-conflict cleanup that affected the release range.
+
+### Fixed
+
+- **Embedding worker lifecycle stability**:
+  - fixed overlapping embed-worker reset and close flows by serializing worker lifecycle transitions, preventing wait-group reuse panics during concurrent embedding workloads.
+
+- **Grid column opt-out chrome**:
+  - fixed the query-results Select column so column-level sorting and grouping opt-outs now hide header controls using the grid's native per-column behavior instead of relying on CSS workarounds.
+
+### Technical Details
+
+- **Range covered**: `v1.0.44..HEAD`
+- **Commits in range**: 9 (non-merge)
+- **Repository delta**: 15 files changed, +1,322 / -582 lines
+- **Primary focus areas**: query-results grid upgrades, `UNWIND MATCH SET` hot-path expansion and safety, embedding-worker lifecycle stability, and targeted UI package maintenance.
+
 ## [v1.0.44] Lithium - 2026-05-02
 
 ### Added
