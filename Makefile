@@ -626,7 +626,11 @@ deploy-llama-cuda: build-llama-cuda push-llama-cuda
 # ==============================================================================
 
 sync-version:
+ifeq ($(HOST_OS),windows)
+	@powershell -NoProfile -ExecutionPolicy Bypass -Command "$$env:VERSION='$(VERSION)'; & '$(CURDIR)\scripts\sync-version.ps1'"
+else
 	@VERSION="$(VERSION)" sh ./scripts/sync-version.sh
+endif
 
 # Build UI assets first
 build-ui:

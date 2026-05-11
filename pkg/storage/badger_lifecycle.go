@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"fmt"
-	"syscall"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -245,16 +244,6 @@ func (b *BadgerEngine) ReadMVCCHead(ctx context.Context, logicalKey []byte) (MVC
 	})
 	return head, err
 }
-
-// DataDirFreeSpace returns free bytes for the underlying data directory.
-func (b *BadgerEngine) DataDirFreeSpace() (int64, error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(b.db.Opts().Dir, &stat); err != nil {
-		return 0, err
-	}
-	return int64(stat.Bavail) * int64(stat.Bsize), nil
-}
-
 func headPrefixToLogicalPrefix(prefix byte) byte {
 	if prefix == prefixMVCCNodeHead {
 		return prefixMVCCNode
