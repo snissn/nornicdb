@@ -1550,7 +1550,10 @@ func LoadDefaults() *Config {
 	config.Database.AsyncMaxEdgeCacheSize = 100000 // ~50MB assuming 500 bytes/edge
 	config.Database.BadgerNodeCacheMaxEntries = 10000
 	config.Database.BadgerEdgeTypeCacheMaxTypes = 50
-	config.Database.MVCCRetentionMaxVersions = 100
+	// Head-only MVCC by default: no historical body duplication into the
+	// MVCC version keyspace. Operators who need audit/rollback raise
+	// this via NORNICDB_MVCC_RETENTION_MAX_VERSIONS or YAML.
+	config.Database.MVCCRetentionMaxVersions = 0
 	config.Database.MVCCRetentionTTL = 0
 	config.Database.MVCCLifecycleEnabled = true
 	config.Database.MVCCLifecycleCycleInterval = 30 * time.Second

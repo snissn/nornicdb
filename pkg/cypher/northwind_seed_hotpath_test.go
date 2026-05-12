@@ -42,8 +42,22 @@ func assertNoScanFallback(t *testing.T, trace cypher.HotPathTrace) {
 // seedBaseGraph writes the Category / Supplier / Customer nodes used by the
 // product + order UNWIND batches. Kept tiny and deterministic — this is about
 // exercising the executor paths, not throughput.
+//
+// DDL is declared up front because the UnwindMultiMatchCreateBatch fast
+// path requires a schema property index on every MATCH-side (label, prop)
+// pair. The production seeder emits these same indexes before any writes;
+// the test mirrors that.
 func seedBaseGraph(t *testing.T, exec *cypher.StorageExecutor) {
 	t.Helper()
+	for _, ddl := range []string{
+		"CREATE INDEX category_id IF NOT EXISTS FOR (n:Category) ON (n.categoryID)",
+		"CREATE INDEX supplier_id IF NOT EXISTS FOR (n:Supplier) ON (n.supplierID)",
+		"CREATE INDEX customer_id IF NOT EXISTS FOR (n:Customer) ON (n.customerID)",
+		"CREATE INDEX product_id IF NOT EXISTS FOR (n:Product) ON (n.productID)",
+		"CREATE INDEX order_id IF NOT EXISTS FOR (n:Order) ON (n.orderID)",
+	} {
+		testutil.MustExecute(t, exec, ddl)
+	}
 	const N = 8
 	for i := 0; i < N; i++ {
 		testutil.MustExecute(t, exec,

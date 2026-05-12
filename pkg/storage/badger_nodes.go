@@ -97,9 +97,7 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 		if err := b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, nil, node); err != nil {
 			return err
 		}
-		if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
-			return err
-		}
+		// Create-only path: primary key IS the current head body.
 		return b.writeNodeMVCCHeadInTxn(txn, node.ID, version, false)
 	})
 	if err != nil {
@@ -254,16 +252,19 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 					return err
 				}
 			}
-			if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
-				return err
-			}
+			// Insert-branch of upsert: primary key IS the current head body.
 			return b.writeNodeMVCCHeadInTxn(txn, node.ID, version, false)
 		}
 		if err != nil {
 			return err
 		}
 
-		// Node exists - update it
+		// Node exists - update it. Archive the previous head body into a
+		// version record BEFORE we overwrite the primary key so snapshot
+		// reads at the old version can still resolve it.
+		if err := b.archiveNodeOnUpdateInTxn(txn, node.ID); err != nil {
+			return err
+		}
 		if err := item.Value(func(val []byte) error {
 			var decodeErr error
 			existingNode, decodeErr = decodeNodeWithEmbeddings(txn, val, node.ID)
@@ -352,9 +353,8 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 		if err := b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, existingNode, node); err != nil {
 			return err
 		}
-		if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
-			return err
-		}
+		// Primary key now holds the new head body; archive of old body
+		// into mvccNodeVersionKey(oldHead.Version) happened above.
 		return b.writeNodeMVCCHeadInTxn(txn, node.ID, version, false)
 	})
 	if err == nil && persistSeparateEmbeddings {
@@ -435,6 +435,10 @@ func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
 		if err != nil {
 			return err
 		}
+		// Archive the superseded body before we overwrite the primary key.
+		if err := b.archiveNodeOnUpdateInTxn(txn, node.ID); err != nil {
+			return err
+		}
 
 		// Decode existing node
 		var existing *Node
@@ -491,9 +495,8 @@ func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
 		}
 
 		updated = existing
-		if err := b.writeNodeMVCCVersionInTxn(txn, updated, version); err != nil {
-			return err
-		}
+		// Primary key now holds the new body; archive of prior body
+		// into the version record happened above.
 		return b.writeNodeMVCCHeadInTxn(txn, updated.ID, version, false)
 	})
 	if err == nil && persistSeparateEmbeddings {
@@ -627,6 +630,9 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 		if allocErr != nil {
 			return allocErr
 		}
+		// deleteNodeInTxn archives the pre-delete node body and each
+		// cascade-deleted edge body into their version records BEFORE
+		// removing the primary keys — see that function's doc.
 		edgesDeleted, edgeIDs, node, err := b.deleteNodeInTxn(txn, id)
 		totalEdgesDeleted = edgesDeleted
 		deletedEdgeIDs = edgeIDs
@@ -645,6 +651,8 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 		if err := b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, deletedNode, nil); err != nil {
 			return err
 		}
+		// Tombstone markers (tiny, no body) preserve delete semantics
+		// for snapshot reads at the deletion version.
 		if err := b.writeNodeMVCCTombstoneInTxn(txn, id, version); err != nil {
 			return err
 		}

@@ -116,9 +116,7 @@ func (b *BadgerEngine) CreateEdge(edge *Edge) error {
 		}); err != nil {
 			return err
 		}
-		if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
-			return err
-		}
+		// Create-only: primary key IS the current head body.
 		return b.writeEdgeMVCCHeadInTxn(txn, edge.ID, version, false)
 	})
 
@@ -199,6 +197,12 @@ func (b *BadgerEngine) UpdateEdge(edge *Edge) error {
 			return ErrNotFound
 		}
 		if err != nil {
+			return err
+		}
+
+		// Archive the superseded body BEFORE we overwrite the primary
+		// key. No-op when retention policy is head-only.
+		if err := b.archiveEdgeOnUpdateInTxn(txn, edge.ID); err != nil {
 			return err
 		}
 
@@ -295,9 +299,7 @@ func (b *BadgerEngine) UpdateEdge(edge *Edge) error {
 		}); err != nil {
 			return err
 		}
-		if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
-			return err
-		}
+		// Primary key now holds the new body; archival above handled history.
 		return b.writeEdgeMVCCHeadInTxn(txn, edge.ID, version, false)
 	})
 
@@ -334,9 +336,16 @@ func (b *BadgerEngine) DeleteEdge(id EdgeID) error {
 		if err != nil {
 			return err
 		}
+		// deleteEdgeInTxn archives the pre-delete body into its version
+		// record (no-op when retention is head-only) before removing
+		// the primary key.
 		if err := b.deleteEdgeInTxn(txn, id); err != nil {
 			return err
 		}
+		// Tombstone marker (tiny, no body) preserved at the deletion
+		// version so snapshot reads at that version observe the delete
+		// rather than stumbling onto a stale pre-delete body. This is
+		// O(1) bytes and independent of retention policy.
 		if err := b.writeEdgeMVCCTombstoneInTxn(txn, id, version); err != nil {
 			return err
 		}
@@ -359,6 +368,8 @@ func (b *BadgerEngine) DeleteEdge(id EdgeID) error {
 }
 
 // deleteEdgeInTxn is the internal helper for deleting an edge within a transaction.
+// Archives the pre-delete edge body into its version record before removing
+// the primary key so snapshot reads at prior versions can still resolve it.
 func (b *BadgerEngine) deleteEdgeInTxn(txn *badger.Txn, id EdgeID) error {
 	key := edgeKey(id)
 
@@ -378,6 +389,20 @@ func (b *BadgerEngine) deleteEdgeInTxn(txn *badger.Txn, id EdgeID) error {
 		return decodeErr
 	}); err != nil {
 		return err
+	}
+	if edge != nil {
+		edge.ID = id
+	}
+
+	// Archive the old body at the current head's version so snapshot
+	// reads at that version still see the edge after the primary key
+	// goes away. No-op if no head exists yet.
+	if head, headErr := b.loadEdgeMVCCHeadInTxn(txn, id); headErr == nil && !head.Tombstoned {
+		if err := b.archiveEdgeBodyInTxn(txn, id, edge, head.Version); err != nil {
+			return err
+		}
+	} else if headErr != nil && headErr != ErrNotFound {
+		return headErr
 	}
 
 	// Delete indexes
@@ -438,6 +463,17 @@ func (b *BadgerEngine) deleteNodeInTxn(txn *badger.Txn, id NodeID) (edgesDeleted
 		return decodeErr
 	}); err != nil {
 		return 0, nil, nil, err
+	}
+
+	// Archive the node body at the current head's version BEFORE we
+	// delete the primary key. This preserves snapshot reads at versions
+	// <= head.Version.
+	if head, headErr := b.loadNodeMVCCHeadInTxn(txn, id); headErr == nil && !head.Tombstoned {
+		if err := b.archiveNodeBodyInTxn(txn, id, deletedNode, head.Version); err != nil {
+			return 0, nil, nil, err
+		}
+	} else if headErr != nil && headErr != ErrNotFound {
+		return 0, nil, nil, headErr
 	}
 
 	// Delete label indexes
@@ -517,6 +553,8 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 			}
 			// ErrNotFound is ignored (node didn't exist, no count change)
 		}
+		// Tombstone markers preserve "deleted at this version" semantics
+		// for snapshot reads. Small fixed-size payloads — no body bloat.
 		for _, id := range deletedNodeIDs {
 			if err := b.writeNodeMVCCTombstoneInTxn(txn, id, version); err != nil {
 				return err
@@ -611,6 +649,7 @@ func (b *BadgerEngine) BulkDeleteEdges(ids []EdgeID) error {
 			}
 			// ErrNotFound is ignored (edge didn't exist, no count change)
 		}
+		// Tombstone markers preserve "deleted at this version" semantics.
 		for _, id := range deletedIDs {
 			if err := b.writeEdgeMVCCTombstoneInTxn(txn, id, version); err != nil {
 				return err

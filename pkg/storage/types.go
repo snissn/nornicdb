@@ -552,14 +552,29 @@ type MVCCHead struct {
 	FloorVersion MVCCVersion
 }
 
-const DefaultRetentionPolicyMaxVersionsPerKey = 100
+// DefaultRetentionPolicyMaxVersionsPerKey — closed historical versions
+// preserved per key by default. Zero means "no history, head-only" which
+// collapses every write to a single primary-key write (no MVCC version
+// archival). Operators who need audit/rollback raise
+// NORNICDB_MVCC_RETENTION_MAX_VERSIONS via config.
+const DefaultRetentionPolicyMaxVersionsPerKey = 0
 
 // RetentionPolicy controls default MVCC historical retention for a storage engine.
 // MaxVersionsPerKey applies to closed historical versions; the current head is always preserved.
+// When MaxVersionsPerKey <= 0 the engine skips archival entirely: updates
+// overwrite in place and deletes remove the primary key without creating a
+// version record.
 // TTL optionally protects versions newer than now-TTL from pruning.
 type RetentionPolicy struct {
 	MaxVersionsPerKey int
 	TTL               time.Duration
+}
+
+// RetainsHistory reports whether this policy keeps any closed historical
+// versions. Callers on the write hot path use this to short-circuit archival
+// work when the head-only configuration is active.
+func (p RetentionPolicy) RetainsHistory() bool {
+	return p.MaxVersionsPerKey > 0
 }
 
 // EngineOptions contains storage-engine-wide options shared across engine implementations.
@@ -568,7 +583,10 @@ type EngineOptions struct {
 }
 
 func normalizeRetentionPolicy(policy RetentionPolicy) RetentionPolicy {
-	if policy.MaxVersionsPerKey <= 0 {
+	// MaxVersionsPerKey == 0 is a legitimate setting ("head-only, no
+	// historical archival"). Only negative values are coerced to the
+	// default so YAML/env that explicitly set 0 are honored.
+	if policy.MaxVersionsPerKey < 0 {
 		policy.MaxVersionsPerKey = DefaultRetentionPolicyMaxVersionsPerKey
 	}
 	if policy.TTL < 0 {

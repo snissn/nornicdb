@@ -511,6 +511,17 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 		}
 	}
 
+	// Apply creates/updates. Path selection:
+	//
+	//   - Fresh creates (no rebase baseline) go through BulkCreateNodes in a
+	//     single Badger transaction. This is the bulk-seed hot path — N
+	//     per-node UpdateNode calls would each spawn their own Badger
+	//     transaction + WAL sync, which is the slow O(N × fsync) behaviour
+	//     that made 16 000-row seeds take >20s.
+	//   - Queued updates (baseline != nil) go through flushNodeWithRebase
+	//     so the rebase-on-concurrent-change machinery still runs per node.
+	//     That path is correctness-critical for the update-while-write race;
+	//     we cannot batch it without recomputing rebase per group.
 	// Apply creates/updates using UpdateNode (upsert) for each node
 	// This handles both new nodes and updates to existing nodes
 	if len(nodesToWrite) > 0 {

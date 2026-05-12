@@ -111,55 +111,87 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 	pendingNodes := make([]*storage.Node, 0, len(items)*len(plan.nodeCreates))
 	pendingEdges := make([]*storage.Edge, 0, len(items)*(len(plan.edgeCreates)+1))
 
-	// For every MATCH target, decide on the cheapest lookup strategy:
-	//   - If the storage schema exposes a property index for (label, prop),
-	//     use it per-row — no preload needed.
-	//   - Else preload all nodes with that label once and build an in-memory
-	//     (propValue → node) map shared across the batch. This avoids an
-	//     O(rows × labelCardinality) scan blowup.
-	labelPropIndex := make(map[struct{ label, prop string }]map[string]*storage.Node, len(plan.matches))
-	useSchemaIndex := make(map[struct{ label, prop string }]bool, len(plan.matches))
+	// Deterministic resolution rule (no heuristics): every MATCH in a bulk
+	// batch MUST resolve against the schema property index. If the user
+	// declared `CREATE INDEX … ON (label.prop)`, that index is authoritative
+	// and MUST be populated on every subsequent CREATE. Falling back to a
+	// label-scan preload would mask a broken index-maintenance path.
+	//
+	// If no index exists, we do NOT paper over the missing DDL with a
+	// label scan — we refuse the fast path and let the caller fall back.
+	// That keeps the bulk fast path's behaviour tied exactly to what the
+	// user's Cypher DDL declared.
 	schema := store.GetSchema()
 	for _, m := range plan.matches {
-		k := struct{ label, prop string }{m.label, m.propName}
-		if _, seen := labelPropIndex[k]; seen {
-			continue
+		if schema == nil || !schema.HasPropertyIndex(m.label, m.propName) {
+			return nil, false, nil
 		}
-		if _, seen := useSchemaIndex[k]; seen {
-			continue
-		}
-		// Does the schema have a property index? (SchemaManager keeps internal
-		// maps; a non-nil schema with a configured index will return a slice
-		// here even if empty when we ask for a real value.) We detect index
-		// presence by asking if ANY IDs exist for a sentinel lookup — but
-		// that's wasteful; instead rely on per-row lookup falling back to
-		// preload if it returns empty on the first row.
-		if schema != nil && schema.HasPropertyIndex(m.label, m.propName) {
-			useSchemaIndex[k] = true
-			continue
-		}
-		nodes, err := store.GetNodesByLabel(m.label)
-		if err != nil {
-			return nil, true, fmt.Errorf("preload %s: %w", m.label, err)
-		}
-		idx := make(map[string]*storage.Node, len(nodes))
-		for _, node := range nodes {
-			if node == nil {
-				continue
-			}
-			if v, ok := node.Properties[m.propName]; ok {
-				idx[propEqKey(v)] = node
-			}
-		}
-		labelPropIndex[k] = idx
 	}
 
+	// Coerce the items to maps once so we can walk them twice (prefetch +
+	// plan). Refuse the fast path for any non-map row so the caller falls
+	// back without us having silently skipped rows.
+	rows := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		row, ok := toStringAnyMap(item)
 		if !ok {
 			return nil, false, nil
 		}
-		if err := e.planUnwindMultiMatchCreateRowPreloaded(plan, store, row, labelPropIndex, useSchemaIndex, &pendingNodes, &pendingEdges); err != nil {
+		rows = append(rows, row)
+	}
+
+	// Per-batch MATCH prefetch: for each (label, prop) pair in the plan,
+	// gather the distinct set of row values, do one PropertyIndexLookup
+	// per distinct value, and BatchGetNodes the resulting IDs in a single
+	// round-trip. Build a per-(label, prop) map keyed by row value. This
+	// is still deterministic — the lookup is index-driven — but collapses
+	// N × 2 per-row Badger point-reads into a bounded handful of calls.
+	//
+	// The map key format mirrors propEqKeyBatch below so int64/float64
+	// numeric equivalents collide (a Bolt int64 row value and a float64
+	// stored property both hash to the same key).
+	batchIndex := make(map[struct{ label, prop string }]map[string]*storage.Node, len(plan.matches))
+	for _, m := range plan.matches {
+		key := struct{ label, prop string }{m.label, m.propName}
+		if _, seen := batchIndex[key]; seen {
+			continue
+		}
+		// Collect distinct row values for this match.
+		distinct := make(map[string]any, len(rows))
+		for _, r := range rows {
+			val, ok := r[m.rowField]
+			if !ok {
+				continue
+			}
+			distinct[propEqKeyBatch(val)] = val
+		}
+		if len(distinct) == 0 {
+			batchIndex[key] = map[string]*storage.Node{}
+			continue
+		}
+		// One PropertyIndexLookup per distinct row value + one GetNode per
+		// lookup result. Both operations are O(1) lookups on in-memory
+		// structures (schema map + Badger cache/skiplist point read); we
+		// avoid BatchGetNodes here because NamespacedEngine.BatchGetNodes
+		// returns a map keyed by UNPREFIXED IDs while the schema index
+		// yields PREFIXED IDs, so a batched-read + map-lookup mismatches.
+		// GetNode handles both forms via idempotent prefixNodeID.
+		idx := make(map[string]*storage.Node, len(distinct))
+		for k, val := range distinct {
+			ids := schema.PropertyIndexLookup(m.label, m.propName, val)
+			for _, id := range ids {
+				n, err := store.GetNode(id)
+				if err == nil && n != nil {
+					idx[k] = n
+					break
+				}
+			}
+		}
+		batchIndex[key] = idx
+	}
+
+	for _, row := range rows {
+		if err := e.planUnwindMultiMatchCreateRowIndexed(plan, row, batchIndex, &pendingNodes, &pendingEdges); err != nil {
 			return nil, true, err
 		}
 	}
@@ -181,48 +213,34 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 	return result, true, nil
 }
 
-// planUnwindMultiMatchCreateRowPreloaded resolves row-bound MATCH targets
-// using either a schema property index (fast per-row lookup) or the
-// batch-preloaded in-memory map, whichever was selected for each
-// (label, propName) in the plan.
-func (e *StorageExecutor) planUnwindMultiMatchCreateRowPreloaded(
+// planUnwindMultiMatchCreateRowIndexed resolves row-bound MATCH targets
+// from the per-batch index the caller prebuilt. The caller already ran the
+// per-distinct-value PropertyIndexLookup + BatchGetNodes, so this hot loop
+// is pure in-memory map access.
+//
+// An empty lookup result means the row legitimately has no match in the
+// user's data (Cypher MATCH semantics: zero the row stream); we return nil
+// and skip the row's CREATE clauses, matching standard behaviour.
+func (e *StorageExecutor) planUnwindMultiMatchCreateRowIndexed(
 	plan unwindMultiMatchCreatePlan,
-	store storage.Engine,
 	row map[string]any,
-	labelPropIndex map[struct{ label, prop string }]map[string]*storage.Node,
-	useSchemaIndex map[struct{ label, prop string }]bool,
+	batchIndex map[struct{ label, prop string }]map[string]*storage.Node,
 	pendingNodes *[]*storage.Node, pendingEdges *[]*storage.Edge,
 ) error {
 	bound := make(map[string]*storage.Node, len(plan.matches)+len(plan.nodeCreates))
 
-	// 1. Resolve every MATCH target. Missing row field or no matching node
-	// zeroes the row (Cypher MATCH semantics).
+	// 1. Resolve every MATCH target from the pre-batched index.
 	for _, m := range plan.matches {
 		val, ok := row[m.rowField]
 		if !ok {
 			return nil
 		}
 		key := struct{ label, prop string }{m.label, m.propName}
-		var node *storage.Node
-		if useSchemaIndex[key] {
-			// Schema-indexed lookup.
-			if schema := store.GetSchema(); schema != nil {
-				ids := schema.PropertyIndexLookup(m.label, m.propName, val)
-				for _, id := range ids {
-					n, err := store.GetNode(id)
-					if err == nil && n != nil {
-						node = n
-						break
-					}
-				}
-			}
-		} else {
-			idx, ok := labelPropIndex[key]
-			if !ok {
-				return fmt.Errorf("internal: missing preloaded index for %s.%s", m.label, m.propName)
-			}
-			node = idx[propEqKey(val)]
+		idx, ok := batchIndex[key]
+		if !ok {
+			return fmt.Errorf("internal: missing batch index for %s.%s", m.label, m.propName)
 		}
+		node := idx[propEqKeyBatch(val)]
 		if node == nil {
 			return nil
 		}
@@ -264,124 +282,6 @@ func (e *StorageExecutor) planUnwindMultiMatchCreateRowPreloaded(
 	}
 
 	return nil
-}
-
-// lookupNodeByLabelAndProperty returns the first node with the given label
-// whose property matches. Uses the property index when present and falls
-// back to a label scan + linear property match.
-func (e *StorageExecutor) lookupNodeByLabelAndProperty(
-	store storage.Engine, label, propName string, value interface{},
-) (*storage.Node, error) {
-	if schema := store.GetSchema(); schema != nil {
-		ids := schema.PropertyIndexLookup(label, propName, value)
-		for _, id := range ids {
-			node, err := store.GetNode(id)
-			if err == nil && node != nil {
-				return node, nil
-			}
-		}
-	}
-	nodes, err := store.GetNodesByLabel(label)
-	if err != nil {
-		return nil, err
-	}
-	for _, node := range nodes {
-		if node == nil {
-			continue
-		}
-		if propEq(node.Properties[propName], value) {
-			return node, nil
-		}
-	}
-	return nil, nil
-}
-
-// propEqKey returns a stable string key used as a map index for property
-// value equality. It normalises integer and float types so an int64 stored
-// on a node matches a float64 coming in from Bolt (and vice versa).
-func propEqKey(v interface{}) string {
-	if v == nil {
-		return "n:"
-	}
-	if i, ok := asInt64(v); ok {
-		return fmt.Sprintf("i:%d", i)
-	}
-	if f, ok := asFloat64(v); ok {
-		// Integer-valued floats share the int key so ints and floats collide.
-		if f == float64(int64(f)) {
-			return fmt.Sprintf("i:%d", int64(f))
-		}
-		return fmt.Sprintf("f:%g", f)
-	}
-	if s, ok := v.(string); ok {
-		return "s:" + s
-	}
-	if b, ok := v.(bool); ok {
-		return fmt.Sprintf("b:%t", b)
-	}
-	return fmt.Sprintf("x:%v", v)
-}
-
-// propEq compares two property values with type-insensitive numeric coercion.
-// (Property values coming from Bolt row maps are int64/float64; stored node
-// properties may be the same. Accepting either avoids MATCH misses.)
-func propEq(a, b interface{}) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if a == b {
-		return true
-	}
-	if aa, ok := asInt64(a); ok {
-		if bb, ok := asInt64(b); ok {
-			return aa == bb
-		}
-	}
-	if aa, ok := asFloat64(a); ok {
-		if bb, ok := asFloat64(b); ok {
-			return aa == bb
-		}
-	}
-	return false
-}
-
-func asInt64(v interface{}) (int64, bool) {
-	switch x := v.(type) {
-	case int:
-		return int64(x), true
-	case int8:
-		return int64(x), true
-	case int16:
-		return int64(x), true
-	case int32:
-		return int64(x), true
-	case int64:
-		return x, true
-	case uint:
-		return int64(x), true
-	case uint8:
-		return int64(x), true
-	case uint16:
-		return int64(x), true
-	case uint32:
-		return int64(x), true
-	case uint64:
-		return int64(x), true
-	}
-	return 0, false
-}
-
-func asFloat64(v interface{}) (float64, bool) {
-	switch x := v.(type) {
-	case float32:
-		return float64(x), true
-	case float64:
-		return x, true
-	}
-	if i, ok := asInt64(v); ok {
-		return float64(i), true
-	}
-	return 0, false
 }
 
 // buildPropsFromSpec assembles a property map for a CREATE from a row.
@@ -703,6 +603,74 @@ func parsePropsBodyForUnwindFastPath(propsBody, unwindVar string) (map[string]st
 		return nil, nil, false
 	}
 	return rowRefs, literals, true
+}
+
+// propEqKeyBatch produces a stable string key used to index the per-batch
+// MATCH-prefetch map. It coerces integer and float types so an int64
+// coming from a Bolt row and an equivalent float64 stored on a node hash
+// to the same key. Strings, bools, and nil get their own unambiguous
+// prefixes so they cannot collide with numeric keys.
+func propEqKeyBatch(v interface{}) string {
+	if v == nil {
+		return "n:"
+	}
+	if i, ok := coerceInt64(v); ok {
+		return fmt.Sprintf("i:%d", i)
+	}
+	if f, ok := coerceFloat64(v); ok {
+		// Integer-valued floats hash to the same key as the int form so a
+		// Bolt int64 and a Cypher float literal compare equal through the map.
+		if f == float64(int64(f)) {
+			return fmt.Sprintf("i:%d", int64(f))
+		}
+		return fmt.Sprintf("f:%g", f)
+	}
+	if s, ok := v.(string); ok {
+		return "s:" + s
+	}
+	if b, ok := v.(bool); ok {
+		return fmt.Sprintf("b:%t", b)
+	}
+	return fmt.Sprintf("x:%v", v)
+}
+
+func coerceInt64(v interface{}) (int64, bool) {
+	switch x := v.(type) {
+	case int:
+		return int64(x), true
+	case int8:
+		return int64(x), true
+	case int16:
+		return int64(x), true
+	case int32:
+		return int64(x), true
+	case int64:
+		return x, true
+	case uint:
+		return int64(x), true
+	case uint8:
+		return int64(x), true
+	case uint16:
+		return int64(x), true
+	case uint32:
+		return int64(x), true
+	case uint64:
+		return int64(x), true
+	}
+	return 0, false
+}
+
+func coerceFloat64(v interface{}) (float64, bool) {
+	switch x := v.(type) {
+	case float32:
+		return float64(x), true
+	case float64:
+		return x, true
+	}
+	if i, ok := coerceInt64(v); ok {
+		return float64(i), true
+	}
+	return 0, false
 }
 
 // indexMatchingParen returns the index of the `)` that matches the `(` at

@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"time"
@@ -60,12 +61,82 @@ func decodeMVCCEdgeRecord(data []byte) (mvccEdgeRecord, error) {
 	return record, nil
 }
 
+// MVCCHead is written once per entity, updated on every commit, and
+// consulted on every read. Encoded as a compact binary blob to minimize
+// on-disk footprint and allocation pressure:
+//
+//	[0]        : version byte (currently 1 for compact binary)
+//	[1]        : flags (bit 0 = tombstoned, bit 1 = floor != version)
+//	[2..9]     : Version.CommitTimestamp nanos (big-endian int64 UTC)
+//	[10..17]   : Version.CommitSequence (big-endian uint64)
+//	[18..25]   : FloorVersion.CommitTimestamp nanos (only if flag bit 1)
+//	[26..33]   : FloorVersion.CommitSequence (only if flag bit 1)
+//
+// The common case — a fresh CREATE or an update where floor==version —
+// emits only 18 bytes. Prior msgpack encoding was ~170 bytes per head.
+//
+// Legacy msgpack-encoded heads are still decodable via fallback so
+// existing data directories continue to work across the format change.
+const (
+	mvccHeadCompactVersion byte = 1
+	mvccHeadFlagTombstoned byte = 1 << 0
+	mvccHeadFlagHasFloor   byte = 1 << 1
+
+	mvccHeadCompactMinLen  = 18
+	mvccHeadCompactFullLen = 34
+)
+
 func encodeMVCCHead(head MVCCHead) ([]byte, error) {
 	head = normalizeMVCCHead(head)
-	return msgpack.Marshal(head)
+	flags := byte(0)
+	if head.Tombstoned {
+		flags |= mvccHeadFlagTombstoned
+	}
+	hasFloor := head.FloorVersion.Compare(head.Version) != 0
+	if hasFloor {
+		flags |= mvccHeadFlagHasFloor
+	}
+	size := mvccHeadCompactMinLen
+	if hasFloor {
+		size = mvccHeadCompactFullLen
+	}
+	buf := make([]byte, size)
+	buf[0] = mvccHeadCompactVersion
+	buf[1] = flags
+	binary.BigEndian.PutUint64(buf[2:10], uint64(head.Version.CommitTimestamp.UTC().UnixNano()))
+	binary.BigEndian.PutUint64(buf[10:18], head.Version.CommitSequence)
+	if hasFloor {
+		binary.BigEndian.PutUint64(buf[18:26], uint64(head.FloorVersion.CommitTimestamp.UTC().UnixNano()))
+		binary.BigEndian.PutUint64(buf[26:34], head.FloorVersion.CommitSequence)
+	}
+	return buf, nil
 }
 
 func decodeMVCCHead(data []byte) (MVCCHead, error) {
+	if len(data) >= 1 && data[0] == mvccHeadCompactVersion {
+		if len(data) < mvccHeadCompactMinLen {
+			return MVCCHead{}, fmt.Errorf("mvcc head truncated: %d bytes", len(data))
+		}
+		flags := data[1]
+		head := MVCCHead{
+			Version: MVCCVersion{
+				CommitTimestamp: time.Unix(0, int64(binary.BigEndian.Uint64(data[2:10]))).UTC(),
+				CommitSequence:  binary.BigEndian.Uint64(data[10:18]),
+			},
+			Tombstoned: flags&mvccHeadFlagTombstoned != 0,
+		}
+		if flags&mvccHeadFlagHasFloor != 0 {
+			if len(data) < mvccHeadCompactFullLen {
+				return MVCCHead{}, fmt.Errorf("mvcc head missing floor: %d bytes", len(data))
+			}
+			head.FloorVersion = MVCCVersion{
+				CommitTimestamp: time.Unix(0, int64(binary.BigEndian.Uint64(data[18:26]))).UTC(),
+				CommitSequence:  binary.BigEndian.Uint64(data[26:34]),
+			}
+		}
+		return normalizeMVCCHead(head), nil
+	}
+	// Legacy msgpack fallback for pre-compact data directories.
 	var head MVCCHead
 	if err := util.DecodeMsgpackBytes(data, &head); err != nil {
 		return MVCCHead{}, err
@@ -142,6 +213,178 @@ func (b *BadgerEngine) writeNodeMVCCHeadInTxn(txn *badger.Txn, id NodeID, versio
 		return err
 	}
 	return b.writeNodeMVCCHeadWithFloorInTxn(txn, id, version, tombstoned, floorVersion)
+}
+
+// retentionRetainsHistory reports whether the engine is configured to keep
+// any closed historical MVCC versions. When false, every archival call is a
+// no-op — updates overwrite in place, deletes drop the primary key outright,
+// and there's no write amplification from duplicating bodies into the MVCC
+// keyspace.
+func (b *BadgerEngine) retentionRetainsHistory() bool {
+	return normalizeRetentionPolicy(b.retentionPolicy).RetainsHistory()
+}
+
+// mustArchiveForHistory reports whether an in-flight write MUST archive the
+// superseded body before overwriting the primary key. This is true when
+// either retention is configured OR there's an active snapshot reader that
+// may need to resolve reads at the pre-update version. The latter keeps
+// snapshot isolation correct even when retention is head-only (the
+// archived body stays until pruning fires after all readers drain).
+func (b *BadgerEngine) mustArchiveForHistory() bool {
+	if b.retentionRetainsHistory() {
+		return true
+	}
+	return b.activeMVCCSnapshotReaders.Load() > 0
+}
+
+// archiveNodePrimaryIntoMVCCVersionInTxn moves the current primary-key body
+// into a versioned MVCC record so snapshot reads at prior versions can still
+// resolve it. Callers must invoke this BEFORE overwriting or deleting the
+// primary key. If the primary key doesn't exist yet (brand-new entity, or
+// already archived), this is a no-op. When retention is disabled
+// (MaxVersionsPerKey <= 0) this is also a no-op — callers can invoke
+// unconditionally and pay only a single bool check.
+//
+// Storage-layout invariant (post-refactor): the primary key always holds the
+// CURRENT head body. Historical bodies live at mvccNodeVersionKey(id, v) for
+// each past head version v. A fresh CREATE writes only the primary key + head;
+// UPDATE and DELETE migrate the superseded body here before overwriting.
+func (b *BadgerEngine) archiveNodePrimaryIntoMVCCVersionInTxn(txn *badger.Txn, id NodeID, oldVersion MVCCVersion) error {
+	if !b.mustArchiveForHistory() {
+		return nil
+	}
+	item, err := txn.Get(nodeKey(id))
+	if err == badger.ErrKeyNotFound {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("archiving node %s: reading primary: %w", id, err)
+	}
+	// If a version record already exists at oldVersion (e.g. test seeded both
+	// forms, or legacy data), don't stomp it.
+	if _, existsErr := txn.Get(mvccNodeVersionKey(id, oldVersion)); existsErr == nil {
+		return nil
+	} else if existsErr != badger.ErrKeyNotFound {
+		return fmt.Errorf("archiving node %s: probing version: %w", id, existsErr)
+	}
+	var node *Node
+	if err := item.Value(func(val []byte) error {
+		var decodeErr error
+		node, decodeErr = decodeNodeWithEmbeddings(txn, val, id)
+		return decodeErr
+	}); err != nil {
+		return fmt.Errorf("archiving node %s: decoding primary: %w", id, err)
+	}
+	if node == nil {
+		return nil
+	}
+	return b.writeNodeMVCCVersionInTxn(txn, node, oldVersion)
+}
+
+// archiveEdgePrimaryIntoMVCCVersionInTxn is the edge analogue of
+// archiveNodePrimaryIntoMVCCVersionInTxn. See that function's doc for invariant.
+func (b *BadgerEngine) archiveEdgePrimaryIntoMVCCVersionInTxn(txn *badger.Txn, id EdgeID, oldVersion MVCCVersion) error {
+	if !b.mustArchiveForHistory() {
+		return nil
+	}
+	item, err := txn.Get(edgeKey(id))
+	if err == badger.ErrKeyNotFound {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("archiving edge %s: reading primary: %w", id, err)
+	}
+	if _, existsErr := txn.Get(mvccEdgeVersionKey(id, oldVersion)); existsErr == nil {
+		return nil
+	} else if existsErr != badger.ErrKeyNotFound {
+		return fmt.Errorf("archiving edge %s: probing version: %w", id, existsErr)
+	}
+	var edge *Edge
+	if err := item.Value(func(val []byte) error {
+		var decodeErr error
+		edge, decodeErr = decodeEdge(val)
+		return decodeErr
+	}); err != nil {
+		return fmt.Errorf("archiving edge %s: decoding primary: %w", id, err)
+	}
+	if edge == nil {
+		return nil
+	}
+	edge.ID = id
+	return b.writeEdgeMVCCVersionInTxn(txn, edge, oldVersion)
+}
+
+// archiveNodeOnUpdateInTxn archives the current primary-key body (if any) and
+// then writes the new head. Used by update/delete paths. When no prior head
+// exists (fresh insert via upsert), this is equivalent to writing the head.
+// Becomes a pure no-op when retention is disabled.
+func (b *BadgerEngine) archiveNodeOnUpdateInTxn(txn *badger.Txn, id NodeID) error {
+	if !b.mustArchiveForHistory() {
+		return nil
+	}
+	existing, err := b.loadNodeMVCCHeadInTxn(txn, id)
+	if err == ErrNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if existing.Tombstoned {
+		return nil
+	}
+	return b.archiveNodePrimaryIntoMVCCVersionInTxn(txn, id, existing.Version)
+}
+
+// archiveEdgeOnUpdateInTxn is the edge analogue of archiveNodeOnUpdateInTxn.
+func (b *BadgerEngine) archiveEdgeOnUpdateInTxn(txn *badger.Txn, id EdgeID) error {
+	if !b.mustArchiveForHistory() {
+		return nil
+	}
+	existing, err := b.loadEdgeMVCCHeadInTxn(txn, id)
+	if err == ErrNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if existing.Tombstoned {
+		return nil
+	}
+	return b.archiveEdgePrimaryIntoMVCCVersionInTxn(txn, id, existing.Version)
+}
+
+// archiveNodeBodyInTxn writes a known node body to mvccNodeVersionKey(id,
+// atVersion). Used by the delete path where the caller already has the old
+// body in memory — avoids re-reading the primary key.
+func (b *BadgerEngine) archiveNodeBodyInTxn(txn *badger.Txn, id NodeID, body *Node, atVersion MVCCVersion) error {
+	if !b.mustArchiveForHistory() {
+		return nil
+	}
+	if body == nil {
+		return nil
+	}
+	if _, err := txn.Get(mvccNodeVersionKey(id, atVersion)); err == nil {
+		return nil
+	} else if err != badger.ErrKeyNotFound {
+		return err
+	}
+	return b.writeNodeMVCCVersionInTxn(txn, body, atVersion)
+}
+
+// archiveEdgeBodyInTxn is the edge analogue of archiveNodeBodyInTxn.
+func (b *BadgerEngine) archiveEdgeBodyInTxn(txn *badger.Txn, id EdgeID, body *Edge, atVersion MVCCVersion) error {
+	if !b.mustArchiveForHistory() {
+		return nil
+	}
+	if body == nil {
+		return nil
+	}
+	if _, err := txn.Get(mvccEdgeVersionKey(id, atVersion)); err == nil {
+		return nil
+	} else if err != badger.ErrKeyNotFound {
+		return err
+	}
+	return b.writeEdgeMVCCVersionInTxn(txn, body, atVersion)
 }
 
 func (b *BadgerEngine) writeEdgeMVCCHeadInTxn(txn *badger.Txn, id EdgeID, version MVCCVersion, tombstoned bool) error {
@@ -392,6 +635,9 @@ func (b *BadgerEngine) GetEdgeCurrentHead(id EdgeID) (MVCCHead, error) {
 }
 
 func (b *BadgerEngine) GetNodeLatestVisible(id NodeID) (*Node, error) {
+	// Post-refactor invariant: the primary nodeKey holds the current head
+	// body. GetNode already applies decay filtering. If the primary-key
+	// read succeeds, we're done — no need to resolve a version record.
 	if node, err := b.GetNode(id); err == nil {
 		return node, nil
 	}
@@ -404,17 +650,12 @@ func (b *BadgerEngine) GetNodeLatestVisible(id NodeID) (*Node, error) {
 		if head.Tombstoned {
 			return ErrNotFound
 		}
-		record, err := b.loadNodeMVCCRecordExactInTxn(txn, id, head.Version)
+		// Head says the node lives but GetNode failed or was filtered —
+		// fall back to version records (e.g. pre-refactor data where the
+		// primary key is absent but a version record exists).
+		record, _, err := b.loadNodeMVCCRecordAtOrBeforeInTxn(txn, id, head.Version)
 		if err != nil {
-			if err == ErrNotFound {
-				fallback, _, fallbackErr := b.loadNodeMVCCRecordAtOrBeforeInTxn(txn, id, head.Version)
-				if fallbackErr != nil {
-					return fallbackErr
-				}
-				record = fallback
-			} else {
-				return err
-			}
+			return err
 		}
 		if record.Tombstoned || record.Node == nil {
 			return ErrNotFound
@@ -442,6 +683,40 @@ func (b *BadgerEngine) GetNodeVisibleAt(id NodeID, version MVCCVersion) (*Node, 
 			return err
 		}
 		if version.Compare(head.FloorVersion) < 0 {
+			return ErrNotFound
+		}
+
+		// Fast path: the caller is reading at or after the current head
+		// version and the entity is not tombstoned — the primary key IS
+		// the current head body. This avoids the extra version-record
+		// read and halves write amplification on the commit path.
+		if version.Compare(head.Version) >= 0 && !head.Tombstoned {
+			item, getErr := txn.Get(nodeKey(id))
+			if getErr == nil {
+				return item.Value(func(val []byte) error {
+					decoded, decodeErr := decodeNodeWithEmbeddings(txn, val, id)
+					if decodeErr != nil {
+						return decodeErr
+					}
+					if decoded == nil {
+						return ErrNotFound
+					}
+					node = decoded
+					if b.filterNodeByDecay(node, DecayScoringTime()) {
+						node = nil
+						return ErrNotFound
+					}
+					return nil
+				})
+			}
+			if getErr != badger.ErrKeyNotFound {
+				return getErr
+			}
+			// Primary key missing despite head claiming live — fall
+			// through to version-record resolution so we can still
+			// serve pre-refactor data that lacks a primary-key body.
+		}
+		if head.Tombstoned && version.Compare(head.Version) >= 0 {
 			return ErrNotFound
 		}
 
@@ -488,17 +763,12 @@ func (b *BadgerEngine) GetEdgeLatestVisible(id EdgeID) (*Edge, error) {
 		if head.Tombstoned {
 			return ErrNotFound
 		}
-		record, err := b.loadEdgeMVCCRecordExactInTxn(txn, id, head.Version)
+		// Fallback path only — primary-key read already attempted via
+		// GetEdge above. See GetNodeLatestVisible for the node analogue
+		// and the post-refactor storage-layout invariant.
+		record, _, err := b.loadEdgeMVCCRecordAtOrBeforeInTxn(txn, id, head.Version)
 		if err != nil {
-			if err == ErrNotFound {
-				fallback, _, fallbackErr := b.loadEdgeMVCCRecordAtOrBeforeInTxn(txn, id, head.Version)
-				if fallbackErr != nil {
-					return fallbackErr
-				}
-				record = fallback
-			} else {
-				return err
-			}
+			return err
 		}
 		if record.Tombstoned || record.Edge == nil {
 			return ErrNotFound
@@ -526,6 +796,37 @@ func (b *BadgerEngine) GetEdgeVisibleAt(id EdgeID, version MVCCVersion) (*Edge, 
 			return err
 		}
 		if version.Compare(head.FloorVersion) < 0 {
+			return ErrNotFound
+		}
+
+		// Fast path: current head is visible and entity is live — read
+		// straight from the primary key. See GetNodeVisibleAt for the
+		// node analogue and the post-refactor invariant.
+		if version.Compare(head.Version) >= 0 && !head.Tombstoned {
+			item, getErr := txn.Get(edgeKey(id))
+			if getErr == nil {
+				return item.Value(func(val []byte) error {
+					decoded, decodeErr := decodeEdge(val)
+					if decodeErr != nil {
+						return decodeErr
+					}
+					if decoded == nil {
+						return ErrNotFound
+					}
+					decoded.ID = id
+					edge = decoded
+					if b.filterEdgeByDecay(edge, DecayScoringTime()) {
+						edge = nil
+						return ErrNotFound
+					}
+					return nil
+				})
+			}
+			if getErr != badger.ErrKeyNotFound {
+				return getErr
+			}
+		}
+		if head.Tombstoned && version.Compare(head.Version) >= 0 {
 			return ErrNotFound
 		}
 
@@ -571,123 +872,169 @@ func (b *BadgerEngine) BatchGetNodesLatestVisible(ids []NodeID) (map[NodeID]*Nod
 }
 
 func (b *BadgerEngine) iterateNodesVisibleAtInTxn(txn *badger.Txn, version MVCCVersion, yield func(*Node) error) error {
+	// Post-refactor: we walk the head keyspace (the definitive list of
+	// live node IDs) and resolve each ID to a body. If the request is at
+	// or after the current head version and the entity is live, the body
+	// comes from the primary nodeKey. Otherwise we fall back to historic
+	// mvccNodeVersionKey records (only present when retention > 0).
+	headPrefix := []byte{prefixMVCCNodeHead}
 	opts := badger.DefaultIteratorOptions
-	opts.Prefix = []byte{prefixMVCCNode}
+	opts.Prefix = headPrefix
 	opts.PrefetchValues = true
 	it := txn.NewIterator(opts)
 	defer it.Close()
 
 	nowNanos := DecayScoringTime()
-	var currentID NodeID
-	var candidate *Node
-	var tombstoned bool
-	var haveCurrent bool
-	flush := func() error {
-		if !haveCurrent || tombstoned || candidate == nil {
-			candidate = nil
-			tombstoned = false
-			haveCurrent = false
-			return nil
-		}
-		node := copyNode(candidate)
-		candidate = nil
-		tombstoned = false
-		haveCurrent = false
-		if b.filterNodeByDecay(node, nowNanos) {
-			return nil
-		}
-		return yield(node)
-	}
-
 	for it.Rewind(); it.Valid(); it.Next() {
 		key := append([]byte(nil), it.Item().Key()...)
-		nodeID, recordVersion, err := extractNodeIDAndMVCCVersionFromVersionKey(key)
-		if err != nil {
-			return err
-		}
-		if haveCurrent && nodeID != currentID {
-			if err := flush(); err != nil {
-				return err
-			}
-		}
-		currentID = nodeID
-		haveCurrent = true
-		if recordVersion.Compare(version) > 0 {
+		if len(key) <= 1 {
 			continue
 		}
+		nodeID := NodeID(key[1:])
+		var head MVCCHead
 		if err := it.Item().Value(func(val []byte) error {
-			record, decodeErr := decodeMVCCNodeRecord(val)
+			decoded, decodeErr := decodeMVCCHead(val)
 			if decodeErr != nil {
 				return decodeErr
 			}
-			tombstoned = record.Tombstoned
-			candidate = record.Node
+			head = decoded
 			return nil
 		}); err != nil {
 			return err
 		}
+		if version.Compare(head.FloorVersion) < 0 {
+			continue
+		}
+		var body *Node
+		if version.Compare(head.Version) >= 0 {
+			if head.Tombstoned {
+				continue
+			}
+			item, getErr := txn.Get(nodeKey(nodeID))
+			if getErr == badger.ErrKeyNotFound {
+				// Primary missing — fall through to version-record lookup.
+			} else if getErr != nil {
+				return getErr
+			} else {
+				if err := item.Value(func(val []byte) error {
+					decoded, decodeErr := decodeNodeWithEmbeddings(txn, val, nodeID)
+					if decodeErr != nil {
+						return decodeErr
+					}
+					body = decoded
+					return nil
+				}); err != nil {
+					return err
+				}
+			}
+		}
+		if body == nil {
+			record, _, err := b.loadNodeMVCCRecordAtOrBeforeInTxn(txn, nodeID, version)
+			if err == ErrNotFound {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if record.Tombstoned || record.Node == nil {
+				continue
+			}
+			body = copyNode(record.Node)
+		}
+		if body == nil {
+			continue
+		}
+		if b.filterNodeByDecay(body, nowNanos) {
+			continue
+		}
+		if err := yield(body); err != nil {
+			return err
+		}
 	}
-	return flush()
+	return nil
 }
 
 func (b *BadgerEngine) iterateEdgesVisibleAtInTxn(txn *badger.Txn, version MVCCVersion, yield func(*Edge) error) error {
+	// See iterateNodesVisibleAtInTxn for the walk-heads pattern and why
+	// we can't just scan the version prefix post-refactor.
+	headPrefix := []byte{prefixMVCCEdgeHead}
 	opts := badger.DefaultIteratorOptions
-	opts.Prefix = []byte{prefixMVCCEdge}
+	opts.Prefix = headPrefix
 	opts.PrefetchValues = true
 	it := txn.NewIterator(opts)
 	defer it.Close()
 
 	nowNanos := DecayScoringTime()
-	var currentID EdgeID
-	var candidate *Edge
-	var tombstoned bool
-	var haveCurrent bool
-	flush := func() error {
-		if !haveCurrent || tombstoned || candidate == nil {
-			candidate = nil
-			tombstoned = false
-			haveCurrent = false
-			return nil
-		}
-		edge := copyEdge(candidate)
-		candidate = nil
-		tombstoned = false
-		haveCurrent = false
-		if b.filterEdgeByDecay(edge, nowNanos) {
-			return nil
-		}
-		return yield(edge)
-	}
-
 	for it.Rewind(); it.Valid(); it.Next() {
 		key := append([]byte(nil), it.Item().Key()...)
-		edgeID, recordVersion, err := extractEdgeIDAndMVCCVersionFromVersionKey(key)
-		if err != nil {
-			return err
-		}
-		if haveCurrent && edgeID != currentID {
-			if err := flush(); err != nil {
-				return err
-			}
-		}
-		currentID = edgeID
-		haveCurrent = true
-		if recordVersion.Compare(version) > 0 {
+		if len(key) <= 1 {
 			continue
 		}
+		edgeID := EdgeID(key[1:])
+		var head MVCCHead
 		if err := it.Item().Value(func(val []byte) error {
-			record, decodeErr := decodeMVCCEdgeRecord(val)
+			decoded, decodeErr := decodeMVCCHead(val)
 			if decodeErr != nil {
 				return decodeErr
 			}
-			tombstoned = record.Tombstoned
-			candidate = record.Edge
+			head = decoded
 			return nil
 		}); err != nil {
 			return err
 		}
+		if version.Compare(head.FloorVersion) < 0 {
+			continue
+		}
+		var body *Edge
+		if version.Compare(head.Version) >= 0 {
+			if head.Tombstoned {
+				continue
+			}
+			item, getErr := txn.Get(edgeKey(edgeID))
+			if getErr == badger.ErrKeyNotFound {
+				// Primary missing — fall through to version-record lookup.
+			} else if getErr != nil {
+				return getErr
+			} else {
+				if err := item.Value(func(val []byte) error {
+					decoded, decodeErr := decodeEdge(val)
+					if decodeErr != nil {
+						return decodeErr
+					}
+					if decoded != nil {
+						decoded.ID = edgeID
+					}
+					body = decoded
+					return nil
+				}); err != nil {
+					return err
+				}
+			}
+		}
+		if body == nil {
+			record, _, err := b.loadEdgeMVCCRecordAtOrBeforeInTxn(txn, edgeID, version)
+			if err == ErrNotFound {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if record.Tombstoned || record.Edge == nil {
+				continue
+			}
+			body = copyEdge(record.Edge)
+		}
+		if body == nil {
+			continue
+		}
+		if b.filterEdgeByDecay(body, nowNanos) {
+			continue
+		}
+		if err := yield(body); err != nil {
+			return err
+		}
 	}
-	return flush()
+	return nil
 }
 
 func (b *BadgerEngine) GetNodesByLabelVisibleAt(label string, version MVCCVersion) ([]*Node, error) {
@@ -804,20 +1151,54 @@ func (b *BadgerEngine) IterateLatestVisibleEdges(yield func(*Edge) error) error 
 	return nil
 }
 
+// materializeMVCCCommitInTxn writes MVCC head metadata for every committed
+// operation. Post-refactor invariant: primary keys (nodeKey/edgeKey) hold
+// the current head body; historical bodies live only at mvccVersionKey for
+// the version they were superseded at. This function stores only heads on
+// the create path, and archives op.OldNode / op.OldEdge into a version
+// record on update/delete (gated on retentionRetainsHistory). No-op arcs
+// vanish when the engine runs head-only retention — the common case.
 func (b *BadgerEngine) materializeMVCCCommitInTxn(txn *badger.Txn, version MVCCVersion, operations []Operation) error {
+	// Archive superseded bodies when retention policy demands history OR
+	// when an active snapshot reader needs to resolve the old version —
+	// snapshot isolation must hold regardless of retention config.
+	retainsHistory := b.mustArchiveForHistory()
 	for _, op := range operations {
 		switch op.Type {
-		case OpCreateNode, OpUpdateNode:
+		case OpCreateNode:
 			if op.Node == nil {
 				continue
 			}
-			if err := b.writeNodeMVCCVersionInTxn(txn, op.Node, version); err != nil {
+			if err := b.writeNodeMVCCHeadInTxn(txn, op.Node.ID, version, false); err != nil {
 				return err
+			}
+		case OpUpdateNode:
+			if op.Node == nil {
+				continue
+			}
+			if retainsHistory && op.OldNode != nil {
+				if head, headErr := b.loadNodeMVCCHeadInTxn(txn, op.Node.ID); headErr == nil && !head.Tombstoned {
+					if err := b.archiveNodeBodyInTxn(txn, op.Node.ID, op.OldNode, head.Version); err != nil {
+						return err
+					}
+				} else if headErr != nil && headErr != ErrNotFound {
+					return headErr
+				}
 			}
 			if err := b.writeNodeMVCCHeadInTxn(txn, op.Node.ID, version, false); err != nil {
 				return err
 			}
 		case OpDeleteNode:
+			if retainsHistory && op.OldNode != nil {
+				if head, headErr := b.loadNodeMVCCHeadInTxn(txn, op.NodeID); headErr == nil && !head.Tombstoned {
+					if err := b.archiveNodeBodyInTxn(txn, op.NodeID, op.OldNode, head.Version); err != nil {
+						return err
+					}
+				} else if headErr != nil && headErr != ErrNotFound {
+					return headErr
+				}
+			}
+			// Tombstone marker (tiny, no body) preserves delete semantics.
 			if err := b.writeNodeMVCCTombstoneInTxn(txn, op.NodeID, version); err != nil {
 				return err
 			}
@@ -832,17 +1213,40 @@ func (b *BadgerEngine) materializeMVCCCommitInTxn(txn *badger.Txn, version MVCCV
 					return err
 				}
 			}
-		case OpCreateEdge, OpUpdateEdge:
+		case OpCreateEdge:
 			if op.Edge == nil {
 				continue
 			}
-			if err := b.writeEdgeMVCCVersionInTxn(txn, op.Edge, version); err != nil {
+			if err := b.writeEdgeMVCCHeadInTxn(txn, op.Edge.ID, version, false); err != nil {
 				return err
+			}
+		case OpUpdateEdge:
+			if op.Edge == nil {
+				continue
+			}
+			if retainsHistory && op.OldEdge != nil {
+				if head, headErr := b.loadEdgeMVCCHeadInTxn(txn, op.Edge.ID); headErr == nil && !head.Tombstoned {
+					if err := b.archiveEdgeBodyInTxn(txn, op.Edge.ID, op.OldEdge, head.Version); err != nil {
+						return err
+					}
+				} else if headErr != nil && headErr != ErrNotFound {
+					return headErr
+				}
 			}
 			if err := b.writeEdgeMVCCHeadInTxn(txn, op.Edge.ID, version, false); err != nil {
 				return err
 			}
 		case OpDeleteEdge:
+			if retainsHistory && op.OldEdge != nil {
+				if head, headErr := b.loadEdgeMVCCHeadInTxn(txn, op.EdgeID); headErr == nil && !head.Tombstoned {
+					if err := b.archiveEdgeBodyInTxn(txn, op.EdgeID, op.OldEdge, head.Version); err != nil {
+						return err
+					}
+				} else if headErr != nil && headErr != ErrNotFound {
+					return headErr
+				}
+			}
+			// Tombstone marker preserves delete semantics.
 			if err := b.writeEdgeMVCCTombstoneInTxn(txn, op.EdgeID, version); err != nil {
 				return err
 			}
@@ -1205,9 +1609,8 @@ func (b *BadgerEngine) applyNodeBootstrapBatch(nodes []*Node) error {
 			if err != nil {
 				return err
 			}
-			if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
-				return err
-			}
+			// Post-refactor: primary key IS the head body. Bootstrap
+			// only needs to seed the head pointing at a fresh version.
 			if err := b.writeNodeMVCCHeadInTxn(txn, node.ID, version, false); err != nil {
 				return err
 			}
@@ -1295,9 +1698,8 @@ func (b *BadgerEngine) applyEdgeBootstrapBatch(edges []*Edge) error {
 			if err != nil {
 				return err
 			}
-			if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
-				return err
-			}
+			// Post-refactor: primary key IS the head body. Bootstrap
+			// only seeds the head pointing at a fresh version.
 			if err := b.writeEdgeMVCCHeadInTxn(txn, edge.ID, version, false); err != nil {
 				return err
 			}
@@ -1335,12 +1737,11 @@ func (b *BadgerEngine) bootstrapNodeMVCCFromCurrentStateInTxn(txn *badger.Txn) e
 		if err != nil {
 			return err
 		}
-		if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
-			return err
-		}
+		// Primary key already holds the body — just seed the head.
 		if err := b.writeNodeMVCCHeadInTxn(txn, id, version, false); err != nil {
 			return err
 		}
+		_ = node // keep decoded copy for any future hooks
 	}
 	return nil
 }
@@ -1374,12 +1775,11 @@ func (b *BadgerEngine) bootstrapEdgeMVCCFromCurrentStateInTxn(txn *badger.Txn) e
 		if err != nil {
 			return err
 		}
-		if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
-			return err
-		}
+		// Primary key already holds the body — just seed the head.
 		if err := b.writeEdgeMVCCHeadInTxn(txn, id, version, false); err != nil {
 			return err
 		}
+		_ = edge
 	}
 	return nil
 }
@@ -1464,7 +1864,20 @@ func (b *BadgerEngine) pruneMVCCKeyspaceInTxn(ctx context.Context, txn *badger.T
 			return nil
 		}
 
-		if len(currentGroup) <= 1 {
+		// headInGroup is true when the current head version has a
+		// matching record in the version keyspace. Post-refactor this
+		// is no longer guaranteed — the live body lives at the primary
+		// key and the version keyspace holds only archived predecessors
+		// (plus tombstone markers on delete).
+		headInGroup := false
+		for i := range currentGroup {
+			if currentGroup[i].version.Compare(head.Version) == 0 {
+				headInGroup = true
+				break
+			}
+		}
+
+		if len(currentGroup) <= 1 && headInGroup {
 			if err := b.writeMVCCHeadForLogicalKeyInTxn(txn, currentGroup[0].logical, head.Version, head.Tombstoned, currentGroup[0].version); err != nil {
 				return err
 			}
@@ -1473,7 +1886,15 @@ func (b *BadgerEngine) pruneMVCCKeyspaceInTxn(ctx context.Context, txn *badger.T
 		}
 
 		keepHistorical := opts.MaxVersionsPerKey
-		maxDeleteIndex := len(currentGroup) - 1
+		// maxDeleteIndex bounds the range of entries eligible for
+		// deletion. When the head IS in the group, the last entry is
+		// the head (never delete it here). When the head is NOT in the
+		// group (post-refactor head-only or head-only-plus-archives),
+		// every entry is historical and eligible.
+		maxDeleteIndex := len(currentGroup)
+		if headInGroup {
+			maxDeleteIndex = len(currentGroup) - 1
+		}
 		retainFrom := maxDeleteIndex - keepHistorical
 		if retainFrom < 0 {
 			retainFrom = 0

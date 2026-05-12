@@ -2444,22 +2444,21 @@ func (w *transactionStorageWrapper) BulkCreateNodes(nodes []*storage.Node) error
 }
 
 func (w *transactionStorageWrapper) BulkCreateEdges(edges []*storage.Edge) error {
-	for _, edge := range edges {
-		if w.namespace == "" {
-			if err := w.tx.CreateEdge(edge); err != nil {
-				return err
-			}
-			continue
-		}
-		namespaced := storage.CopyEdge(edge)
-		namespaced.ID = w.prefixEdgeID(edge.ID)
-		namespaced.StartNode = w.prefixNodeID(edge.StartNode)
-		namespaced.EndNode = w.prefixNodeID(edge.EndNode)
-		if err := w.tx.CreateEdge(namespaced); err != nil {
-			return err
-		}
+	if len(edges) == 0 {
+		return nil
 	}
-	return nil
+	if w.namespace == "" {
+		return w.tx.BulkCreateEdges(edges)
+	}
+	namespaced := make([]*storage.Edge, len(edges))
+	for i, edge := range edges {
+		cp := storage.CopyEdge(edge)
+		cp.ID = w.prefixEdgeID(edge.ID)
+		cp.StartNode = w.prefixNodeID(edge.StartNode)
+		cp.EndNode = w.prefixNodeID(edge.EndNode)
+		namespaced[i] = cp
+	}
+	return w.tx.BulkCreateEdges(namespaced)
 }
 
 func (w *transactionStorageWrapper) BulkDeleteNodes(ids []storage.NodeID) error {

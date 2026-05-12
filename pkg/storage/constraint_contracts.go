@@ -229,6 +229,16 @@ func (sm *SchemaManager) GetAllConstraintContracts() []ConstraintContract {
 	return contracts
 }
 
+// HasAnyConstraintContract reports whether this schema has at least one
+// constraint contract registered. Callers use it to short-circuit work in
+// the per-commit validator (the expensive adjacency walk is pointless when
+// no contract exists).
+func (sm *SchemaManager) HasAnyConstraintContract() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return len(sm.constraintContracts) > 0
+}
+
 func (sm *SchemaManager) GetConstraintContractsForTarget(entityType ConstraintEntityType, labelOrType string) []ConstraintContract {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -1110,6 +1120,23 @@ func countMatchingPatternEdgesEngine(engine Engine, node *Node, pattern contract
 }
 
 func (tx *BadgerTransaction) validateConstraintContracts() error {
+	// Early-out: if NO namespace referenced by the transaction has any
+	// constraint contracts declared, there is nothing to validate and we
+	// can skip the entire expensive adjacency-walk. Previously we always
+	// called currentAdjacentEdgesLocked(node.ID) for every affected node,
+	// which does a per-node Badger read even when no contract needed the
+	// edges. That accounted for the CPU time stuck in skl.findNear during
+	// bulk seed commits — see the bulk-write profile in RESEARCH notes.
+	//
+	// We check each namespace that the transaction touches (derived from
+	// node/edge ID prefixes) and short-circuit when all of them report
+	// zero contracts. Constraint contracts are rare in practice —
+	// typical workloads declare only unique constraints + range indexes,
+	// not boolean predicates.
+	if !tx.transactionTouchesConstraintContracts() {
+		return nil
+	}
+
 	affectedNodes := make(map[NodeID]struct{})
 	affectedEdges := make(map[EdgeID]struct{})
 
@@ -1163,6 +1190,50 @@ func (tx *BadgerTransaction) validateConstraintContracts() error {
 	}
 
 	return nil
+}
+
+// transactionTouchesConstraintContracts reports whether any namespace
+// referenced by the pending transaction has at least one constraint
+// contract declared. When false, validateConstraintContracts has no work
+// to do and can short-circuit.
+func (tx *BadgerTransaction) transactionTouchesConstraintContracts() bool {
+	namespaces := make(map[string]struct{}, 2)
+	for id := range tx.pendingNodes {
+		if ns, ok := constraintContractNamespaceFromID(string(id)); ok {
+			namespaces[ns] = struct{}{}
+		}
+	}
+	for _, edge := range tx.pendingEdges {
+		if ns, ok := constraintContractNamespaceFromID(string(edge.ID)); ok {
+			namespaces[ns] = struct{}{}
+		}
+	}
+	for _, op := range tx.operations {
+		if op.OldEdge != nil {
+			if ns, ok := constraintContractNamespaceFromID(string(op.OldEdge.ID)); ok {
+				namespaces[ns] = struct{}{}
+			}
+		}
+	}
+	for ns := range namespaces {
+		schema := tx.engine.GetSchemaForNamespace(ns)
+		if schema == nil {
+			continue
+		}
+		if schema.HasAnyConstraintContract() {
+			return true
+		}
+	}
+	return false
+}
+
+// constraintContractNamespaceFromID returns the namespace encoded in a
+// prefixed ID (e.g. "nornic:abc" → "nornic"). Returns false when the ID
+// has no recognisable prefix, matching constraintContractNamespaceForNode's
+// behaviour for that edge case.
+func constraintContractNamespaceFromID(id string) (string, bool) {
+	ns, _, ok := ParseDatabasePrefix(id)
+	return ns, ok
 }
 
 func (tx *BadgerTransaction) validateConstraintContractsForNodeLocked(node *Node) error {

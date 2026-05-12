@@ -339,6 +339,51 @@ def render_single_report(run: dict, iterations: int, products: int, orders: int)
     lines.append(f"- **Overall throughput:** {fmt_num(r.get('overall_ops_per_second', 0))} ops/sec")
     lines.append(f"- **Total benchmark wall-clock (sampled):** {fmt_num(wall, 3)} s")
     lines.append("")
+
+    # ---- Correctness (per-engine) ----
+    lines.append("## Correctness")
+    lines.append("")
+    sc = r.get("seed_counts", {})
+    if sc:
+        lines.append("Seed counts (from the database's own `count(...)` queries):")
+        lines.append("")
+        lines.append("| Entity | Count |")
+        lines.append("|---|---:|")
+        for label_txt, key in [
+            ("Category", "categories"),
+            ("Supplier", "suppliers"),
+            ("Customer", "customers"),
+            ("Product", "products"),
+            ("Order", "orders"),
+            ("PART_OF edges", "part_of_edges"),
+            ("SUPPLIES edges", "supplies_edges"),
+            ("PURCHASED edges", "purchased_edges"),
+            ("ORDERS edges", "orders_edges"),
+        ]:
+            lines.append(f"| {label_txt} | {sc.get(key, 0):,} |")
+        lines.append("")
+    lines.append("Per-query result fingerprints (SHA-256 over canonicalised rows):")
+    lines.append("")
+    lines.append("| Query | Rows | Hash | Stable across iterations |")
+    lines.append("|---|---:|---|:---:|")
+    for q in r.get("queries", []):
+        ok = q.get("correctness_ok", True)
+        lines.append(
+            f"| `{q['name']}` | {q.get('row_count', 0):,} | "
+            f"`{q.get('result_hash', '')[:16]}…` | "
+            f"{'✅' if ok else '❌ UNSTABLE'} |"
+        )
+    lines.append("")
+    errs = r.get("correctness_errors") or []
+    if errs:
+        lines.append("> ⚠️ **Correctness errors in this run:**")
+        for e in errs:
+            lines.append(f"> - {e}")
+        lines.append("")
+    else:
+        lines.append("✅ No intra-run correctness errors.")
+        lines.append("")
+
     lines.append("## Power Consumption")
     lines.append("")
     if p.get("samples", 0) > 0:
@@ -476,6 +521,103 @@ def render_comparison(runs: dict[str, dict], iterations: int, products: int, ord
             f"{fmt_num(nq['ops_per_second'])} | {fmt_num(mq['ops_per_second'])} |"
         )
     lines.append("")
+
+    # ------------------------------------------------------------------
+    # Correctness section — cross-engine diff of seed counts + per-query
+    # result fingerprints. This is the defence against "hey look how fast
+    # Engine X is" numbers that are actually running against an empty or
+    # partially-seeded graph.
+    # ------------------------------------------------------------------
+    lines.append("## Correctness")
+    lines.append("")
+
+    n_seed = n_r.get("seed_counts", {})
+    m_seed = m_r.get("seed_counts", {})
+    seed_mismatches = []
+    lines.append("**Seed verification.** Post-seed counts reported by each database (via `MATCH (n:Label) RETURN count(n)` and equivalent edge queries).")
+    lines.append("")
+    lines.append("| Entity | NornicDB | Neo4j | Match |")
+    lines.append("|---|---:|---:|:---:|")
+    seed_rows = [
+        ("Category", "categories"),
+        ("Supplier", "suppliers"),
+        ("Customer", "customers"),
+        ("Product", "products"),
+        ("Order", "orders"),
+        ("PART_OF", "part_of_edges"),
+        ("SUPPLIES", "supplies_edges"),
+        ("PURCHASED", "purchased_edges"),
+        ("ORDERS", "orders_edges"),
+    ]
+    for label_txt, key in seed_rows:
+        nv = n_seed.get(key, 0)
+        mv = m_seed.get(key, 0)
+        mark = "✅" if nv == mv else "❌"
+        if nv != mv:
+            seed_mismatches.append(f"{label_txt}: NornicDB={nv} Neo4j={mv}")
+        lines.append(f"| {label_txt} | {nv:,} | {mv:,} | {mark} |")
+    lines.append("")
+
+    lines.append("**Per-query result fingerprints.** Each engine runs the query on the first (warmup) iteration, canonicalises the full result set, and hashes it with SHA-256. A matching row_count + matching hash means the engines returned the same data.")
+    lines.append("")
+    lines.append("| Query | NornicDB rows | Neo4j rows | NornicDB hash | Neo4j hash | Match |")
+    lines.append("|---|---:|---:|---|---|:---:|")
+    fingerprint_mismatches = []
+    for name in nornic_by_name:
+        nq = nornic_by_name[name]
+        mq = neo4j_by_name.get(name, {})
+        n_rows = nq.get("row_count", -1)
+        m_rows = mq.get("row_count", -1)
+        n_hash = nq.get("result_hash", "")
+        m_hash = mq.get("result_hash", "")
+        match = (n_rows == m_rows) and (n_hash == m_hash)
+        if not match:
+            reason = []
+            if n_rows != m_rows:
+                reason.append(f"rows {n_rows}≠{m_rows}")
+            if n_hash != m_hash:
+                reason.append("hash differs")
+            fingerprint_mismatches.append(f"{name}: {', '.join(reason)}")
+        lines.append(
+            f"| `{name}` | {n_rows:,} | {m_rows:,} | `{n_hash[:12]}…` | `{m_hash[:12]}…` | {'✅' if match else '❌'} |"
+        )
+    lines.append("")
+
+    # Per-run intra-iteration stability and collected errors.
+    n_errs = n_r.get("correctness_errors") or []
+    m_errs = m_r.get("correctness_errors") or []
+    lines.append("**Intra-run stability.** Every iteration of each query re-fingerprints its result set; a mismatch within a single engine's run is flagged below.")
+    lines.append("")
+    if not n_errs and not m_errs:
+        lines.append("- No intra-run mismatches on either engine.")
+    else:
+        if n_errs:
+            lines.append("- NornicDB:")
+            for e in n_errs:
+                lines.append(f"  - {e}")
+        if m_errs:
+            lines.append("- Neo4j:")
+            for e in m_errs:
+                lines.append(f"  - {e}")
+    lines.append("")
+
+    if seed_mismatches or fingerprint_mismatches:
+        lines.append("> ⚠️ **Correctness mismatches detected.** Latency numbers below should not be compared until these are investigated.")
+        if seed_mismatches:
+            lines.append(">")
+            lines.append("> Seed count mismatches:")
+            for msg in seed_mismatches:
+                lines.append(f"> - {msg}")
+        if fingerprint_mismatches:
+            lines.append(">")
+            lines.append("> Result-set mismatches:")
+            for msg in fingerprint_mismatches:
+                lines.append(f"> - {msg}")
+        lines.append("")
+    else:
+        lines.append("✅ **All correctness checks passed** — both engines seeded identically and returned identical result sets (by row count and canonical SHA-256 fingerprint) for every benchmark query.")
+        lines.append("")
+
     lines.append("## Storage")
     lines.append("")
     n_t = n["storage"]["totals"]

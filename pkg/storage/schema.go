@@ -1718,6 +1718,22 @@ func (sm *SchemaManager) HasPropertyIndex(label, property string) bool {
 	return exists
 }
 
+// HasAnyPropertyIndexForLabel reports whether ANY property index is
+// declared against the given label. Used by storage-side index
+// maintenance to short-circuit per-property lookups when no index touches
+// the label at all.
+func (sm *SchemaManager) HasAnyPropertyIndexForLabel(label string) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	prefix := label + ":"
+	for key := range sm.propertyIndexes {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
+}
+
 // PropertyIndexLookup looks up node IDs by property value using an index.
 // Returns nil if no index exists for the label/property.
 func (sm *SchemaManager) PropertyIndexLookup(label, property string, value interface{}) []NodeID {

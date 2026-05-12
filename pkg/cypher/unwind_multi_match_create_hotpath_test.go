@@ -23,6 +23,21 @@ import (
 func seedCategoriesAndSuppliers(t *testing.T, exec *cypher.StorageExecutor, catN, supN int) {
 	t.Helper()
 	ctx := context.Background()
+	// The UnwindMultiMatchCreateBatch fast path is deterministic: it
+	// REQUIRES a schema property index for every MATCH-side (label, prop)
+	// pair. Declaring indexes up front matches the production seeder's
+	// DDL-first ordering and keeps the test aligned with the one contract
+	// the fast path relies on.
+	for _, ddl := range []string{
+		"CREATE INDEX category_id IF NOT EXISTS FOR (n:Category) ON (n.categoryID)",
+		"CREATE INDEX supplier_id IF NOT EXISTS FOR (n:Supplier) ON (n.supplierID)",
+		"CREATE INDEX customer_id IF NOT EXISTS FOR (n:Customer) ON (n.customerID)",
+		"CREATE INDEX product_id IF NOT EXISTS FOR (n:Product) ON (n.productID)",
+		"CREATE INDEX order_id IF NOT EXISTS FOR (n:Order) ON (n.orderID)",
+	} {
+		_, err := exec.Execute(ctx, ddl, nil)
+		require.NoError(t, err, "seed DDL: %s", ddl)
+	}
 	for i := 1; i <= catN; i++ {
 		_, err := exec.Execute(ctx, fmt.Sprintf(
 			`CREATE (:Category {categoryID: %d, categoryName: 'C%d', description: 'desc'})`, i, i), nil)
@@ -89,6 +104,10 @@ CREATE (s)-[:SUPPLIES]->(p)`
 func TestNorthwindSeeder_OrdersPass1HitsUnwindMultiMatchCreate(t *testing.T) {
 	exec := testutil.SetupTestExecutor(t)
 	ctx := context.Background()
+	// The fast path REQUIRES an index on the MATCH-side property.
+	_, err := exec.Execute(ctx,
+		"CREATE INDEX customer_id IF NOT EXISTS FOR (n:Customer) ON (n.customerID)", nil)
+	require.NoError(t, err)
 	for i := 1; i <= 8; i++ {
 		_, err := exec.Execute(ctx, fmt.Sprintf(
 			`CREATE (:Customer {customerID: %d, companyName: 'Cust%d'})`, i, i), nil)
@@ -113,7 +132,7 @@ MATCH (c:Customer {customerID: row.customerID})
 CREATE (o:Order {orderID: row.orderID, shipCity: row.shipCity, shipCountry: row.shipCountry, orderDate: row.orderDate, notes: row.notes})
 CREATE (c)-[:PURCHASED]->(o)`
 
-	_, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	_, err = exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
 	require.NoError(t, err)
 	trace := exec.LastHotPathTrace()
 	require.True(t, trace.UnwindMultiMatchCreateBatch,
@@ -133,6 +152,14 @@ CREATE (c)-[:PURCHASED]->(o)`
 func TestNorthwindSeeder_OrdersPass2HitsUnwindMultiMatchCreate(t *testing.T) {
 	exec := testutil.SetupTestExecutor(t)
 	ctx := context.Background()
+	// The fast path REQUIRES indexes on both MATCH-side properties.
+	for _, ddl := range []string{
+		"CREATE INDEX order_id IF NOT EXISTS FOR (n:Order) ON (n.orderID)",
+		"CREATE INDEX product_id IF NOT EXISTS FOR (n:Product) ON (n.productID)",
+	} {
+		_, err := exec.Execute(ctx, ddl, nil)
+		require.NoError(t, err, "seed DDL: %s", ddl)
+	}
 	for i := 1; i <= 10; i++ {
 		_, err := exec.Execute(ctx, fmt.Sprintf(
 			`CREATE (:Order {orderID: %d, shipCity: 'x', shipCountry: 'US', orderDate: 0, notes: 'n'})`, 10000+i), nil)

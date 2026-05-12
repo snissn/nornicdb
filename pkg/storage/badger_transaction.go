@@ -509,6 +509,18 @@ func (tx *BadgerTransaction) deleteNodeBuffered(nodeID NodeID, oldNode *Node) (e
 		}
 	}
 
+	// Archive the node body at its current head version BEFORE we
+	// buffer the primary-key delete. Gated internally on
+	// mustArchiveForHistory — no-op when retention is head-only AND no
+	// snapshot reader needs the pre-delete view.
+	if head, headErr := tx.engine.loadNodeMVCCHeadInTxn(tx.badgerTx, nodeID); headErr == nil && !head.Tombstoned {
+		if err := tx.engine.archiveNodeBodyInTxn(tx.badgerTx, nodeID, deletedNode, head.Version); err != nil {
+			return 0, nil, err
+		}
+	} else if headErr != nil && headErr != ErrNotFound {
+		return 0, nil, headErr
+	}
+
 	// Buffer label index deletions
 	for _, label := range deletedNode.Labels {
 		tx.bufferDelete(labelIndexKey(label, nodeID))
@@ -578,6 +590,18 @@ func (tx *BadgerTransaction) deleteEdgesWithPrefixBuffered(prefix []byte) (int64
 		edge, err := deserializeEdge(edgeBytes)
 		if err != nil {
 			return 0, nil, err
+		}
+		edge.ID = edgeID
+
+		// Archive the edge body at its current head version BEFORE we
+		// buffer the primary-key delete. Safe to call unconditionally —
+		// mustArchiveForHistory gates the actual write.
+		if head, headErr := tx.engine.loadEdgeMVCCHeadInTxn(tx.badgerTx, edgeID); headErr == nil && !head.Tombstoned {
+			if err := tx.engine.archiveEdgeBodyInTxn(tx.badgerTx, edgeID, edge, head.Version); err != nil {
+				return 0, nil, err
+			}
+		} else if headErr != nil && headErr != ErrNotFound {
+			return 0, nil, headErr
 		}
 
 		// Buffer edge and index deletions
@@ -695,6 +719,96 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 		EdgeID:    edge.ID,
 		Edge:      edgeCopy,
 	})
+
+	return nil
+}
+
+// BulkCreateEdges buffers many edges in one pass, amortizing the lock, the
+// lifecycle check, and — most importantly — the committed-node existence
+// probes. A batch of N edges that share K distinct endpoint nodes (K ≪ 2N in
+// practice for graph fan-in/fan-out) now costs K Badger point-reads instead
+// of up to 2N.
+func (tx *BadgerTransaction) BulkCreateEdges(edges []*Edge) error {
+	if len(edges) == 0 {
+		return nil
+	}
+
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
+	}
+
+	// Shared existence cache for this batch. Populated lazily from
+	// pendingNodes / deletedNodes / committed-storage state. A value of
+	// true means "exists and is visible to this tx", false means "not
+	// visible" (deleted or absent).
+	existence := make(map[NodeID]bool, len(edges)*2)
+
+	nodeVisible := func(id NodeID) bool {
+		if cached, ok := existence[id]; ok {
+			return cached
+		}
+		if _, deleted := tx.deletedNodes[id]; deleted {
+			existence[id] = false
+			return false
+		}
+		if _, pending := tx.pendingNodes[id]; pending {
+			existence[id] = true
+			return true
+		}
+		_, err := tx.getCommittedNodeLocked(id)
+		ok := err == nil
+		existence[id] = ok
+		return ok
+	}
+
+	for _, edge := range edges {
+		if edge == nil {
+			return ErrInvalidData
+		}
+		if edge.ID == "" {
+			return ErrInvalidID
+		}
+
+		if !nodeVisible(edge.StartNode) {
+			return fmt.Errorf("start node %s does not exist", edge.StartNode)
+		}
+		if !nodeVisible(edge.EndNode) {
+			return fmt.Errorf("end node %s does not exist", edge.EndNode)
+		}
+
+		if _, exists := tx.pendingEdges[edge.ID]; exists {
+			return ErrAlreadyExists
+		}
+
+		edgeBytes, err := serializeEdge(edge)
+		if err != nil {
+			return fmt.Errorf("serializing edge: %w", err)
+		}
+
+		tx.bufferSet(edgeKey(edge.ID), edgeBytes)
+		tx.bufferSet(outgoingIndexKey(edge.StartNode, edge.ID), []byte{})
+		tx.bufferSet(incomingIndexKey(edge.EndNode, edge.ID), []byte{})
+		tx.bufferSet(edgeTypeIndexKey(edge.Type, edge.ID), []byte{})
+		tx.bufferSetEdgeBetweenIndexes(edge)
+
+		edgeCopy := copyEdge(edge)
+		tx.pendingEdges[edge.ID] = edgeCopy
+		// Newly created edge — existence cache should reflect that
+		// subsequent batches referencing this edge's endpoints still
+		// see them.
+		existence[edge.StartNode] = true
+		existence[edge.EndNode] = true
+
+		tx.operations = append(tx.operations, Operation{
+			Type:      OpCreateEdge,
+			Timestamp: time.Now(),
+			EdgeID:    edge.ID,
+			Edge:      edgeCopy,
+		})
+	}
 
 	return nil
 }

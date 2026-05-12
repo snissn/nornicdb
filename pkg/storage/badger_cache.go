@@ -115,10 +115,17 @@ func (b *BadgerEngine) cacheOnNodeCreated(node *Node) {
 	b.cacheStoreNode(node)
 	b.nodeCount.Add(1)
 	b.addNamespaceNodeCount(node.ID, 1)
+	b.maintainPropertyIndexesOnNodeCreated(node)
 }
 
 func (b *BadgerEngine) cacheOnNodeUpdated(node *Node) {
 	b.cacheStoreNode(node)
+	// Updates are handled by cacheOnNodeUpdatedWithOldNode which has the
+	// old-property context needed to remove stale index entries. The
+	// `oldNode == nil` path is legitimately "we don't know the diff" —
+	// fall back to treating it as a create so the new values at least
+	// land in the indexes (no stale-removal possible without oldNode).
+	b.maintainPropertyIndexesOnNodeCreated(node)
 }
 
 func (b *BadgerEngine) cacheOnNodeUpdatedWithOldNode(node *Node, oldNode *Node) {
@@ -126,6 +133,7 @@ func (b *BadgerEngine) cacheOnNodeUpdatedWithOldNode(node *Node, oldNode *Node) 
 	if oldNode != nil {
 		b.labelCacheInvalidateForRemovedLabels(oldNode.Labels, node.Labels, node.ID)
 	}
+	b.maintainPropertyIndexesOnNodeUpdated(node, oldNode)
 }
 
 func (b *BadgerEngine) cacheOnNodesCreated(nodes []*Node) {
@@ -151,6 +159,7 @@ func (b *BadgerEngine) cacheOnNodesCreated(nodes []*Node) {
 			continue
 		}
 		b.addNamespaceNodeCount(node.ID, 1)
+		b.maintainPropertyIndexesOnNodeCreated(node)
 	}
 }
 
@@ -187,6 +196,12 @@ func (b *BadgerEngine) cacheOnNodeDeletedWithLabels(nodeID NodeID, labels []stri
 		// We don't know which types were removed cheaply; invalidate whole type cache.
 		b.InvalidateEdgeTypeCache()
 	}
+
+	// Remove stale property-index entries. Without labels + properties of
+	// the deleted node we can't do targeted removal, so the narrower
+	// cacheOnNodeDeleted (without labels) leaves the index potentially
+	// dangling — callers MUST use this variant when property indexes exist.
+	b.maintainPropertyIndexesOnNodeDeletedWithLabels(nodeID, labels)
 }
 
 func (b *BadgerEngine) cacheOnEdgeCreated(edge *Edge) {

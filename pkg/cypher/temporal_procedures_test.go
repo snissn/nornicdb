@@ -118,7 +118,10 @@ func TestTemporalAsOf(t *testing.T) {
 }
 
 func TestTemporalAsOf_WithSnapshotVersion(t *testing.T) {
-	base := newTestMemoryEngine(t)
+	// temporal.asOf with a snapshot version is a multi-version feature;
+	// exercise it against the MVCC-retention variant.
+	base := storage.NewMemoryEngineWithMVCCHistory()
+	t.Cleanup(func() { _ = base.Close() })
 	engine := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()

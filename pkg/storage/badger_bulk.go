@@ -86,9 +86,9 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 					return err
 				}
 			}
-			if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
-				return err
-			}
+			// Create-only path: the primary key (nodeKey) IS the current
+			// head body. No version-record write — that halves write
+			// amplification on the hot path.
 			if err := b.writeNodeMVCCHeadInTxn(txn, node.ID, version, false); err != nil {
 				return err
 			}
@@ -282,9 +282,7 @@ func (b *BadgerEngine) BulkCreateEdges(edges []*Edge) error {
 			if err := writeEdgeBetweenIndexesInTxn(txn, edge); err != nil {
 				return err
 			}
-			if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
-				return err
-			}
+			// Create-only path: primary key IS the current head body.
 			if err := b.writeEdgeMVCCHeadInTxn(txn, edge.ID, version, false); err != nil {
 				return err
 			}
