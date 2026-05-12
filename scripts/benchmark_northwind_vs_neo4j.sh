@@ -225,9 +225,10 @@ run_nornic() {
   # exists (some engines refuse to boot without it).
   mkdir -p "${NORNIC_DATA_DIR}"
 
-  # Powermetrics covers startup, seed, and benchmark — but NOT shutdown,
-  # so the energy report reflects operational cost without flush/compaction.
-  log "starting powermetrics sampler (covers startup + benchmark)"
+  # Powermetrics wraps the entire DB lifecycle — startup, seed, benchmark,
+  # shutdown — so the report captures the full energy envelope, not just the
+  # query window.
+  log "starting powermetrics sampler (covers startup + benchmark + shutdown)"
   POWER_PID=$(start_powermetrics "${REPORT_DIR}/nornicdb.powermetrics.plist")
   local t0=$(date +%s.%N)
 
@@ -270,14 +271,6 @@ run_nornic() {
     -out "${REPORT_DIR}/nornicdb.results.json" \
     2>"${REPORT_DIR}/nornicdb.bench.log" || die "NornicDB benchmark failed — see ${REPORT_DIR}/nornicdb.bench.log"
 
-  # Stop powermetrics *before* shutdown so the energy measurement covers
-  # only startup + seed + benchmark, not the flush/compaction work that
-  # happens during graceful shutdown.
-  local t1=$(date +%s.%N)
-  log "stopping powermetrics sampler"
-  stop_powermetrics "${POWER_PID}"
-  POWER_PID=""
-
   # Graceful shutdown so BadgerDB gets a chance to flush its in-memory
   # memtables and compact/rewrite vlog segments. Without this the
   # subsequent `du` measurement includes a full 8 MiB preallocated
@@ -286,6 +279,11 @@ run_nornic() {
   log "stopping NornicDB gracefully (SIGTERM, flushing storage)"
   stop_pid_graceful "${NORNIC_PID}" 30
   NORNIC_PID=""
+
+  local t1=$(date +%s.%N)
+  log "stopping powermetrics sampler"
+  stop_powermetrics "${POWER_PID}"
+  POWER_PID=""
 
   python3 -c "print(f'{float(${t1}) - float(${t0}):.3f}')" > "${REPORT_DIR}/nornicdb.wall_seconds.txt"
 
@@ -351,8 +349,8 @@ run_neo4j() {
   # the fresh store.
   configure_neo4j_password
 
-  # Powermetrics covers startup, seed, and benchmark — but NOT shutdown.
-  log "starting powermetrics sampler (covers startup + benchmark)"
+  # Powermetrics wraps the entire DB lifecycle.
+  log "starting powermetrics sampler (covers startup + benchmark + shutdown)"
   POWER_PID=$(start_powermetrics "${REPORT_DIR}/neo4j.powermetrics.plist")
   local t0=$(date +%s.%N)
 
@@ -402,14 +400,6 @@ run_neo4j() {
     -out "${REPORT_DIR}/neo4j.results.json" \
     2>"${REPORT_DIR}/neo4j.bench.log" || die "Neo4j benchmark failed — see ${REPORT_DIR}/neo4j.bench.log"
 
-  # Stop powermetrics *before* shutdown so the energy measurement covers
-  # only startup + seed + benchmark, not the flush/checkpoint work that
-  # happens during graceful shutdown.
-  local t1=$(date +%s.%N)
-  log "stopping powermetrics sampler"
-  stop_powermetrics "${POWER_PID}"
-  POWER_PID=""
-
   # Graceful shutdown via `neo4j stop` so Neo4j flushes its
   # transaction log and page cache. SIGKILL would leave the store in a
   # recovery-pending state and inflate the `du` reading with uncompacted
@@ -431,6 +421,11 @@ run_neo4j() {
     fi
   fi
   NEO4J_PID=""
+
+  local t1=$(date +%s.%N)
+  log "stopping powermetrics sampler"
+  stop_powermetrics "${POWER_PID}"
+  POWER_PID=""
 
   python3 -c "print(f'{float(${t1}) - float(${t0}):.3f}')" > "${REPORT_DIR}/neo4j.wall_seconds.txt"
 

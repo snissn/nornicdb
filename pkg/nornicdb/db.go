@@ -560,6 +560,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 					MaxVersionsPerKey: config.Database.MVCCRetentionMaxVersions,
 					TTL:               config.Database.MVCCRetentionTTL,
 				},
+				IDFreelistTTL: config.Database.IDFreelistTTL,
 			},
 			// Phase 2 D-01: thread the structured *slog.Logger from
 			// nornicConfig.Config (set by cmd/nornicdb/main.go before Open)

@@ -213,16 +213,38 @@ func (tx *BadgerTransaction) bufferDelete(key []byte) {
 }
 
 // bufferSetEdgeBetweenIndexes stages both exact relationship lookup indexes.
-func (tx *BadgerTransaction) bufferSetEdgeBetweenIndexes(edge *Edge) {
-	tx.bufferSet(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{})
-	tx.bufferSet(edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type), []byte(edge.ID))
+// Allocates numeric IDs for endpoints + edge via the engine's id
+// dictionary. Any allocation failure propagates as a returned error.
+func (tx *BadgerTransaction) bufferSetEdgeBetweenIndexes(edge *Edge) error {
+	startNum, err := tx.engine.idDict.resolveOrAllocateNodeNumIDInTxn(tx.badgerTx, edge.StartNode)
+	if err != nil {
+		return err
+	}
+	endNum, err := tx.engine.idDict.resolveOrAllocateNodeNumIDInTxn(tx.badgerTx, edge.EndNode)
+	if err != nil {
+		return err
+	}
+	edgeNum, err := tx.engine.idDict.resolveOrAllocateEdgeNumIDInTxn(tx.badgerTx, edge.ID)
+	if err != nil {
+		return err
+	}
+	tx.bufferSet(edgeBetweenIndexKey(startNum, endNum, edge.Type, edgeNum), []byte(edge.ID))
+	tx.bufferSet(edgeBetweenHeadKey(startNum, endNum, edge.Type), []byte(edge.ID))
+	return nil
 }
 
 // bufferDeleteEdgeBetweenIndexes stages set removal and conservatively clears
 // the head so later reads can self-heal from the set or legacy outgoing index.
+// A missing numID means no index entry exists — nothing to delete.
 func (tx *BadgerTransaction) bufferDeleteEdgeBetweenIndexes(edge *Edge) {
-	tx.bufferDelete(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID))
-	tx.bufferDelete(edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type))
+	startNum, sOK := tx.engine.idDict.lookupNodeNumID(edge.StartNode)
+	endNum, eOK := tx.engine.idDict.lookupNodeNumID(edge.EndNode)
+	edgeNum, edgeOK := tx.engine.idDict.lookupEdgeNumID(edge.ID)
+	if !sOK || !eOK || !edgeOK {
+		return
+	}
+	tx.bufferDelete(edgeBetweenIndexKey(startNum, endNum, edge.Type, edgeNum))
+	tx.bufferDelete(edgeBetweenHeadKey(startNum, endNum, edge.Type))
 }
 
 // flushBufferedWrites applies all buffered writes and deletes to the Badger transaction.
@@ -324,7 +346,10 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 
 	// Buffer all label index writes
 	for _, label := range node.Labels {
-		indexKey := labelIndexKey(label, node.ID)
+		indexKey, err := tx.engine.labelIndexKeyString(tx.badgerTx, label, node.ID)
+		if err != nil {
+			return "", fmt.Errorf("label index: %w", err)
+		}
 		tx.bufferSet(indexKey, []byte{})
 	}
 
@@ -410,15 +435,21 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 		newLabelSet[label] = true
 		if !oldLabelSet[label] {
 			// New label - buffer index write
-			indexKey := labelIndexKey(label, node.ID)
+			indexKey, err := tx.engine.labelIndexKeyString(tx.badgerTx, label, node.ID)
+			if err != nil {
+				return fmt.Errorf("label index: %w", err)
+			}
 			tx.bufferSet(indexKey, []byte{})
 		}
 	}
 
-	// Remove old labels
+	// Remove old labels (lookup-only — they must have existed at write time)
 	for _, label := range oldNode.Labels {
 		if !newLabelSet[label] {
-			indexKey := labelIndexKey(label, node.ID)
+			indexKey := tx.engine.labelIndexKeyStringLookup(label, node.ID)
+			if indexKey == nil {
+				continue
+			}
 			tx.bufferDelete(indexKey)
 		}
 	}
@@ -521,33 +552,39 @@ func (tx *BadgerTransaction) deleteNodeBuffered(nodeID NodeID, oldNode *Node) (e
 		return 0, nil, headErr
 	}
 
-	// Buffer label index deletions
+	// Buffer label index deletions (lookup-only).
 	for _, label := range deletedNode.Labels {
-		tx.bufferDelete(labelIndexKey(label, nodeID))
+		if lblKey := tx.engine.labelIndexKeyStringLookup(label, nodeID); lblKey != nil {
+			tx.bufferDelete(lblKey)
+		}
 	}
 
-	// Delete outgoing edges (and track count)
-	outPrefix := outgoingIndexPrefix(nodeID)
-	outCount, outIDs, err := tx.deleteEdgesWithPrefixBuffered(outPrefix)
-	if err != nil {
-		return 0, nil, err
+	// Delete outgoing edges (and track count). Lookup-only prefix — a
+	// missing numID means no outgoing edges were ever indexed.
+	if outPrefix := tx.engine.outgoingIndexPrefixString(nodeID); outPrefix != nil {
+		outCount, outIDs, err := tx.deleteEdgesWithPrefixBuffered(outPrefix)
+		if err != nil {
+			return 0, nil, err
+		}
+		edgesDeleted += outCount
+		deletedEdgeIDs = append(deletedEdgeIDs, outIDs...)
 	}
-	edgesDeleted += outCount
-	deletedEdgeIDs = append(deletedEdgeIDs, outIDs...)
 
-	// Delete incoming edges (and track count)
-	inPrefix := incomingIndexPrefix(nodeID)
-	inCount, inIDs, err := tx.deleteEdgesWithPrefixBuffered(inPrefix)
-	if err != nil {
-		return 0, nil, err
+	// Delete incoming edges (and track count).
+	if inPrefix := tx.engine.incomingIndexPrefixString(nodeID); inPrefix != nil {
+		inCount, inIDs, err := tx.deleteEdgesWithPrefixBuffered(inPrefix)
+		if err != nil {
+			return 0, nil, err
+		}
+		edgesDeleted += inCount
+		deletedEdgeIDs = append(deletedEdgeIDs, inIDs...)
 	}
-	edgesDeleted += inCount
-	deletedEdgeIDs = append(deletedEdgeIDs, inIDs...)
 
 	// Buffer pending embeddings index deletion
 	tx.bufferDelete(pendingEmbedKey(nodeID))
 
-	// Buffer node deletion
+	// Buffer node deletion. Dict cleanup is deferred to the prune
+	// pipeline — tombstones + MVCC heads reuse the existing numID.
 	tx.bufferDelete(key)
 
 	return edgesDeleted, deletedEdgeIDs, nil
@@ -562,7 +599,14 @@ func (tx *BadgerTransaction) deleteEdgesWithPrefixBuffered(prefix []byte) (int64
 
 	var edgeIDs []EdgeID
 	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-		edgeID := extractEdgeIDFromIndexKey(it.Item().Key())
+		edgeNum, ok := extractEdgeNumIDFromOutgoingKey(it.Item().KeyCopy(nil))
+		if !ok {
+			continue
+		}
+		edgeID, ok := tx.engine.idDict.lookupEdgeIDByNum(edgeNum)
+		if !ok {
+			continue
+		}
 		edgeIDs = append(edgeIDs, edgeID)
 	}
 
@@ -587,7 +631,7 @@ func (tx *BadgerTransaction) deleteEdgesWithPrefixBuffered(prefix []byte) (int64
 			return 0, nil, err
 		}
 
-		edge, err := deserializeEdge(edgeBytes)
+		edge, err := tx.engine.decodeEdgeBody(edgeBytes)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -604,11 +648,18 @@ func (tx *BadgerTransaction) deleteEdgesWithPrefixBuffered(prefix []byte) (int64
 			return 0, nil, headErr
 		}
 
-		// Buffer edge and index deletions
+		// Buffer edge and index deletions. Lookup-only: these num IDs
+		// must have existed at write time.
 		tx.bufferDelete(edgeKey)
-		tx.bufferDelete(outgoingIndexKey(edge.StartNode, edgeID))
-		tx.bufferDelete(incomingIndexKey(edge.EndNode, edgeID))
-		tx.bufferDelete(edgeTypeIndexKey(edge.Type, edgeID))
+		if outKey := tx.engine.outgoingIndexKeyStringLookup(edge.StartNode, edgeID); outKey != nil {
+			tx.bufferDelete(outKey)
+		}
+		if inKey := tx.engine.incomingIndexKeyStringLookup(edge.EndNode, edgeID); inKey != nil {
+			tx.bufferDelete(inKey)
+		}
+		if typeKey := tx.engine.edgeTypeIndexKeyStringLookup(edge.Type, edgeID); typeKey != nil {
+			tx.bufferDelete(typeKey)
+		}
 		tx.bufferDeleteEdgeBetweenIndexes(edge)
 
 		deletedCount++
@@ -687,8 +738,9 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 		return ErrAlreadyExists
 	}
 
-	// Serialize and buffer write
-	edgeBytes, err := serializeEdge(edge)
+	// Serialize and buffer write. Compact form allocates endpoint
+	// numIDs via the id dictionary — keeps bodies tight.
+	edgeBytes, err := tx.engine.encodeEdgeInTxn(tx.badgerTx, edge)
 	if err != nil {
 		return fmt.Errorf("serializing edge: %w", err)
 	}
@@ -696,18 +748,30 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 	key := edgeKey(edge.ID)
 	tx.bufferSet(key, edgeBytes)
 
-	// Buffer edge indexes
-	outKey := outgoingIndexKey(edge.StartNode, edge.ID)
+	// Buffer edge indexes. Keys use 8-byte num IDs from the engine dict.
+	outKey, err := tx.engine.outgoingIndexKeyString(tx.badgerTx, edge.StartNode, edge.ID)
+	if err != nil {
+		return fmt.Errorf("outgoing index: %w", err)
+	}
 	tx.bufferSet(outKey, []byte{})
 
-	inKey := incomingIndexKey(edge.EndNode, edge.ID)
+	inKey, err := tx.engine.incomingIndexKeyString(tx.badgerTx, edge.EndNode, edge.ID)
+	if err != nil {
+		return fmt.Errorf("incoming index: %w", err)
+	}
 	tx.bufferSet(inKey, []byte{})
 
 	// Buffer edge type index for GetEdgesByType().
 	// Without this, edges created inside implicit/explicit transactions are invisible
 	// to type-based scans and Cypher fast-paths that rely on the edge-type index.
-	tx.bufferSet(edgeTypeIndexKey(edge.Type, edge.ID), []byte{})
-	tx.bufferSetEdgeBetweenIndexes(edge)
+	typeKey, err := tx.engine.edgeTypeIndexKeyString(tx.badgerTx, edge.Type, edge.ID)
+	if err != nil {
+		return fmt.Errorf("edge type index: %w", err)
+	}
+	tx.bufferSet(typeKey, []byte{})
+	if err := tx.bufferSetEdgeBetweenIndexes(edge); err != nil {
+		return fmt.Errorf("edge-between index: %w", err)
+	}
 
 	// Track for read-your-writes
 	edgeCopy := copyEdge(edge)
@@ -783,16 +847,30 @@ func (tx *BadgerTransaction) BulkCreateEdges(edges []*Edge) error {
 			return ErrAlreadyExists
 		}
 
-		edgeBytes, err := serializeEdge(edge)
+		edgeBytes, err := tx.engine.encodeEdgeInTxn(tx.badgerTx, edge)
 		if err != nil {
 			return fmt.Errorf("serializing edge: %w", err)
 		}
 
 		tx.bufferSet(edgeKey(edge.ID), edgeBytes)
-		tx.bufferSet(outgoingIndexKey(edge.StartNode, edge.ID), []byte{})
-		tx.bufferSet(incomingIndexKey(edge.EndNode, edge.ID), []byte{})
-		tx.bufferSet(edgeTypeIndexKey(edge.Type, edge.ID), []byte{})
-		tx.bufferSetEdgeBetweenIndexes(edge)
+		outKey, err := tx.engine.outgoingIndexKeyString(tx.badgerTx, edge.StartNode, edge.ID)
+		if err != nil {
+			return fmt.Errorf("outgoing index: %w", err)
+		}
+		tx.bufferSet(outKey, []byte{})
+		inKey, err := tx.engine.incomingIndexKeyString(tx.badgerTx, edge.EndNode, edge.ID)
+		if err != nil {
+			return fmt.Errorf("incoming index: %w", err)
+		}
+		tx.bufferSet(inKey, []byte{})
+		typeKey, err := tx.engine.edgeTypeIndexKeyString(tx.badgerTx, edge.Type, edge.ID)
+		if err != nil {
+			return fmt.Errorf("edge type index: %w", err)
+		}
+		tx.bufferSet(typeKey, []byte{})
+		if err := tx.bufferSetEdgeBetweenIndexes(edge); err != nil {
+			return fmt.Errorf("edge-between index: %w", err)
+		}
 
 		edgeCopy := copyEdge(edge)
 		tx.pendingEdges[edge.ID] = edgeCopy
@@ -858,32 +936,54 @@ func (tx *BadgerTransaction) UpdateEdge(edge *Edge) error {
 			return fmt.Errorf("end node %s does not exist", edge.EndNode)
 		}
 
-		tx.bufferDelete(outgoingIndexKey(oldEdge.StartNode, edge.ID))
-		tx.bufferDelete(incomingIndexKey(oldEdge.EndNode, edge.ID))
+		if oldOutKey := tx.engine.outgoingIndexKeyStringLookup(oldEdge.StartNode, edge.ID); oldOutKey != nil {
+			tx.bufferDelete(oldOutKey)
+		}
+		if oldInKey := tx.engine.incomingIndexKeyStringLookup(oldEdge.EndNode, edge.ID); oldInKey != nil {
+			tx.bufferDelete(oldInKey)
+		}
 		tx.bufferDeleteEdgeBetweenIndexes(oldEdge)
-		tx.bufferSet(outgoingIndexKey(edge.StartNode, edge.ID), []byte{})
-		tx.bufferSet(incomingIndexKey(edge.EndNode, edge.ID), []byte{})
-		tx.bufferSetEdgeBetweenIndexes(edge)
+		newOutKey, err := tx.engine.outgoingIndexKeyString(tx.badgerTx, edge.StartNode, edge.ID)
+		if err != nil {
+			return fmt.Errorf("outgoing index: %w", err)
+		}
+		tx.bufferSet(newOutKey, []byte{})
+		newInKey, err := tx.engine.incomingIndexKeyString(tx.badgerTx, edge.EndNode, edge.ID)
+		if err != nil {
+			return fmt.Errorf("incoming index: %w", err)
+		}
+		tx.bufferSet(newInKey, []byte{})
+		if err := tx.bufferSetEdgeBetweenIndexes(edge); err != nil {
+			return fmt.Errorf("edge-between index: %w", err)
+		}
 	}
 
 	// If type changed, update edge type index.
 	if oldEdge.Type != edge.Type {
 		if oldEdge.Type != "" {
-			tx.bufferDelete(edgeTypeIndexKey(oldEdge.Type, edge.ID))
+			if oldTypeKey := tx.engine.edgeTypeIndexKeyStringLookup(oldEdge.Type, edge.ID); oldTypeKey != nil {
+				tx.bufferDelete(oldTypeKey)
+			}
 		}
 		if oldEdge.StartNode == edge.StartNode && oldEdge.EndNode == edge.EndNode {
 			tx.bufferDeleteEdgeBetweenIndexes(oldEdge)
 		}
 		if edge.Type != "" {
-			tx.bufferSet(edgeTypeIndexKey(edge.Type, edge.ID), []byte{})
+			newTypeKey, err := tx.engine.edgeTypeIndexKeyString(tx.badgerTx, edge.Type, edge.ID)
+			if err != nil {
+				return fmt.Errorf("edge type index: %w", err)
+			}
+			tx.bufferSet(newTypeKey, []byte{})
 		}
 		if oldEdge.StartNode == edge.StartNode && oldEdge.EndNode == edge.EndNode {
-			tx.bufferSetEdgeBetweenIndexes(edge)
+			if err := tx.bufferSetEdgeBetweenIndexes(edge); err != nil {
+				return fmt.Errorf("edge-between index: %w", err)
+			}
 		}
 	}
 
 	// Serialize and buffer updated edge record.
-	edgeBytes, err := serializeEdge(edge)
+	edgeBytes, err := tx.engine.encodeEdgeInTxn(tx.badgerTx, edge)
 	if err != nil {
 		return fmt.Errorf("serializing edge: %w", err)
 	}
@@ -932,15 +1032,17 @@ func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 	key := edgeKey(edgeID)
 	tx.bufferDelete(key)
 
-	// Buffer index deletions
-	outKey := outgoingIndexKey(edge.StartNode, edgeID)
-	tx.bufferDelete(outKey)
-
-	inKey := incomingIndexKey(edge.EndNode, edgeID)
-	tx.bufferDelete(inKey)
-
-	// Buffer edge type index deletion.
-	tx.bufferDelete(edgeTypeIndexKey(edge.Type, edgeID))
+	// Buffer index deletions (lookup-only — all num IDs were allocated
+	// at write time).
+	if outKey := tx.engine.outgoingIndexKeyStringLookup(edge.StartNode, edgeID); outKey != nil {
+		tx.bufferDelete(outKey)
+	}
+	if inKey := tx.engine.incomingIndexKeyStringLookup(edge.EndNode, edgeID); inKey != nil {
+		tx.bufferDelete(inKey)
+	}
+	if typeKey := tx.engine.edgeTypeIndexKeyStringLookup(edge.Type, edgeID); typeKey != nil {
+		tx.bufferDelete(typeKey)
+	}
 	tx.bufferDeleteEdgeBetweenIndexes(edge)
 
 	// Track deletion
@@ -1537,7 +1639,7 @@ func (tx *BadgerTransaction) getCommittedEdgeLocked(edgeID EdgeID) (*Edge, error
 		}); err != nil {
 			return nil, fmt.Errorf("reading edge value: %w", err)
 		}
-		return deserializeEdge(edgeBytes)
+		return tx.engine.decodeEdgeBody(edgeBytes)
 	}
 	return tx.engine.GetEdgeVisibleAt(edgeID, tx.readTS)
 }
@@ -1692,14 +1794,27 @@ func (tx *BadgerTransaction) checkEdgeEndpointConflicts(edge *Edge) error {
 
 func (tx *BadgerTransaction) checkNodeAdjacencyConflict(nodeID NodeID) error {
 	return tx.engine.withView(func(viewTx *badger.Txn) error {
-		prefixes := [][]byte{outgoingIndexPrefix(nodeID), incomingIndexPrefix(nodeID)}
+		var prefixes [][]byte
+		if outPrefix := tx.engine.outgoingIndexPrefixString(nodeID); outPrefix != nil {
+			prefixes = append(prefixes, outPrefix)
+		}
+		if inPrefix := tx.engine.incomingIndexPrefixString(nodeID); inPrefix != nil {
+			prefixes = append(prefixes, inPrefix)
+		}
 		for _, prefix := range prefixes {
 			opts := badger.DefaultIteratorOptions
 			opts.Prefix = prefix
 			opts.PrefetchValues = false
 			it := viewTx.NewIterator(opts)
 			for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
-				edgeID := extractEdgeIDFromIndexKey(it.Item().Key())
+				edgeNum, ok := extractEdgeNumIDFromOutgoingKey(it.Item().KeyCopy(nil))
+				if !ok {
+					continue
+				}
+				edgeID, ok := tx.engine.idDict.lookupEdgeIDByNum(edgeNum)
+				if !ok {
+					continue
+				}
 				head, err := tx.engine.loadEdgeMVCCHeadInTxn(viewTx, edgeID)
 				if err == ErrNotFound {
 					continue

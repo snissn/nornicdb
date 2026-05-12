@@ -76,14 +76,18 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 			embeddingsToPersist = node.ChunkEmbeddings
 		}
 		for _, label := range node.Labels {
-			if err := txn.Set(labelIndexKey(label, node.ID), []byte{}); err != nil {
+			lblKey, err := b.labelIndexKeyString(txn, label, node.ID)
+			if err != nil {
+				return fmt.Errorf("failed to build label index key: %w", err)
+			}
+			if err := txn.Set(lblKey, []byte{}); err != nil {
 				return fmt.Errorf("failed to write label index: %w", err)
 			}
 		}
 		if err := putIndexEntryCatalogInTxn(txn, string(node.ID), &IndexEntryCatalog{
 			TargetID:    string(node.ID),
 			TargetScope: "NODE",
-			IndexKeys:   collectNodeIndexKeys(node.ID, node.Labels),
+			IndexKeys:   b.collectNodeIndexKeys(node.ID, node.Labels),
 		}); err != nil {
 			return fmt.Errorf("failed to write index catalog: %w", err)
 		}
@@ -240,7 +244,11 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			}
 			// Create label indexes
 			for _, label := range node.Labels {
-				if err := txn.Set(labelIndexKey(label, node.ID), []byte{}); err != nil {
+				lblKey, err := b.labelIndexKeyString(txn, label, node.ID)
+				if err != nil {
+					return err
+				}
+				if err := txn.Set(lblKey, []byte{}); err != nil {
 					return err
 				}
 			}
@@ -289,9 +297,13 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			return err
 		}
 
-		// Remove old label indexes
+		// Remove old label indexes (lookup-only; numID must have existed)
 		for _, label := range existingNode.Labels {
-			if err := txn.Delete(labelIndexKey(label, node.ID)); err != nil {
+			oldLblKey := b.labelIndexKeyStringLookup(label, node.ID)
+			if oldLblKey == nil {
+				continue
+			}
+			if err := txn.Delete(oldLblKey); err != nil {
 				return err
 			}
 		}
@@ -326,14 +338,18 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 
 		// Create new label indexes
 		for _, label := range node.Labels {
-			if err := txn.Set(labelIndexKey(label, node.ID), []byte{}); err != nil {
+			lblKey, err := b.labelIndexKeyString(txn, label, node.ID)
+			if err != nil {
+				return err
+			}
+			if err := txn.Set(lblKey, []byte{}); err != nil {
 				return err
 			}
 		}
 		if err := putIndexEntryCatalogInTxn(txn, string(node.ID), &IndexEntryCatalog{
 			TargetID:    string(node.ID),
 			TargetScope: "NODE",
-			IndexKeys:   collectNodeIndexKeys(node.ID, node.Labels),
+			IndexKeys:   b.collectNodeIndexKeys(node.ID, node.Labels),
 		}); err != nil {
 			return err
 		}
@@ -714,7 +730,14 @@ func (b *BadgerEngine) deleteEdgesWithPrefix(txn *badger.Txn, prefix []byte) (in
 
 	var edgeIDs []EdgeID
 	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-		edgeID := extractEdgeIDFromIndexKey(it.Item().Key())
+		edgeNum, ok := extractEdgeNumIDFromOutgoingKey(it.Item().KeyCopy(nil))
+		if !ok {
+			continue
+		}
+		edgeID, ok := b.idDict.lookupEdgeIDByNum(edgeNum)
+		if !ok {
+			continue
+		}
 		edgeIDs = append(edgeIDs, edgeID)
 	}
 
