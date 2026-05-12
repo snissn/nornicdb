@@ -111,6 +111,23 @@ type idDictionary struct {
 	// find nothing, and decrement back to accuracy on next reload).
 	nodeFreelistPending atomic.Int64
 	edgeFreelistPending atomic.Int64
+
+	// Per-badger.Txn counter-persistence state. Each txn tracks the
+	// highest node/edge numID it has allocated; the counter key is
+	// written ONCE at commit time instead of once per allocation.
+	// Seed workloads commonly allocate thousands of numIDs per txn —
+	// batching the counter write collapses N Badger Set() calls to 2.
+	// Entries are created lazily on first alloc and removed at
+	// flush/discard. Keyed by *badger.Txn pointer (unique per lifetime).
+	txnMu       sync.Mutex
+	txnCounters map[*badger.Txn]*txnCounterState
+}
+
+// txnCounterState tracks the high-water numID allocated during a single
+// badger.Txn. Written as a single counter update at txn-flush time.
+type txnCounterState struct {
+	nodeMax uint64 // 0 = no node allocs on this txn
+	edgeMax uint64
 }
 
 func newIDDictionary() *idDictionary {
@@ -120,7 +137,76 @@ func newIDDictionary() *idDictionary {
 		edgeForward: make(map[EdgeID]uint64),
 		edgeReverse: make(map[uint64]EdgeID),
 		freelistTTL: defaultIDFreelistTTL,
+		txnCounters: make(map[*badger.Txn]*txnCounterState),
 	}
+}
+
+// recordTxnCounterUse stages a numID high-water mark against the txn.
+// Called inside resolveOrAllocate* after a fresh allocation (non-recycled).
+// Thread-safe for concurrent callers on distinct txns (common: AsyncEngine
+// flushes in a single txn, but other paths open their own); distinct txns
+// never contend beyond the brief map-insert under txnMu.
+func (d *idDictionary) recordTxnCounterUse(txn *badger.Txn, kind byte, num uint64) {
+	d.txnMu.Lock()
+	st, ok := d.txnCounters[txn]
+	if !ok {
+		st = &txnCounterState{}
+		d.txnCounters[txn] = st
+	}
+	switch kind {
+	case freelistKindNode:
+		if num > st.nodeMax {
+			st.nodeMax = num
+		}
+	case freelistKindEdge:
+		if num > st.edgeMax {
+			st.edgeMax = num
+		}
+	}
+	d.txnMu.Unlock()
+}
+
+// flushTxnCounters writes the single counter update(s) for this txn
+// (at most one per kind) and detaches the state. Caller MUST invoke
+// this from the commit path BEFORE badgerTx.Commit(). Safe to call on
+// a txn that never allocated — does nothing.
+func (d *idDictionary) flushTxnCounters(txn *badger.Txn) error {
+	d.txnMu.Lock()
+	st, ok := d.txnCounters[txn]
+	if ok {
+		delete(d.txnCounters, txn)
+	}
+	d.txnMu.Unlock()
+	if !ok || st == nil {
+		return nil
+	}
+	if st.nodeMax > 0 {
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], st.nodeMax)
+		if err := txn.Set(idCounterNodeKey, append([]byte(nil), buf[:]...)); err != nil {
+			return err
+		}
+	}
+	if st.edgeMax > 0 {
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], st.edgeMax)
+		if err := txn.Set(idCounterEdgeKey, append([]byte(nil), buf[:]...)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// discardTxnCounters drops any staged counter state for a txn that is
+// about to be discarded (rollback or internal abort). The authoritative
+// counter is the atomic one in memory — the persisted Badger key only
+// matters on restart, and a rolled-back txn's allocs leave no data for
+// those numIDs anyway (they'll be orphaned and eventually freelist-
+// reclaimed once history retention clears). Safe to call multiple times.
+func (d *idDictionary) discardTxnCounters(txn *badger.Txn) {
+	d.txnMu.Lock()
+	delete(d.txnCounters, txn)
+	d.txnMu.Unlock()
 }
 
 // setFreelistTTL configures the debounce window before freed numIDs
@@ -422,8 +508,12 @@ func (d *idDictionary) resolveOrAllocateNodeNumIDInTxn(txn *badger.Txn, id NodeI
 		num = d.nextNode.Add(1)
 	}
 
-	// Persist forward + reverse + counter via the per-txn Badger
-	// handle. No shared lock required here.
+	// Persist forward + reverse via the per-txn Badger handle. No
+	// shared lock required here. The monotonic counter key is NOT
+	// written per-alloc; it's staged on the txn and flushed ONCE at
+	// commit time. Seed workloads that allocate thousands of numIDs
+	// per commit thereby pay two counter-key writes total (one for
+	// nodes, one for edges) instead of one per allocation.
 	var numBytes [8]byte
 	binary.BigEndian.PutUint64(numBytes[:], num)
 	if err := txn.Set(nodeIDForwardKey(id), append([]byte(nil), numBytes[:]...)); err != nil {
@@ -434,9 +524,7 @@ func (d *idDictionary) resolveOrAllocateNodeNumIDInTxn(txn *badger.Txn, id NodeI
 		return 0, err
 	}
 	if !ok {
-		if err := txn.Set(idCounterNodeKey, append([]byte(nil), numBytes[:]...)); err != nil {
-			return 0, err
-		}
+		d.recordTxnCounterUse(txn, freelistKindNode, num)
 	}
 
 	// Update the in-memory map under a narrow write lock. Resolve
@@ -497,9 +585,7 @@ func (d *idDictionary) resolveOrAllocateEdgeNumIDInTxn(txn *badger.Txn, id EdgeI
 		return 0, err
 	}
 	if !ok {
-		if err := txn.Set(idCounterEdgeKey, append([]byte(nil), numBytes[:]...)); err != nil {
-			return 0, err
-		}
+		d.recordTxnCounterUse(txn, freelistKindEdge, num)
 	}
 
 	d.mu.Lock()

@@ -231,6 +231,15 @@ func (b *BadgerEngine) writeNodeMVCCHeadInTxn(txn *badger.Txn, id NodeID, versio
 	return b.writeNodeMVCCHeadWithFloorInTxn(txn, id, version, tombstoned, floorVersion)
 }
 
+// writeNodeMVCCHeadForFreshCreateInTxn skips the pre-read that carries an
+// existing FloorVersion forward. Callers must only invoke this for brand-new
+// IDs where no prior head can exist (OpCreateNode in the commit loop). For a
+// fresh entity the floor == the current version. Halves the Badger op count
+// on create-heavy workloads (one Set instead of one Get + one Set per entity).
+func (b *BadgerEngine) writeNodeMVCCHeadForFreshCreateInTxn(txn *badger.Txn, id NodeID, version MVCCVersion) error {
+	return b.writeNodeMVCCHeadWithFloorInTxn(txn, id, version, false, version)
+}
+
 // retentionRetainsHistory reports whether the engine is configured to keep
 // any closed historical MVCC versions. When false, every archival call is a
 // no-op — updates overwrite in place, deletes drop the primary key outright,
@@ -419,6 +428,13 @@ func (b *BadgerEngine) writeEdgeMVCCHeadInTxn(txn *badger.Txn, id EdgeID, versio
 		return err
 	}
 	return b.writeEdgeMVCCHeadWithFloorInTxn(txn, id, version, tombstoned, floorVersion)
+}
+
+// writeEdgeMVCCHeadForFreshCreateInTxn is the edge analogue of
+// writeNodeMVCCHeadForFreshCreateInTxn. Skips the pre-read for OpCreateEdge in
+// the commit loop — fresh edge IDs cannot have an existing head.
+func (b *BadgerEngine) writeEdgeMVCCHeadForFreshCreateInTxn(txn *badger.Txn, id EdgeID, version MVCCVersion) error {
+	return b.writeEdgeMVCCHeadWithFloorInTxn(txn, id, version, false, version)
 }
 
 func (b *BadgerEngine) writeNodeMVCCHeadWithFloorInTxn(txn *badger.Txn, id NodeID, version MVCCVersion, tombstoned bool, floorVersion MVCCVersion) error {
@@ -1230,8 +1246,18 @@ func (b *BadgerEngine) materializeMVCCCommitInTxn(txn *badger.Txn, version MVCCV
 			if op.Node == nil {
 				continue
 			}
-			if err := b.writeNodeMVCCHeadInTxn(txn, op.Node.ID, version, false); err != nil {
-				return err
+			// FreshID is set only when the ID was asserted new at
+			// CreateNode time (UUID-shape). For explicit user-supplied
+			// IDs we fall back to the load-existing-floor path to keep
+			// snapshot reads correct across tombstone → recreate cycles.
+			if op.FreshID {
+				if err := b.writeNodeMVCCHeadForFreshCreateInTxn(txn, op.Node.ID, version); err != nil {
+					return err
+				}
+			} else {
+				if err := b.writeNodeMVCCHeadInTxn(txn, op.Node.ID, version, false); err != nil {
+					return err
+				}
 			}
 		case OpUpdateNode:
 			if op.Node == nil {
@@ -1278,8 +1304,14 @@ func (b *BadgerEngine) materializeMVCCCommitInTxn(txn *badger.Txn, version MVCCV
 			if op.Edge == nil {
 				continue
 			}
-			if err := b.writeEdgeMVCCHeadInTxn(txn, op.Edge.ID, version, false); err != nil {
-				return err
+			if op.FreshID {
+				if err := b.writeEdgeMVCCHeadForFreshCreateInTxn(txn, op.Edge.ID, version); err != nil {
+					return err
+				}
+			} else {
+				if err := b.writeEdgeMVCCHeadInTxn(txn, op.Edge.ID, version, false); err != nil {
+					return err
+				}
 			}
 		case OpUpdateEdge:
 			if op.Edge == nil {

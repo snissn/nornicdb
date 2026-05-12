@@ -91,9 +91,7 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 		}); err != nil {
 			return fmt.Errorf("failed to write index catalog: %w", err)
 		}
-		if !isSystemNamespaceID(string(node.ID)) &&
-			(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
-			NodeNeedsEmbedding(node) {
+		if b.shouldIndexPendingEmbed(node) {
 			if err := txn.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
 				return fmt.Errorf("failed to write pending embed index: %w", err)
 			}
@@ -253,9 +251,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 				}
 			}
 			// Add to pending embeddings index if needed (same as CreateNode)
-			if !isSystemNamespaceID(string(node.ID)) &&
-				(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
-				NodeNeedsEmbedding(node) {
+			if b.shouldIndexPendingEmbed(node) {
 				if err := txn.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
 					return err
 				}
@@ -358,7 +354,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 		if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 			// Node has embedding - remove from pending index
 			txn.Delete(pendingEmbedKey(node.ID))
-		} else if !isSystemNamespaceID(string(node.ID)) && NodeNeedsEmbedding(node) {
+		} else if b.shouldIndexPendingEmbed(node) {
 			// Node needs embedding - ensure it's in pending index
 			txn.Set(pendingEmbedKey(node.ID), []byte{})
 		} else {

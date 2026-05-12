@@ -172,6 +172,11 @@ type BadgerEngine struct {
 	revealAll     atomic.Bool
 	revealQueryMu sync.RWMutex
 
+	// embeddingsEnabled gates the pending-embed index write on node creates.
+	// When false, new nodes skip the pendingEmbed marker since no embed worker
+	// will consume it — saves one Badger Set per user node on hot-path writes.
+	embeddingsEnabled atomic.Bool
+
 	// log is the structured *slog.Logger for storage subsystem emissions.
 	// Tagged at construction with component=storage, engine=badger.
 	// D-01 logger DI; D-07 storage internals use e.log directly. Discard

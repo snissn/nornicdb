@@ -127,6 +127,12 @@ func (tx *BadgerTransaction) IsActive() bool {
 }
 
 func (tx *BadgerTransaction) closeLocked(status TransactionStatus, discard bool, closedErr error) {
+	if tx.badgerTx != nil && tx.engine != nil && tx.engine.idDict != nil {
+		// Drop any staged counter state. Safe whether the txn
+		// committed (flushTxnCounters already cleared it) or is being
+		// rolled back (we don't persist counters for aborted work).
+		tx.engine.idDict.discardTxnCounters(tx.badgerTx)
+	}
 	if discard && tx.badgerTx != nil {
 		tx.badgerTx.Discard()
 	}
@@ -354,9 +360,7 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 	}
 
 	// Add to pending embeddings index if needed
-	if !isSystemNamespaceID(string(node.ID)) &&
-		(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
-		NodeNeedsEmbedding(node) {
+	if tx.engine.shouldIndexPendingEmbed(node) {
 		tx.bufferSet(pendingEmbedKey(node.ID), []byte{})
 	}
 
@@ -370,6 +374,11 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 		Timestamp: time.Now(),
 		NodeID:    node.ID,
 		Node:      nodeCopy,
+		// FreshID propagates the "caller asserts this ID is new and cannot
+		// collide with a tombstoned MVCC head" contract into the commit
+		// loop so it can skip the head-load round-trip. Gated on the same
+		// UUID-shape heuristic that lets us skip the existence-read above.
+		FreshID: skipExistenceCheck,
 	})
 
 	return node.ID, nil
@@ -459,7 +468,7 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 	tx.pendingNodes[node.ID] = nodeCopy
 	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 		tx.bufferDelete(pendingEmbedKey(node.ID))
-	} else if !isSystemNamespaceID(string(node.ID)) && NodeNeedsEmbedding(node) {
+	} else if tx.engine.shouldIndexPendingEmbed(node) {
 		tx.bufferSet(pendingEmbedKey(node.ID), []byte{})
 	} else {
 		tx.bufferDelete(pendingEmbedKey(node.ID))
@@ -782,6 +791,7 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 		Timestamp: time.Now(),
 		EdgeID:    edge.ID,
 		Edge:      edgeCopy,
+		FreshID:   hasUUIDShape(string(edge.ID)),
 	})
 
 	return nil
@@ -885,6 +895,7 @@ func (tx *BadgerTransaction) BulkCreateEdges(edges []*Edge) error {
 			Timestamp: time.Now(),
 			EdgeID:    edge.ID,
 			Edge:      edgeCopy,
+			FreshID:   hasUUIDShape(string(edge.ID)),
 		})
 	}
 
@@ -1379,6 +1390,13 @@ func (tx *BadgerTransaction) Commit() error {
 		return fmt.Errorf("flushing buffered writes: %w", err)
 	}
 
+	// Persist any staged monotonic ID-counter updates. One Badger Set
+	// per kind, vs. one per allocation when this was done inline.
+	if err := tx.engine.idDict.flushTxnCounters(tx.badgerTx); err != nil {
+		tx.closeLocked(TxStatusRolledBack, true, nil)
+		return fmt.Errorf("flushing id counters: %w", err)
+	}
+
 	if err := tx.refreshTemporalCurrentPointers(temporalTargets); err != nil {
 		tx.closeLocked(TxStatusRolledBack, true, nil)
 		return fmt.Errorf("refreshing temporal current pointers: %w", err)
@@ -1837,7 +1855,17 @@ func (tx *BadgerTransaction) checkNodeAdjacencyConflict(nodeID NodeID) error {
 // shouldSkipCreateExistenceCheck avoids a read-before-write for UUID-based IDs.
 // UUID collisions are negligible for generated IDs, so we skip the read to save I/O.
 func shouldSkipCreateExistenceCheck(nodeID NodeID) bool {
-	_, rawID, ok := ParseDatabasePrefix(string(nodeID))
+	return hasUUIDShape(string(nodeID))
+}
+
+// hasUUIDShape reports whether an id is a namespace-prefixed UUID. Because
+// UUIDv4 collisions are astronomically unlikely, a freshly minted UUID cannot
+// refer to a previously deleted entity — so callers that mint IDs this way can
+// safely skip both the create existence read AND the MVCC head load-before-write
+// during commit without risking incorrect snapshot semantics for a
+// tombstoned-then-recreated ID.
+func hasUUIDShape(id string) bool {
+	_, rawID, ok := ParseDatabasePrefix(id)
 	if !ok {
 		return false
 	}
