@@ -59,6 +59,10 @@ type MetricOpts struct {
 var allowedSubsystems = []string{
 	"http", "bolt", "cypher", "storage", "mvcc",
 	"embed", "search", "replication", "auth", "cache", "process",
+	// knowledge_policy: decay / promotion / suppression evaluations, on-access
+	// mutations, access-flush batches, deindex enqueues. See
+	// docs/plans/knowledge-policy-observability-plan.md.
+	"knowledge_policy",
 }
 
 // Bucket constants — single source of truth per MET-03 (CONTEXT D-01).
@@ -91,6 +95,14 @@ var RowCountBuckets = []float64{
 // Used by NewEmbeddingLatencyHistogramVec (MET-05).
 var EmbeddingLatencyBucketsSeconds = []float64{
 	.001, .01, .1, .5, 1, 5, 10, 30, 60, 120, 300, 600,
+}
+
+// ScoreBuckets covers 0.0..1.0 for knowledge-policy decay / promotion score
+// histograms. Ten equally-spaced buckets catch the bimodal fresh/stale
+// distribution operators look for when validating half-life choices.
+// Used by NewScoreHistogramVec (knowledge_policy subsystem).
+var ScoreBuckets = []float64{
+	0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0,
 }
 
 // requireNonEmptyHelp panics if h is empty — client_golang convention.
@@ -183,6 +195,27 @@ func NewEmbeddingLatencyHistogramVec(reg *prometheus.Registry, opts MetricOpts, 
 		Name:      opts.Name,
 		Help:      opts.Help,
 		Buckets:   EmbeddingLatencyBucketsSeconds,
+	}, labels)
+	reg.MustRegister(vec)
+	return vec
+}
+
+// NewScoreHistogramVec constructs a 0.0..1.0 score histogram on reg for
+// knowledge-policy decay / promotion score distributions. Same validation +
+// Pitfall-8 panic semantics. Buckets: ScoreBuckets. Suffix: MUST end in
+// _score (unitless score families follow ADR §2.2's "_score" convention).
+func NewScoreHistogramVec(reg *prometheus.Registry, opts MetricOpts, labels []string) *prometheus.HistogramVec {
+	validateSubsystem(opts.Subsystem)
+	validateNameSuffix(opts.Name, "_score")
+	validateLabels(labels)
+	requireNonEmptyHelp(opts.Help, opts.Name)
+
+	vec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "nornicdb",
+		Subsystem: opts.Subsystem,
+		Name:      opts.Name,
+		Help:      opts.Help,
+		Buckets:   ScoreBuckets,
 	}, labels)
 	reg.MustRegister(vec)
 	return vec

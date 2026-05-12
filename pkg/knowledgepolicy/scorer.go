@@ -1,17 +1,54 @@
 package knowledgepolicy
 
-import "math"
+import (
+	"context"
+	"math"
+
+	"github.com/orneryd/nornicdb/pkg/observability"
+)
 
 // Scorer computes decay and promotion scores using the shared resolver.
 type Scorer struct {
 	resolver     *Resolver
 	decayEnabled bool
+
+	// metrics is the knowledge-policy observability handle attached via
+	// SetMetrics at construction (typically from pkg/nornicdb/db.go). May
+	// be nil when observability is disabled or before the handle is
+	// published — all IncScored / IncSuppression / ObserveDecayScoreSampled
+	// calls are nil-safe.
+	metrics *observability.KnowledgePolicyMetrics
+
+	// database is the namespace/tenant label threaded onto metrics when the
+	// observability bag was constructed with tenantLabelsEnabled=true. Zero
+	// string is fine when the label is disabled.
+	database string
 }
 
 // NewScorer creates a Scorer. When decayEnabled is false, all Score* methods
 // return NeutralResolution.
 func NewScorer(r *Resolver, decayEnabled bool) *Scorer {
 	return &Scorer{resolver: r, decayEnabled: decayEnabled}
+}
+
+// SetMetrics attaches an observability handle to the Scorer. Safe to call
+// after construction; passing nil falls back to the package-level global
+// (observability.GetKnowledgePolicyMetrics) so late-initialised metrics
+// still flow through. `database` is included on every per-tenant metric
+// labelset when the bag was constructed with tenantLabelsEnabled=true.
+func (s *Scorer) SetMetrics(m *observability.KnowledgePolicyMetrics, database string) {
+	s.metrics = m
+	s.database = database
+}
+
+// resolveMetrics returns the configured handle or falls back to the global
+// ref. Allows metrics to be registered after Scorer construction — the
+// common case when NornicDB main.go builds the Provider AFTER db.Open.
+func (s *Scorer) resolveMetrics() *observability.KnowledgePolicyMetrics {
+	if s.metrics != nil {
+		return s.metrics
+	}
+	return observability.GetKnowledgePolicyMetrics()
 }
 
 func (s *Scorer) ScoreNode(
@@ -31,7 +68,9 @@ func (s *Scorer) ScoreNodeWithProperties(
 	createdAt, versionAt, nowNanos int64,
 ) ScoringResolution {
 	if !s.decayEnabled {
-		return neutralFor(targetID, ScopeNode)
+		res := neutralFor(targetID, ScopeNode)
+		s.recordScoringOutcome(res, "")
+		return res
 	}
 	cb := s.resolver.ResolveNode(labels)
 	return s.score(cb, targetID, ScopeNode, createdAt, versionAt, nowNanos, accessMeta, entityProps)
@@ -54,7 +93,9 @@ func (s *Scorer) ScoreEdgeWithProperties(
 	createdAt, versionAt, nowNanos int64,
 ) ScoringResolution {
 	if !s.decayEnabled {
-		return neutralFor(targetID, ScopeEdge)
+		res := neutralFor(targetID, ScopeEdge)
+		s.recordScoringOutcome(res, "")
+		return res
 	}
 	cb := s.resolver.ResolveEdge(edgeType)
 	return s.score(cb, targetID, ScopeEdge, createdAt, versionAt, nowNanos, accessMeta, entityProps)
@@ -68,7 +109,9 @@ func (s *Scorer) ScoreProperty(
 	createdAt, versionAt, nowNanos int64,
 ) ScoringResolution {
 	if !s.decayEnabled {
-		return neutralFor(targetID, ScopeProperty)
+		res := neutralFor(targetID, ScopeProperty)
+		s.recordScoringOutcome(res, "")
+		return res
 	}
 	cb := s.resolver.ResolveProperty(labels, propertyPath)
 	return s.score(cb, targetID, ScopeProperty, createdAt, versionAt, nowNanos, accessMeta, nil)
@@ -82,7 +125,9 @@ func (s *Scorer) ScoreEdgeProperty(
 	createdAt, versionAt, nowNanos int64,
 ) ScoringResolution {
 	if !s.decayEnabled {
-		return neutralFor(targetID, ScopeProperty)
+		res := neutralFor(targetID, ScopeProperty)
+		s.recordScoringOutcome(res, "")
+		return res
 	}
 	cb := s.resolver.ResolveEdgeProperty(edgeType, propertyPath)
 	return s.score(cb, targetID, ScopeProperty, createdAt, versionAt, nowNanos, accessMeta, nil)
@@ -98,6 +143,47 @@ func neutralFor(targetID string, scope ScopeType) ScoringResolution {
 	}
 }
 
+// scopeToEntityKind maps the internal ScopeType enum to the
+// knowledge_policy subsystem's entity_kind closed enum. Kept here (rather
+// than inside the catalog) so pkg/observability never needs to know about
+// pkg/knowledgepolicy's uppercase enum values.
+func scopeToEntityKind(scope ScopeType) string {
+	switch scope {
+	case ScopeNode:
+		return "node"
+	case ScopeEdge:
+		return "edge"
+	case ScopeProperty:
+		return "property"
+	default:
+		return "node"
+	}
+}
+
+// recordScoringOutcome emits the scored_total counter (always), the decay_score
+// histogram (sampled), and the suppressions_total counter (only when a reason
+// is supplied). Nil-safe on s.metrics.
+func (s *Scorer) recordScoringOutcome(res ScoringResolution, reason string) {
+	metrics := s.resolveMetrics()
+	if metrics == nil {
+		return
+	}
+	entityKind := scopeToEntityKind(res.TargetScope)
+	result := "visible"
+	if res.NoDecay {
+		result = "no_decay"
+	} else if res.SuppressionEligible {
+		result = "suppressed"
+	}
+	metrics.IncScored(entityKind, result, s.database)
+	if !res.NoDecay {
+		metrics.ObserveDecayScoreSampled(context.Background(), entityKind, s.database, res.FinalScore)
+	}
+	if reason != "" {
+		metrics.IncSuppression(entityKind, reason, s.database)
+	}
+}
+
 func (s *Scorer) score(
 	cb *CompiledBinding,
 	targetID string,
@@ -107,7 +193,9 @@ func (s *Scorer) score(
 	entityProps map[string]interface{},
 ) ScoringResolution {
 	if cb == nil {
-		return neutralFor(targetID, scope)
+		res := neutralFor(targetID, scope)
+		s.recordScoringOutcome(res, "")
+		return res
 	}
 	if cb.NoDecay {
 		res := neutralFor(targetID, scope)
@@ -122,6 +210,7 @@ func (s *Scorer) score(
 			res.ResolvedDecayProfileID = cb.DecayProfile.Name
 			res.AppliedDecayProfileNames = []string{cb.DecayProfile.Name}
 		}
+		s.recordScoringOutcome(res, "")
 		return res
 	}
 
@@ -163,7 +252,7 @@ func (s *Scorer) score(
 		profileNames = []string{cb.DecayProfile.Name}
 	}
 
-	return ScoringResolution{
+	res := ScoringResolution{
 		TargetID:                    targetID,
 		TargetScope:                 scope,
 		ResolvedDecayProfileID:      profileID,
@@ -181,6 +270,21 @@ func (s *Scorer) score(
 		FinalScore:                  finalScore,
 		SuppressionEligible:         finalScore < cb.VisibilityThreshold && !cb.HasNoDecayProperty,
 	}
+	// Classify the suppression reason for the suppressions_total counter.
+	// The order of checks matters: score_floor pins the final score *above*
+	// the threshold but can still indicate a configured minimum being hit,
+	// so it's a secondary dimension; below_threshold is the common case.
+	reason := ""
+	if res.SuppressionEligible {
+		switch {
+		case cb.DecayFloor > 0 && finalScore <= cb.DecayFloor:
+			reason = "score_floor"
+		default:
+			reason = "below_threshold"
+		}
+	}
+	s.recordScoringOutcome(res, reason)
+	return res
 }
 
 func selectPromotionProfile(rules []CompiledPromotionRule, accessMeta *AccessMetaEntry, entityProps map[string]interface{}, nowNanos int64) *PromotionProfileDef {

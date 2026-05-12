@@ -4,6 +4,21 @@
 **Date:** April 15, 2026
 **Scope:** Replace hardcoded Ebbinghaus memory-tier decay behavior with a generic, profile-and-policy-driven decay and scoring system that can support existing, proposed, or future decay models, while expressing promotive declarative tiers through separate promotion profile and policy subsystems, supporting MVCC-aware score-from selection for both nodes and edges, implementing efficient deindexing for visibility-suppressed nodes and edges, persisting `ON ACCESS` mutation state in a separate accessMeta index so that nodes and edges remain read-only during policy evaluation, evaluating scoring before query visibility so that invisible entities are suppressed from queries unless accessed through `reveal()`, and resolving promotion policies before decay profiles.
 
+> **Observability.** Decay / promotion / suppression, access-flush batches,
+> and on-access mutations are instrumented under the
+> `nornicdb_knowledge_policy_*` prefix. See
+> [`docs/observability/knowledge-policy-metrics.md`](../observability/knowledge-policy-metrics.md)
+> for the full instrument reference and operational runbook, and
+> [`docs/plans/knowledge-policy-observability-plan.md`](knowledge-policy-observability-plan.md)
+> for the implementation plan that wires this subsystem into the OTEL layer.
+> Key alerts:
+>
+> - `access_flush_buffer_fullness > 0.9` sustained → raise
+>   `Memory.AccessFlushBufferSize` or lower `Memory.DecayInterval`.
+> - `suppressions_total{reason}` skew from `below_threshold` to
+>   `score_floor` → floor policy is dominating; review binding configuration.
+> - `decay_score` histogram flat → half-life mis-tuned.
+
 ---
 
 ## 1. Objective

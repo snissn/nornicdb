@@ -16,7 +16,19 @@ import (
 // not hold excessive baseline memory when idle. The threshold is generous
 // (50 MB) to avoid flaky CI while catching accidental multi-hundred-MB leaks
 // from unbounded caches or span buffers.
+//
+// Note on delta computation: runtime.MemStats.HeapAlloc is a uint64, and
+// because a prior test may have left heap in a temporarily-inflated state,
+// GC between snapshots can leave `after` < `before`. A naive unsigned
+// subtraction would then underflow into a multi-exabyte delta and trip a
+// spurious failure. Use a signed difference computed in int64 space and
+// treat negative deltas as zero — the invariant we care about is
+// monotonic-upper-bound-on-growth, not exact bytes.
 func TestObservability_MemoryFloor(t *testing.T) {
+	// Run GC twice to drain pending finalisers from earlier tests (a single
+	// GC may leave work for the next cycle, producing noisy baselines when
+	// this test runs after heavy suites like pkg/nornicdb).
+	runtime.GC()
 	runtime.GC()
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
@@ -39,11 +51,21 @@ func TestObservability_MemoryFloor(t *testing.T) {
 	}
 
 	runtime.GC()
+	runtime.GC()
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
 
-	allocatedMB := float64(after.HeapAlloc-before.HeapAlloc) / 1024 / 1024
-	t.Logf("Observability memory floor: %.2f MB (heap delta after 100 spans)", allocatedMB)
+	// Signed-space delta: when GC reclaimed more than the span loop
+	// allocated, `after.HeapAlloc < before.HeapAlloc`. Clamp the signed
+	// difference to zero — the test's purpose is to catch large POSITIVE
+	// growth, not to assert on negative (reclamation-dominated) deltas.
+	deltaBytes := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	if deltaBytes < 0 {
+		deltaBytes = 0
+	}
+	allocatedMB := float64(deltaBytes) / 1024 / 1024
+	t.Logf("Observability memory floor: %.2f MB (heap delta after 100 spans; before=%d after=%d)",
+		allocatedMB, before.HeapAlloc, after.HeapAlloc)
 	assert.Less(t, allocatedMB, 50.0,
 		"Observability memory floor must be < 50 MB; got %.2f MB", allocatedMB)
 }

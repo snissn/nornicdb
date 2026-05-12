@@ -197,6 +197,25 @@ func (a *AccessAccumulator) checkBufferFull() {
 	}
 }
 
+// BufferFullness returns the current entity count as a fraction of the
+// configured maxBufferSize (in [0, 1]). Returns 0 when the accumulator is
+// unbounded (maxBufferSize <= 0). Intended for passive-scrape observability:
+// sustained values near 1.0 indicate the flush interval can't keep up.
+func (a *AccessAccumulator) BufferFullness() float64 {
+	if a == nil || a.maxBufferSize <= 0 {
+		return 0
+	}
+	count := a.entityCount.Load()
+	if count <= 0 {
+		return 0
+	}
+	f := float64(count) / float64(a.maxBufferSize)
+	if f > 1.0 {
+		f = 1.0
+	}
+	return f
+}
+
 // DrainAll atomically swaps out all shard deltas and returns a merged map.
 // Used by the flush goroutine.
 func (a *AccessAccumulator) DrainAll() map[string]*entityDelta {

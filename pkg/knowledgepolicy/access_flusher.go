@@ -4,6 +4,11 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/observability"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // AccessMetaStore is the persistence interface for AccessMetaEntry.
@@ -51,6 +56,10 @@ type AccessFlusher struct {
 	entityMeta         EntityMetaLookup
 	embedInvalidate    EmbedInvalidateFunc
 	suppressionRecheck SuppressionRecheckFunc
+
+	// metrics is the knowledge-policy observability handle. Optional —
+	// nil-safe, zero-cost when unset. See SetMetrics.
+	metrics *observability.KnowledgePolicyMetrics
 }
 
 // NewAccessFlusher creates a flusher. Default interval is 2 seconds.
@@ -84,6 +93,32 @@ func (f *AccessFlusher) SetPropertySuppression(scorerFn ScorerFunc, meta EntityM
 // after access metadata mutations have been persisted.
 func (f *AccessFlusher) SetSuppressionRecheck(fn SuppressionRecheckFunc) {
 	f.suppressionRecheck = fn
+}
+
+// SetMetrics attaches a knowledge-policy metrics handle. Nil-safe; a nil
+// handle falls back to the package-level global
+// (observability.GetKnowledgePolicyMetrics) at fire time so late-registered
+// metrics still flow through.
+func (f *AccessFlusher) SetMetrics(m *observability.KnowledgePolicyMetrics) {
+	f.metrics = m
+}
+
+// resolveMetrics returns the injected handle or falls back to the global.
+func (f *AccessFlusher) resolveMetrics() *observability.KnowledgePolicyMetrics {
+	if f.metrics != nil {
+		return f.metrics
+	}
+	return observability.GetKnowledgePolicyMetrics()
+}
+
+// BufferFullness returns the current accumulator buffer occupancy as a
+// fraction in [0, 1]. Exposed so the observability layer can install it as
+// a GaugeFunc callback.
+func (f *AccessFlusher) BufferFullness() float64 {
+	if f == nil || f.accumulator == nil {
+		return 0
+	}
+	return f.accumulator.BufferFullness()
 }
 
 // Start begins the flush loop. It exits immediately if the accumulator is disabled.
@@ -142,10 +177,44 @@ func (f *AccessFlusher) Flush() {
 }
 
 func (f *AccessFlusher) flush() {
+	start := time.Now()
 	merged := f.accumulator.DrainAll()
+
+	// Emit batch-size histogram even for empty batches (the zero-row short-
+	// circuit is a useful signal: frequent zero-row flushes = timer-driven
+	// waste).
+	metrics := f.resolveMetrics()
+	if metrics != nil {
+		metrics.ObserveAccessFlushBatchRows(context.Background(), float64(len(merged)))
+	}
+
 	if len(merged) == 0 {
+		if metrics != nil {
+			metrics.ObserveAccessFlushDuration(context.Background(), time.Since(start).Seconds())
+		}
 		return
 	}
+
+	// Wrap the non-empty flush in a span so downstream storage writes nest
+	// beneath it (one coherent trace per flush batch).
+	flushCtx := context.Background()
+	var span trace.Span
+	flushCtx, span = otel.Tracer("nornicdb/knowledge_policy").Start(
+		flushCtx, "nornicdb.knowledge_policy.flush",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	propertySuppressionChanges := 0
+
+	defer func() {
+		span.SetAttributes(
+			attribute.Int("batch.row_count", len(merged)),
+			attribute.Int("batch.property_suppression_changes", propertySuppressionChanges),
+		)
+		span.End()
+		if metrics != nil {
+			metrics.ObserveAccessFlushDuration(flushCtx, time.Since(start).Seconds())
+		}
+	}()
 
 	now := time.Now().UnixNano()
 	for entityID, delta := range merged {
@@ -206,6 +275,7 @@ func (f *AccessFlusher) flush() {
 		entry.MutationCount++
 
 		if f.evaluatePropertySuppression(entityID, entry, meta, now) {
+			propertySuppressionChanges++
 			// Suppression state changed — trigger re-embedding.
 			if f.embedInvalidate != nil && entry.TargetScope != ScopeEdge {
 				f.embedInvalidate(entityID)

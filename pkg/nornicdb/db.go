@@ -50,11 +50,15 @@ import (
 	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/knowledgepolicy"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/observability"
 	"github.com/orneryd/nornicdb/pkg/replication"
 	"github.com/orneryd/nornicdb/pkg/retention"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/storage/lifecycle"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Errors returned by DB operations.
@@ -959,33 +963,80 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		if be := unwrapToBadgerEngine(db.baseStorage); be != nil {
 			be.SetDecayEnabled(true)
 			defaultDBName := db.defaultDatabaseName()
+
+			// Record startup reconcile pass so operators see the init-time
+			// schema sweep in the counter. We read the metrics handle via
+			// the global ref so late-initialised observability (common when
+			// Provider.New runs AFTER nornicdb.Open in main.go) still
+			// captures the startup fire on the next scrape.
+			if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+				kp.IncReconcile("startup", defaultDBName)
+			}
+
 			be.GetSchemaForNamespace(defaultDBName).SetKnowledgePolicyChangedHook(func() {
+				// Wrap schema-change reconcile in a span + counter so the
+				// (usually rare) churn from DDL is visible.
+				hookCtx, span := otel.Tracer("nornicdb/knowledge_policy").Start(
+					context.Background(), "nornicdb.knowledge_policy.reconcile",
+					trace.WithSpanKind(trace.SpanKindInternal),
+				)
+				defer span.End()
+				if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+					kp.IncReconcile("schema_change", defaultDBName)
+				}
 				changes, err := be.ReconcileDecaySuppressionWithChanges(defaultDBName)
 				if err != nil || db.cypherExecutor == nil {
 					return
 				}
+				span.SetAttributes(
+					attribute.Int("changes_count", len(changes)),
+					attribute.String("trigger", "schema_change"),
+					attribute.String("database", defaultDBName),
+				)
 				for _, change := range changes {
 					db.cypherExecutor.InvalidateEntityCaches(change.EntityID, change.Tokens)
 				}
+				_ = hookCtx
 			})
 			db.accessAccumulator = knowledgepolicy.NewAccessAccumulator(true, config.Memory.AccessFlushBufferSize)
 			be.SetAccessAccumulator(db.accessAccumulator)
 			db.accessFlusher = knowledgepolicy.NewAccessFlusher(
 				db.accessAccumulator, be, config.Memory.DecayInterval,
 			)
+			// Metrics are resolved lazily via the global ref inside the
+			// flusher; no explicit SetMetrics call needed. Same for Scorer.
 			db.accessFlusher.SetPropertySuppression(
-				func(namespace string) *knowledgepolicy.Scorer { return be.ScorerForNamespace(namespace) },
+				func(namespace string) *knowledgepolicy.Scorer {
+					s := be.ScorerForNamespace(namespace)
+					if s != nil {
+						// Database label is the namespace; metrics resolve
+						// via the global ref at fire time.
+						s.SetMetrics(nil, namespace)
+					}
+					return s
+				},
 				be,
 				func(entityID string) { be.AddToPendingEmbeddings(storage.NodeID(entityID)) },
 			)
 			db.accessFlusher.SetSuppressionRecheck(func(entityID string, meta knowledgepolicy.EntityMeta) {
 				becameSuppressed, err := be.EnqueueDeindexIfSuppressed(entityID, meta.Scope == knowledgepolicy.ScopeEdge)
-				if err == nil && becameSuppressed && db.cypherExecutor != nil {
-					tokens := append([]string(nil), meta.Labels...)
-					if meta.EdgeType != "" {
-						tokens = append(tokens, meta.EdgeType)
+				if err == nil && becameSuppressed {
+					// Emit deindex counter + on-access suppression record.
+					if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+						kind := "node"
+						if meta.Scope == knowledgepolicy.ScopeEdge {
+							kind = "edge"
+						}
+						kp.IncDeindexEnqueued(kind, defaultDBName)
+						kp.IncSuppression(kind, "on_access", defaultDBName)
 					}
-					db.cypherExecutor.InvalidateEntityCaches(entityID, tokens)
+					if db.cypherExecutor != nil {
+						tokens := append([]string(nil), meta.Labels...)
+						if meta.EdgeType != "" {
+							tokens = append(tokens, meta.EdgeType)
+						}
+						db.cypherExecutor.InvalidateEntityCaches(entityID, tokens)
+					}
 				}
 			})
 		}
@@ -2139,6 +2190,16 @@ func (db *DB) GetEmbedQueue() *EmbedQueue {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	return db.embedQueue
+}
+
+// GetAccessFlusher returns the active knowledge-policy AccessFlusher, or
+// nil when decay is disabled / not yet constructed. Exposed so the
+// observability layer can install a passive-scrape callback reading
+// flusher.BufferFullness().
+func (db *DB) GetAccessFlusher() *knowledgepolicy.AccessFlusher {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.accessFlusher
 }
 
 // GetReplicator returns the active replicator (nil when running in

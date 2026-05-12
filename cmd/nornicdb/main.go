@@ -780,6 +780,28 @@ func runServe(cmd *cobra.Command, args []string) error {
 		exec.SetCacheMetrics(cacheMetrics)
 	}
 
+	// 2b''. Knowledge-policy metrics (decay / promotion / suppression /
+	//       on-access mutations / access-flush batches). See
+	//       docs/plans/knowledge-policy-observability-plan.md. Published
+	//       via the package-level ref so the storage read-path filter
+	//       (deep-nested; threading a handle through every iterator
+	//       signature would widen the Engine interface) picks it up.
+	//       Construction happens AFTER nornicdb.Open so any startup fire
+	//       from within Open (e.g. the startup Reconcile counter) is lost
+	//       — acceptable; the handle is picked up lazily for all
+	//       subsequent fires via observability.GetKnowledgePolicyMetrics.
+	kpMetrics := observability.NewKnowledgePolicyMetrics(
+		obs.Registry(),
+		cfg.Observability.Metrics.TenantLabelsEnabled,
+		func() float64 {
+			if af := db.GetAccessFlusher(); af != nil {
+				return af.BufferFullness()
+			}
+			return 0
+		},
+	)
+	observability.SetKnowledgePolicyMetrics(kpMetrics)
+
 	// 2b''. Plan 04-04: construct StorageMetrics (MET-10) + MVCCMetrics
 	//       (MET-11). The bags register against obs.Registry() — disjoint
 	//       families, no AlreadyRegisteredError risk. Inject into the

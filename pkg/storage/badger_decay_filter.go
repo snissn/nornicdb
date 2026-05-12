@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/knowledgepolicy"
+	"github.com/orneryd/nornicdb/pkg/observability"
 )
 
 // accessIncrementor is the subset of knowledgepolicy.AccessAccumulator needed
@@ -59,6 +60,13 @@ func (b *BadgerEngine) filterNodeByDecay(node *Node, nowNanos int64) bool {
 		return false
 	}
 	if node.VisibilitySuppressed {
+		// Explicit-flag suppression counted separately from threshold-based
+		// suppression so operators can distinguish already-suppressed reads
+		// (cheap) from scoring-driven reads (expensive).
+		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+			kp.IncReadFilterDropped("node", "")
+			kp.IncSuppression("node", "explicit_flag", "")
+		}
 		return true
 	}
 
@@ -82,7 +90,11 @@ func (b *BadgerEngine) filterNodeByDecay(node *Node, nowNanos int64) bool {
 		nowNanos,
 	)
 	suppress := res.SuppressionEligible
-	if !suppress && b.accumulator != nil {
+	if suppress {
+		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+			kp.IncReadFilterDropped("node", "")
+		}
+	} else if b.accumulator != nil {
 		b.accumulator.IncrementAccess(string(node.ID))
 	}
 	return suppress
@@ -97,6 +109,10 @@ func (b *BadgerEngine) filterEdgeByDecay(edge *Edge, nowNanos int64) bool {
 		return false
 	}
 	if edge.VisibilitySuppressed {
+		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+			kp.IncReadFilterDropped("edge", "")
+			kp.IncSuppression("edge", "explicit_flag", "")
+		}
 		return true
 	}
 
@@ -120,7 +136,11 @@ func (b *BadgerEngine) filterEdgeByDecay(edge *Edge, nowNanos int64) bool {
 		nowNanos,
 	)
 	suppress := res.SuppressionEligible
-	if !suppress && b.accumulator != nil {
+	if suppress {
+		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+			kp.IncReadFilterDropped("edge", "")
+		}
+	} else if b.accumulator != nil {
 		b.accumulator.IncrementAccess(string(edge.ID))
 	}
 	return suppress

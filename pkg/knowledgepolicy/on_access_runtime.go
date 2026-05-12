@@ -20,6 +20,11 @@ func (f *AccessFlusher) applyOnAccessMutations(entityID string, entry *AccessMet
 
 	policy := resolveOnAccessPolicy(scorer, meta)
 	if policy == nil || policy.OnAccess == nil || len(policy.OnAccess.Mutations) == 0 {
+		// No policy matched — record and exit. The counter lets operators
+		// see how much of the access flood is actually policy-relevant.
+		if metrics := f.resolveMetrics(); metrics != nil {
+			metrics.IncOnAccess("skipped_no_policy", scorer.database)
+		}
 		return appliedFixed
 	}
 
@@ -33,20 +38,25 @@ func (f *AccessFlusher) applyOnAccessMutations(entityID string, entry *AccessMet
 		params:   map[string]interface{}{},
 	}
 
+	mutationErrors := 0
+	mutationsApplied := 0
 	for _, mutation := range policy.OnAccess.Mutations {
 		targetProp, expr, ok := splitOnAccessAssignment(mutation.Expression)
 		if !ok {
+			mutationErrors++
 			continue
 		}
 
 		value, err := evalOnAccessExpression(expr, ctx)
 		if err != nil {
+			mutationErrors++
 			continue
 		}
 
 		if mutation.Kalman != nil {
 			measurement, ok := toFloat64(value)
 			if !ok {
+				mutationErrors++
 				continue
 			}
 			value = ProcessKalmanMutation(targetProp, measurement, mutation.Kalman, entry)
@@ -54,6 +64,16 @@ func (f *AccessFlusher) applyOnAccessMutations(entityID string, entry *AccessMet
 
 		if setOnAccessProperty(entry, targetProp, value) {
 			appliedFixed[targetProp] = true
+		}
+		mutationsApplied++
+	}
+
+	if metrics := f.resolveMetrics(); metrics != nil {
+		if mutationsApplied > 0 {
+			metrics.IncOnAccess("applied", scorer.database)
+		}
+		if mutationErrors > 0 {
+			metrics.IncOnAccess("error", scorer.database)
 		}
 	}
 
