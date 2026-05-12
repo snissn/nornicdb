@@ -387,11 +387,16 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 	}
 
 	// TRC-23: start a flush span linked to the originating request spans.
+	// The `kind` attribute ("batch") satisfies the TRC-17 universal contract
+	// that every nornicdb.storage.* span carries a `kind` attr — otherwise a
+	// flush span leaking into a concurrent TracerProvider (e.g. a later test
+	// that swaps the global provider) would break downstream assertions.
 	links := ae.drainSpanLinks()
 	_, flushSpan := otel.Tracer("nornicdb/storage").Start(
 		context.Background(), "nornicdb.storage.flush",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithLinks(links...),
+		trace.WithAttributes(attribute.String("kind", "batch")),
 	)
 	defer func() {
 		flushSpan.SetAttributes(
