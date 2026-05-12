@@ -55,6 +55,14 @@ type BadgerTransaction struct {
 	deferConstraintValidation bool
 	// When true, skip read-before-write existence checks for CREATE operations.
 	skipCreateExistenceCheck bool
+	// implicit marks transactions that were auto-opened by the executor for a
+	// single Cypher statement outside an explicit BEGIN/COMMIT. The Bolt
+	// session coalesces durability at the end of the session via the
+	// deferFlush path (pkg/bolt/server.go), so the per-Commit engine.Sync()
+	// in Commit() is redundant — dropping it collapses ~N fsyncs/Msyncs to
+	// the session-end flush without weakening the durability contract users
+	// actually rely on (explicit tx commit and session close).
+	implicit bool
 
 	// Transaction metadata (for logging/debugging)
 	Metadata           map[string]interface{}
@@ -193,6 +201,22 @@ func (tx *BadgerTransaction) SetSkipCreateExistenceCheck(skip bool) error {
 	}
 
 	tx.skipCreateExistenceCheck = skip
+	return nil
+}
+
+// SetImplicit marks this transaction as implicit (auto-opened by the executor
+// for a single Cypher statement, no user BEGIN). Implicit transactions skip
+// the per-Commit engine.Sync() because the Bolt session end and the async
+// flush loop coalesce durability for them.
+func (tx *BadgerTransaction) SetImplicit(implicit bool) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
+	}
+
+	tx.implicit = implicit
 	return nil
 }
 
@@ -1511,11 +1535,15 @@ func (tx *BadgerTransaction) Commit() error {
 		}
 	}
 
-	// ACID GUARANTEE: Force fsync for explicit transactions
-	// This ensures durability - data is on disk before we return success
-	// Non-transactional writes use batch sync for better performance
-	// Note: In-memory mode (testing) skips fsync as there's no disk
-	if !tx.engine.IsInMemory() {
+	// ACID GUARANTEE: Force fsync for EXPLICIT transactions only.
+	// Explicit COMMIT must be durable before we return success (user asked
+	// for a transaction, they get ACID-D). Implicit transactions (one per
+	// Cypher statement under an auto-commit Bolt session) rely on the
+	// session-end flush and the async engine's batched syncs — forcing an
+	// Msync here once per UNWIND batch amplifies the syscall cost linearly
+	// in batch count with no observable durability benefit over the
+	// coalesced path. In-memory mode has no disk to sync.
+	if !tx.engine.IsInMemory() && !tx.implicit {
 		if err := tx.engine.Sync(); err != nil {
 			// Transaction is committed in Badger but fsync failed.
 			// Log error but don't rollback - data is in Badger's WAL.
