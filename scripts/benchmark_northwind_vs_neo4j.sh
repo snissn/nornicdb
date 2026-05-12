@@ -188,6 +188,33 @@ kill_pid() {
   err "pid ${pid} still alive after SIGKILL"
 }
 
+# stop_pid_graceful sends SIGTERM, waits up to `timeout` seconds for the
+# process to exit (so the storage layer can flush its in-memory memtables,
+# compact pending writes, and fsync — critical for a meaningful on-disk
+# size measurement), then falls back to SIGKILL if the deadline passes.
+#
+# Use this (NOT kill_pid) when the process owns a write cache that only
+# lands on disk during its shutdown handler (e.g. BadgerDB memtable flush,
+# WAL sync, value-log rewrite). SIGKILL leaves the data directory bloated
+# with preallocated memtables / unflushed vlog entries, producing
+# misleadingly large `du` readings.
+stop_pid_graceful() {
+  local pid="$1"
+  local timeout="${2:-20}"
+  kill -TERM "${pid}" 2>/dev/null || true
+  local waited=0
+  while kill -0 "${pid}" 2>/dev/null; do
+    if (( waited >= timeout )); then
+      err "pid ${pid} did not exit within ${timeout}s of SIGTERM — forcing SIGKILL (disk size may be inflated)"
+      kill -KILL "${pid}" 2>/dev/null || true
+      sleep 1
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
 # ------------------------------------------------------------------------
 # NornicDB run
 # ------------------------------------------------------------------------
@@ -244,8 +271,13 @@ run_nornic() {
     -out "${REPORT_DIR}/nornicdb.results.json" \
     2>"${REPORT_DIR}/nornicdb.bench.log" || die "NornicDB benchmark failed — see ${REPORT_DIR}/nornicdb.bench.log"
 
-  log "killing NornicDB (SIGKILL)"
-  kill_pid "${NORNIC_PID}"
+  # Graceful shutdown so BadgerDB gets a chance to flush its in-memory
+  # memtables and compact/rewrite vlog segments. Without this the
+  # subsequent `du` measurement includes a full 8 MiB preallocated
+  # memtable and every write still sitting in the memtable — producing
+  # absurd sizes like 50+ MiB for 10 kB of actual data.
+  log "stopping NornicDB gracefully (SIGTERM, flushing storage)"
+  stop_pid_graceful "${NORNIC_PID}" 30
   NORNIC_PID=""
 
   local t1=$(date +%s.%N)
@@ -255,6 +287,9 @@ run_nornic() {
 
   python3 -c "print(f'{float(${t1}) - float(${t0}):.3f}')" > "${REPORT_DIR}/nornicdb.wall_seconds.txt"
 
+  # Flush OS page cache for this directory before measuring so `du` sees
+  # what actually landed in the filesystem.
+  sync
   log "measuring NornicDB on-disk size"
   du -sk "${NORNIC_DATA_DIR}" | awk '{print $1 * 1024}' > "${REPORT_DIR}/nornicdb.disk_bytes.txt"
   du -sh "${NORNIC_DATA_DIR}" > "${REPORT_DIR}/nornicdb.disk_human.txt" || true
@@ -365,11 +400,25 @@ run_neo4j() {
     -out "${REPORT_DIR}/neo4j.results.json" \
     2>"${REPORT_DIR}/neo4j.bench.log" || die "Neo4j benchmark failed — see ${REPORT_DIR}/neo4j.bench.log"
 
-  log "killing Neo4j (SIGKILL)"
-  if [[ -n "${NEO4J_PID}" ]]; then
-    kill_pid "${NEO4J_PID}"
-  else
-    pkill -KILL -f "org\.neo4j\.server\." 2>/dev/null || true
+  # Graceful shutdown via `neo4j stop` so Neo4j flushes its
+  # transaction log and page cache. SIGKILL would leave the store in a
+  # recovery-pending state and inflate the `du` reading with uncompacted
+  # transactions. Fall back to SIGTERM + SIGKILL only if the wrapper hangs.
+  log "stopping Neo4j gracefully (neo4j stop, flushing stores)"
+  local stop_rc
+  set +e
+  "${NEO4J_RUN_PREFIX[@]}" "${NEO4J_HOME}/bin/neo4j" stop >"${REPORT_DIR}/neo4j.stop.log" 2>&1
+  stop_rc=$?
+  set -e
+  if (( stop_rc != 0 )); then
+    err "neo4j stop returned ${stop_rc} — falling back to SIGTERM"
+    if [[ -n "${NEO4J_PID}" ]]; then
+      stop_pid_graceful "${NEO4J_PID}" 30
+    else
+      pkill -TERM -f "org\.neo4j\.server\." 2>/dev/null || true
+      sleep 5
+      pkill -KILL -f "org\.neo4j\.server\." 2>/dev/null || true
+    fi
   fi
   NEO4J_PID=""
 
@@ -380,6 +429,9 @@ run_neo4j() {
 
   python3 -c "print(f'{float(${t1}) - float(${t0}):.3f}')" > "${REPORT_DIR}/neo4j.wall_seconds.txt"
 
+  # Flush OS page cache before measuring so `du` reflects bytes actually
+  # on disk, not dirty buffers the kernel hasn't written yet.
+  sync
   log "measuring Neo4j on-disk size"
   du -sk "${NEO4J_DATA_DIR}" | awk '{print $1 * 1024}' > "${REPORT_DIR}/neo4j.disk_bytes.txt"
   du -sh "${NEO4J_DATA_DIR}" > "${REPORT_DIR}/neo4j.disk_human.txt" || true

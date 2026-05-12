@@ -360,6 +360,21 @@ def render_single_report(run: dict, iterations: int, products: int, orders: int)
     lines.append(f"- Preallocated scratch (excluded): {human_bytes(totals['skip'])} ({totals['skip']:,} bytes)")
     lines.append(f"- Unclassified (other): {human_bytes(totals['other'])} ({totals['other']:,} bytes)")
     lines.append(f"- Full data directory `du`: {human_bytes(disk_total)} ({disk_total:,} bytes)")
+
+    # Integrity check: every byte that du sees must land in exactly one
+    # bucket. If the classified sum diverges from disk_total by more than
+    # 8 KiB (one filesystem block tolerance for race between du and the
+    # classifier walk), surface a WARNING in the report so operators know
+    # to investigate — most likely a new Badger/Neo4j file type the rules
+    # don't cover.
+    classified = sum(totals.values())
+    delta = classified - disk_total
+    lines.append(f"- Classified sum: {human_bytes(classified)} ({classified:,} bytes, Δ vs du = {delta:+,} bytes)")
+    if abs(delta) > 8 * 1024:
+        lines.append("")
+        lines.append(f"> ⚠️ **Classifier/du mismatch:** {delta:+,} bytes. "
+                     f"A file type may be uncategorised — inspect the data "
+                     f"directory manually and extend NORNIC_RULES / NEO4J_RULES.")
     lines.append("")
     lines.append("_Raw-data size is the comparison headline. Preallocated memtable/WAL scratch files (8 MiB memtable on Badger, 1 MiB GC discard log, etc.) are excluded because they hold the same bytes regardless of dataset size._")
     lines.append("")
