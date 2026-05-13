@@ -3145,20 +3145,15 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 
 	seenOrphans := make(map[string]bool)
 
-	// Step 3: Filter by type if specified
-	if len(opts.Types) > 0 {
-		vectorResults = s.filterByType(ctx, vectorResults, opts.Types, seenOrphans)
-		bm25Results = s.filterByType(ctx, bm25Results, opts.Types, seenOrphans)
-	}
-
-	// Step 3b: Filter decayed candidates
+	// Step 3: Filter decayed candidates first (cheap, no storage reads).
 	vectorResults = s.filterDecayedCandidates(vectorResults)
 	bm25Results = s.filterDecayedCandidates(bm25Results)
 
-	// Step 3c: Pre-filter by property values before top-K selection
-	if len(opts.Filters) > 0 {
-		vectorResults = s.filterByProperties(ctx, vectorResults, opts.Filters, seenOrphans)
-		bm25Results = s.filterByProperties(ctx, bm25Results, opts.Filters, seenOrphans)
+	// Step 3b: Filter by type and/or property values in a single BatchGetNodes pass
+	// to avoid redundant per-candidate storage reads.
+	if len(opts.Types) > 0 || len(opts.Filters) > 0 {
+		vectorResults = s.filterByTypeAndProperties(ctx, vectorResults, opts.Types, opts.Filters, seenOrphans)
+		bm25Results = s.filterByTypeAndProperties(ctx, bm25Results, opts.Types, opts.Filters, seenOrphans)
 	}
 
 	// Step 4: Fuse with RRF
@@ -5011,11 +5006,8 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 	results = collapseIndexResultsByNodeID(results)
 
 	seenOrphans := make(map[string]bool)
-	if len(opts.Types) > 0 {
-		results = s.filterByType(ctx, results, opts.Types, seenOrphans)
-	}
-	if len(opts.Filters) > 0 {
-		results = s.filterByProperties(ctx, results, opts.Filters, seenOrphans)
+	if len(opts.Types) > 0 || len(opts.Filters) > 0 {
+		results = s.filterByTypeAndProperties(ctx, results, opts.Types, opts.Filters, seenOrphans)
 	}
 
 	searchResults := s.enrichIndexResults(ctx, results, opts.Limit, seenOrphans)
@@ -5068,11 +5060,8 @@ func (s *Service) fullTextSearchOnly(ctx context.Context, query string, opts *Se
 	bm25Ms := int(time.Since(bm25Start).Milliseconds())
 
 	seenOrphans := make(map[string]bool)
-	if len(opts.Types) > 0 {
-		results = s.filterByType(ctx, results, opts.Types, seenOrphans)
-	}
-	if len(opts.Filters) > 0 {
-		results = s.filterByProperties(ctx, results, opts.Filters, seenOrphans)
+	if len(opts.Types) > 0 || len(opts.Filters) > 0 {
+		results = s.filterByTypeAndProperties(ctx, results, opts.Types, opts.Filters, seenOrphans)
 	}
 
 	searchResults := s.enrichIndexResults(ctx, results, opts.Limit, seenOrphans)
@@ -5285,9 +5274,13 @@ func vectorFromPropertyValue(value any, expectedDim int) ([]float32, bool) {
 
 // nodeMatchesFilters reports whether node satisfies all filters (AND across keys, OR within values).
 // Each filter value is matched against the property as a string; for array properties every
-// element is checked individually.
+// element is checked individually. Filter keys with an empty value list are ignored so that
+// a client sending {"filters":{"key":[]}} does not silently discard all results.
 func nodeMatchesFilters(node *storage.Node, filters map[string][]string) bool {
 	for propName, wantVals := range filters {
+		if len(wantVals) == 0 {
+			continue // treat missing/empty list as "no constraint"
+		}
 		propVal, exists := node.Properties[propName]
 		if !exists {
 			return false
@@ -5343,6 +5336,86 @@ func (s *Service) filterByProperties(ctx context.Context, results []indexResult,
 		if nodeMatchesFilters(node, filters) {
 			filtered = append(filtered, r)
 		}
+	}
+	return filtered
+}
+
+// filterByTypeAndProperties combines type and property filtering into a single pass,
+// fetching each candidate node exactly once via BatchGetNodes to avoid the redundant
+// per-candidate GetNode calls that occur when filterByType and filterByProperties are
+// called sequentially. Falls back to individual fetches if the batch call fails.
+func (s *Service) filterByTypeAndProperties(
+	ctx context.Context,
+	results []indexResult,
+	types []string,
+	filters map[string][]string,
+	seenOrphans map[string]bool,
+) []indexResult {
+	if len(types) == 0 && len(filters) == 0 {
+		return results
+	}
+
+	// Build type set for O(1) lookup.
+	typeSet := make(map[string]struct{}, len(types))
+	for _, t := range types {
+		typeSet[strings.ToLower(t)] = struct{}{}
+	}
+
+	// Collect unique node IDs for a single batch fetch.
+	seen := make(map[string]bool, len(results))
+	ids := make([]storage.NodeID, 0, len(results))
+	for _, r := range results {
+		if !seen[r.ID] {
+			seen[r.ID] = true
+			ids = append(ids, storage.NodeID(r.ID))
+		}
+	}
+
+	nodes, err := s.engine.BatchGetNodes(ids)
+	if err != nil {
+		// Batch unavailable – fall back to the individual-fetch helpers.
+		if len(types) > 0 {
+			results = s.filterByType(ctx, results, types, seenOrphans)
+		}
+		if len(filters) > 0 {
+			results = s.filterByProperties(ctx, results, filters, seenOrphans)
+		}
+		return results
+	}
+
+	var filtered []indexResult
+	for _, r := range results {
+		node, ok := nodes[storage.NodeID(r.ID)]
+		if !ok {
+			s.handleOrphanedEmbedding(ctx, r.ID, fmt.Errorf("node not found: %s", r.ID), seenOrphans)
+			continue
+		}
+
+		if len(typeSet) > 0 {
+			matched := false
+			for _, label := range node.Labels {
+				if _, ok := typeSet[strings.ToLower(label)]; ok {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				if nodeType, ok := node.Properties["type"].(string); ok {
+					if _, ok := typeSet[strings.ToLower(nodeType)]; ok {
+						matched = true
+					}
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		if len(filters) > 0 && !nodeMatchesFilters(node, filters) {
+			continue
+		}
+
+		filtered = append(filtered, r)
 	}
 	return filtered
 }
