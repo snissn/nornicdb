@@ -3,7 +3,7 @@
 # This image is used as a shared prerequisite for NornicDB targets that build
 # with `localllm` but do not use the CUDA-specific `llama-cuda-libs` base.
 
-FROM public.ecr.aws/docker/library/debian:bookworm-slim AS builder
+FROM debian:bookworm-slim AS builder
 
 ARG TARGETARCH
 ARG LLAMA_VERSION=b9106
@@ -50,6 +50,6 @@ RUN mkdir -p /output/lib /output/include && \
     cp include/llama.h ggml/include/*.h /output/include/ && \
     ls -lh /output/lib/libllama_combined.a
 
-FROM public.ecr.aws/docker/library/debian:bookworm-slim
+FROM debian:bookworm-slim
 
 COPY --from=builder /output /output

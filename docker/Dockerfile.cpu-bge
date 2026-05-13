@@ -11,7 +11,7 @@ ARG LLAMA_CPU_IMAGE=timothyswt/llama-cpu-libs:b9106
 # =============================================================================
 # Stage 1: UI (skipped in headless mode)
 # =============================================================================
-FROM public.ecr.aws/docker/library/node:25-alpine AS ui
+FROM node:25-alpine AS ui
 ARG HEADLESS=false
 WORKDIR /ui
 COPY ui/package*.json ./
@@ -33,7 +33,7 @@ FROM ${LLAMA_CPU_IMAGE} AS llama
 # =============================================================================
 # Stage 3: Go build
 # =============================================================================
-FROM public.ecr.aws/docker/library/golang:1.26-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 ARG HEADLESS=false
 ARG TARGETARCH
 WORKDIR /build
@@ -78,7 +78,7 @@ RUN echo "Building APOC plugin..." && \
 # =============================================================================
 # Stage 4: Runtime
 # =============================================================================
-FROM public.ecr.aws/docker/library/debian:bookworm-slim
+FROM debian:bookworm-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
