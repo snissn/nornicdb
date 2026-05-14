@@ -77,7 +77,52 @@ jobs:
       - name: Test
         run: |
           set -o pipefail
-          make test-serial 2>&1 | grep -E 'FAIL|ok'
+          # Run each package group as its own go-test invocation so a
+          # crash, OOM, or hang surfaces with the package name attached.
+          # Previously a single `make test-serial | grep` swallowed all
+          # output, so a runner-level kill (exit 143) gave no clue which
+          # package was at fault. Groups are roughly ordered by cost so
+          # cheap suites fail fast.
+          run_group() {
+            local name="$1"; shift
+            echo "::group::test ${name}"
+            local start_ts=$(date +%s)
+            if ! go test -p 1 -parallel 4 -timeout 30m "$@"; then
+              echo "::error title=test failed::group ${name} failed"
+              echo "::endgroup::"
+              return 1
+            fi
+            local end_ts=$(date +%s)
+            echo "${name} ok ($((end_ts - start_ts))s)"
+            echo "::endgroup::"
+          }
+
+          run_group cmd ./cmd/...
+          run_group apoc ./apoc/...
+          run_group plugins ./plugins/...
+          run_group util-small \
+            ./pkg/audit/... ./pkg/auth/... ./pkg/buildinfo/... \
+            ./pkg/cache/... ./pkg/compliance/... ./pkg/config/... \
+            ./pkg/convert/... ./pkg/embed/... ./pkg/embeddingutil/... \
+            ./pkg/encryption/... ./pkg/envutil/... ./pkg/errors/... \
+            ./pkg/eval/... ./pkg/fabric/... ./pkg/filter/... \
+            ./pkg/gpu/... ./pkg/heimdall/... ./pkg/indexing/... \
+            ./pkg/inference/... ./pkg/kms/... ./pkg/knowledgepolicy/... \
+            ./pkg/lifecycle/... ./pkg/linkpredict/... ./pkg/localllm/... \
+            ./pkg/math/... ./pkg/mcp/... ./pkg/multidb/... \
+            ./pkg/nornicgrpc/... ./pkg/observability/... ./pkg/pool/... \
+            ./pkg/qdrantgrpc/... ./pkg/retention/... ./pkg/security/... \
+            ./pkg/simd/... ./pkg/storage/lifecycle/... ./pkg/temporal/... \
+            ./pkg/textchunk/... ./pkg/txsession/... ./pkg/util/... \
+            ./pkg/vectorspace/...
+          run_group graphql ./pkg/graphql/...
+          run_group cypher ./pkg/cypher/...
+          run_group search ./pkg/search/...
+          run_group bolt ./pkg/bolt/...
+          run_group storage ./pkg/storage
+          run_group nornicdb ./pkg/nornicdb/...
+          run_group server ./pkg/server/...
+          run_group replication ./pkg/replication/...
 
   coverage:
     name: Coverage
