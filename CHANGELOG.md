@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [v1.1.0-preview-2] - 2026-05-14
+## [v1.1.0-rc] - 2026-05-14
 
 # ⚠️ Breaking rolling upgrade changes to storage in this release. BACK UP YOUR DATA ⚠️
 
