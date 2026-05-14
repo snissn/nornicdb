@@ -601,6 +601,23 @@ func (a *StorageAdapter) FlushWAL() error {
 	return nil
 }
 
+// stopWALWriterForTest halts the async WAL writer goroutine without closing
+// the WAL itself. Tests that want to mutate walQueue (to force the
+// "channel full" sync-fallback branch in ApplyCommand) call this first so
+// the swap doesn't race with walWriterLoop's channel read. Idempotent.
+//
+// Production callers should use Close instead — this helper exists only
+// for tests that need to swap the queue mid-life.
+func (a *StorageAdapter) stopWALWriterForTest() {
+	select {
+	case <-a.walStopCh:
+		// Already stopped.
+	default:
+		close(a.walStopCh)
+	}
+	a.walWg.Wait()
+}
+
 // Close releases replication resources (WAL file handles/background goroutines).
 func (a *StorageAdapter) Close() error {
 	// Stop async WAL writer (only once)

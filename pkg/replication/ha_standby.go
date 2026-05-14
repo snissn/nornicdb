@@ -198,9 +198,15 @@ func NewHAStandbyReplicator(config *Config, storage Storage) (*HAStandbyReplicat
 }
 
 // SetTransport sets the transport for peer communication.
-// This must be called before Start() if not using the default transport.
+//
+// Safe to call before or after Start(). The chaos / partition-recovery
+// tests swap transports on a running replicator to simulate network
+// failure and recovery; r.mu serializes those writes against the
+// connectToStandbyLoop / Listen reads of r.transport.
 func (r *HAStandbyReplicator) SetTransport(t Transport) {
+	r.mu.Lock()
 	r.transport = t
+	r.mu.Unlock()
 }
 
 // SetReplicatorMetrics implements MetricsAware — Plan-04-06 D-15a
@@ -215,14 +221,19 @@ func (r *HAStandbyReplicator) Start(ctx context.Context) error {
 		return nil
 	}
 
-	// Use default transport if not set
+	// Use default transport if not set. r.mu serializes against any
+	// concurrent SetTransport (chaos tests do this on a running
+	// replicator to simulate network failures).
+	r.mu.Lock()
 	if r.transport == nil {
 		transport, err := NewDefaultTransportFromConfig(r.config)
 		if err != nil {
+			r.mu.Unlock()
 			return fmt.Errorf("init transport: %w", err)
 		}
 		r.transport = transport
 	}
+	r.mu.Unlock()
 
 	log.Printf("[HA] Starting in role=%s peer=%s sync_mode=%s wal_batch_size=%d wal_batch_timeout=%s",
 		r.config.HAStandby.Role,
@@ -310,7 +321,10 @@ func (r *HAStandbyReplicator) connectToStandbyLoop(ctx context.Context) {
 
 		log.Printf("[HA Primary] Connecting to standby: %s", r.config.HAStandby.PeerAddr)
 
-		conn, err := r.transport.Connect(ctx, r.config.HAStandby.PeerAddr)
+		r.mu.RLock()
+		transport := r.transport
+		r.mu.RUnlock()
+		conn, err := transport.Connect(ctx, r.config.HAStandby.PeerAddr)
 		if err != nil {
 			log.Printf("[HA Primary] Failed to connect to standby: %v", err)
 			time.Sleep(backoff)
@@ -439,7 +453,10 @@ func (r *HAStandbyReplicator) listenForPrimary(ctx context.Context) {
 		log.Printf("[HA Standby] Primary connected")
 	}
 
-	if err := r.transport.Listen(listenCtx, r.config.BindAddr, handler); err != nil {
+	r.mu.RLock()
+	transport := r.transport
+	r.mu.RUnlock()
+	if err := transport.Listen(listenCtx, r.config.BindAddr, handler); err != nil {
 		if listenCtx.Err() == nil {
 			log.Printf("[HA Standby] Listen error: %v", err)
 		}

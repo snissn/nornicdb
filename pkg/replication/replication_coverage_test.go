@@ -682,41 +682,74 @@ func TestRaftReplicator_InternalCoverage(t *testing.T) {
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	cancel()
+	r.mu.Lock()
 	r.state = StateCandidate
 	r.currentTerm = 7
+	r.mu.Unlock()
+	r.peerMu.Lock()
 	r.config.Raft.Peers = []PeerConfig{{ID: "p3", Addr: "127.0.0.1:17113"}}
+	r.peerMu.Unlock()
+	r.logMu.Lock()
 	r.log = []*RaftLogEntry{{Index: 0, Term: 0}, {Index: 1, Term: 7}}
+	r.logMu.Unlock()
 	r.becomeLeader(cancelCtx, 7)
+	r.mu.RLock()
 	assert.Equal(t, StateLeader, r.state)
 	assert.Equal(t, r.config.NodeID, r.leaderID)
+	r.mu.RUnlock()
 
+	r.mu.Lock()
 	r.state = StateLeader
 	r.currentTerm = 9
+	r.mu.Unlock()
+	r.peerMu.Lock()
 	r.matchIndex["p3"] = 0
 	r.nextIndex["p3"] = 1
+	r.peerMu.Unlock()
 	r.handleAppendEntriesResponse("p3", 9, appendReq, &AppendEntriesResponse{Term: 9, Success: true, MatchIndex: 2})
+	r.peerMu.RLock()
 	assert.Equal(t, uint64(2), r.matchIndex["p3"])
 	assert.Equal(t, uint64(3), r.nextIndex["p3"])
+	r.peerMu.RUnlock()
 
 	r.handleAppendEntriesResponse("p3", 9, appendReq, &AppendEntriesResponse{Term: 9, Success: false, ConflictIndex: 1})
+	r.peerMu.RLock()
 	assert.Equal(t, uint64(1), r.nextIndex["p3"])
+	r.peerMu.RUnlock()
 
+	r.mu.Lock()
 	r.state = StateLeader
 	r.currentTerm = 10
+	r.mu.Unlock()
 	r.handleAppendEntriesResponse("p3", 10, appendReq, &AppendEntriesResponse{Term: 11})
+	r.mu.RLock()
 	assert.Equal(t, StateFollower, r.state)
 	assert.Equal(t, uint64(11), r.currentTerm)
+	r.mu.RUnlock()
 
+	// Mutate state through the same locks production code uses. The
+	// becomeLeader call above started a heartbeat goroutine that reads
+	// r.log / r.commitIndex under r.logMu and r.nextIndex / r.matchIndex
+	// under r.peerMu, so unlocked field assignment here triggers a
+	// real data race when -race is enabled. Production code never
+	// rewrites r.log / r.commitIndex without holding r.logMu, and never
+	// rewrites r.matchIndex without holding r.peerMu — match that here.
+	r.mu.Lock()
 	r.state = StateLeader
 	r.currentTerm = 12
+	r.mu.Unlock()
+	r.peerMu.Lock()
 	r.config.Raft.Peers = []PeerConfig{{ID: "p3", Addr: "127.0.0.1:17113"}}
+	r.matchIndex["p3"] = 1
+	r.peerMu.Unlock()
+	r.logMu.Lock()
 	r.log = []*RaftLogEntry{
 		{Index: 0, Term: 0},
 		{Index: 1, Term: 12, Command: &Command{Type: CmdCreateNode, Data: []byte("a"), Timestamp: time.Now()}},
 	}
 	r.commitIndex = 0
 	r.lastApplied = 0
-	r.matchIndex["p3"] = 1
+	r.logMu.Unlock()
 	r.advanceCommitIndex()
 	assert.Equal(t, uint64(1), r.commitIndex)
 	assert.Equal(t, 1, store.GetApplyCount())
@@ -1038,7 +1071,11 @@ func TestStorageAdapter_ApplyCommand_SyncWALFallbackPath(t *testing.T) {
 	t.Cleanup(func() { _ = adapter.Close() })
 
 	// Force the non-blocking queue send to hit default: path, exercising
-	// the synchronous WAL append fallback branch.
+	// the synchronous WAL append fallback branch. We stop the async
+	// writer first so the queue swap doesn't race with walWriterLoop
+	// reading the channel (caught by go test -race when this test runs
+	// alongside others that don't stop the writer).
+	adapter.stopWALWriterForTest()
 	adapter.walQueue = make(chan *walWriteRequest)
 
 	cmd := &Command{
@@ -1058,7 +1095,9 @@ func TestStorageAdapter_ApplyCommand_SyncWALFallbackError(t *testing.T) {
 	adapter, _ := setupTestAdapter(t)
 	t.Cleanup(func() { _ = adapter.Close() })
 
-	// Force fallback branch and make WAL append fail.
+	// Force fallback branch and make WAL append fail. Stop the async
+	// writer first so the queue swap doesn't race with walWriterLoop.
+	adapter.stopWALWriterForTest()
 	adapter.walQueue = make(chan *walWriteRequest)
 	require.NoError(t, adapter.wal.Close())
 
