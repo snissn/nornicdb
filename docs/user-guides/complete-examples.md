@@ -22,19 +22,29 @@ An AI coding assistant needs to remember user preferences, project decisions, an
 ### Step 1: Define Decay Profiles
 
 ```cypher
-// Short-lived context — fades in about a week
+// Short-lived context — fades in about a week, then disappears entirely.
+//   DECAY FLOOR 0.0           score-value clamp; here it does nothing
+//                             because the curve is the binding constraint
+//   VISIBILITY THRESHOLD 0.10 entity is suppressed once finalScore < 0.10
+// Result: episode is visible until ~3.32 half-lives, then deindexed.
 CREATE DECAY PROFILE episode_retention
   HALF LIFE 604800
   DECAY FLOOR 0.0
   VISIBILITY THRESHOLD 0.10;
 
-// Stable knowledge — fades over months
+// Stable knowledge — fades, but score never drops below 0.05.
+//   DECAY FLOOR 0.05          score never reports below 0.05
+//   VISIBILITY THRESHOLD 0.10 still suppressed when score in [0.05, 0.10)
+// Note 0.05 < 0.10 → the floor here keeps the score from collapsing to
+// zero (useful for ranking + tombstone semantics) but does NOT keep the
+// fact visible. Raise the floor to 0.10 if you want unconditional
+// visibility; the floor and threshold are independent levers.
 CREATE DECAY PROFILE fact_retention
   HALF LIFE 5961600
   DECAY FLOOR 0.05
   VISIBILITY THRESHOLD 0.10;
 
-// Persistent skills — no decay
+// Persistent skills — no decay (curve is constant 1.0, threshold n/a).
 CREATE DECAY PROFILE skill_retention
   NO DECAY;
 ```
@@ -376,6 +386,10 @@ Track what you're learning with spaced repetition.
 
 ```cypher
 // === Setup: decay profile for study facts ===
+// FLOOR 0.05 keeps a non-zero score on every fact (helps ranking) but
+// THRESHOLD 0.10 still suppresses the fact when its score is in
+// [0.05, 0.10) — the two levers are independent. Raise FLOOR to 0.10
+// if you want every study fact to stay visible forever.
 CREATE DECAY PROFILE study_fact_retention
   HALF LIFE 5961600
   DECAY FLOOR 0.05

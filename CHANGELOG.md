@@ -9,17 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [Unreleased]
+## [v1.1.0-preview-2] - 2026-05-14
+
+# ⚠️ Breaking rolling upgrade changes to storage in this release. BACK UP YOUR DATA ⚠️
+
+## Running the database requires using the `--upgrade-storage` option or in the macOS installer using the checkbox on the first run wizard, or in the tray settings panel restarting with the flag enabled. after your files are updated in place, older versions of the database will not be able to read the datafiles properly. This change is to compact the storage. after this, hopefully there shouldn't be any major overhauls to storage 🤞
 
 ### Added
 
 - **Property pre-filter for hybrid search REST endpoint**:
-  - added an optional `filters` field to `POST /nornicdb/search` that restricts the candidate set by property values *before* top-K vector/BM25 selection, preserving recall for sparse filtered sets (the existing Cypher `WHERE` post-filter silently returns fewer than `limit` results when filtered values are rare in the corpus).
+  - added an optional `filters` field to `POST /nornicdb/search` that restricts the candidate set by property values _before_ top-K vector/BM25 selection, preserving recall for sparse filtered sets.
   - filter semantics: OR within a key (`{"collection": ["user_a", "user_b"]}`), AND across keys (`{"collection": ["user_a"], "type": ["text"]}`); scalar and array property values both supported.
-  - missing or empty `filters` field → no filtering; fully backward-compatible.
   - filter applied in `rrfHybridSearch`, `vectorSearchOnly`, and `fullTextSearchOnly` paths.
   - primary use case: multi-tenant RAG where each node carries a `collection` array identifying which users may access it.
-  - no measurable performance regression on the unfiltered path (benchmark delta <1%, within noise).
+
+- **Knowledge-policy decay model support**:
+  - added support for inverted Ebbinghaus-style decay curves in knowledge-policy scoring.
+
+- **Storage migration observability**:
+  - added more robust migration progress/statistics logging to improve operator visibility during upgrades.
+
+### Changed
+
+- **Storage serialization defaults and upgrade posture**:
+  - removed Gob as an active serializer while preserving forward migration support for older data that was written using Gob.
+
+- **Storage keying internals**:
+  - introduced a per-namespace property-key dictionary as part of the storage-v2 path.
+
+### Fixed
+
+- **Hybrid search filter edge case**:
+  - fixed empty filter-list handling so requests with empty filter lists no longer discard all results.
+
+- **Cypher parsing and transaction conflict behavior**:
+  - fixed `NOT IN` parsing behavior in the Cypher path.
+  - adjusted transaction timing in conflict-sensitive paths to reduce avoidable write conflicts.
+
+- **Knowledge-policy `ON ACCESS` arithmetic coercion**:
+  - fixed runtime type coercion to align with Cypher DDL expectations.
+
+- **Merge-conflict error surfacing for clients**:
+  - fixed unique-merge conflict handling so retryable conflict errors are surfaced and scoped correctly for Bolt clients.
+
+- **Migration index completeness**:
+  - fixed storage migration so expected indexes are created during migration.
+
+- **Lifecycle and fast-write clock handling**:
+  - fixed lifecycle and high-watermark nanosecond timing bugs affecting fast-write scenarios.
+
+### Documentation
+
+- Added and refreshed:
+  - memory-decay and decay-profile documentation for the new inverted decay behavior and documented scenarios
+  - user guidance around promotion policy and Ebbinghaus/Roynard bootstrap behavior
+
+### Technical Details
+
+- **Range covered**: `v1.1.0-preview-1..main`
+- **Commits in range**: 29 (non-merge)
+- **Repository delta**: 154 files changed, +105,380 / -1,336 lines
+- **Primary focus areas**: hybrid search pre-filtering, conflict and parsing correctness, storage-v2 migration and serializer evolution, and knowledge-policy decay/scoring improvements.
 
 ## [v1.1.0-preview] - 2026-05-12
 

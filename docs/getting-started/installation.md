@@ -260,11 +260,14 @@ User guide: `docs/user-guides/qdrant-grpc.md`
 NornicDB uses a declarative, profile-driven decay and promotion system instead of hardcoded memory tiers. You define **decay profile bundles** with `OPTIONS { ... }` and then attach them to node or edge patterns using `CREATE DECAY PROFILE ... FOR ... APPLY { ... }`:
 
 ```cypher
--- Define reusable decay behavior
+-- Define reusable decay behavior. `scoreFloor` clamps the score value
+-- (a 0.0 floor here is a no-op until the curve hits 0). `visibilityThreshold`
+-- is a separate suppression cutoff: when finalScore < 0.10 the entity is
+-- hidden from queries. They are independent levers.
 CREATE DECAY PROFILE memory_episode_retention OPTIONS {
   halfLifeSeconds: 604800,
   function: 'exponential',
-  floor: 0.0,
+  scoreFloor: 0.0,
   visibilityThreshold: 0.10
 };
 

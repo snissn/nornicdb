@@ -59,14 +59,14 @@ CREATE DECAY PROFILE memory_episode_retention OPTIONS {
 
 ### Memory summary — slower decay for summarized content
 
-Episode summaries retain value even as the raw experience fades. A 14-day half-life with a score floor of 0.10 preserves summary accessibility longer.
+Episode summaries retain value even as the raw experience fades. A 14-day half-life lets the curve fade, and `scoreFloor` set to match `visibilityThreshold` keeps the summary visible forever once the curve drops to that level — the floor and threshold are independent levers, so this works only because they are equal here. With `scoreFloor: 0.0` the summary would disappear once the curve crossed `0.10`; with `scoreFloor: 0.10` (matching threshold) it plateaus at `0.10`, visible but ranked at the bottom.
 
 ```cypher
 CREATE DECAY PROFILE session_summary OPTIONS {
   halfLifeSeconds: 1209600,
   function: 'exponential',
   visibilityThreshold: 0.10,
-  scoreFloor: 0.10
+  scoreFloor: 0.10        -- equals threshold → "visible but ranked lowest after fade"
 }
 ```
 
@@ -208,6 +208,8 @@ APPLY {
 ---
 
 ## Step 3: Promotion Profiles
+
+> Note: a promotion profile's `scoreFloor` is a **different field** from a decay bundle's `scoreFloor`. The promotion floor is applied *before* the cap inside the promoted-curve computation (`max(promoFloor, base * multiplier)`); the decay floor is the *final* clamp on the resulting score. Both clamp upward; the promotion floor only matters when the matching `WHEN` predicate fires. Neither is a visibility cutoff — that role belongs to the decay bundle's `visibilityThreshold`.
 
 ### Memory Consolidation Tiers
 
@@ -444,7 +446,7 @@ nornicdb decay stats --data-dir ./data
 
 ## Optional: Inverted Memory Layer (Consolidation)
 
-The default Memory profile above implements the classic Ebbinghaus forgetting curve — episodes start strong and fade unless reinforced. Roynard's full model also covers the **inverse** dynamic: a memory that is *not* retrieved gains strength as it consolidates, while frequent retrieval (interference) erodes it. This is supported as a first-class profile by giving `halfLifeSeconds` a **negative value** and anchoring on `LAST_ACCESSED`:
+The default Memory profile above implements the classic Ebbinghaus forgetting curve — episodes start strong and fade unless reinforced. Roynard's full model also covers the **inverse** dynamic: a memory that is *not* retrieved gains strength as it consolidates, while frequent retrieval (interference) erodes it. This is supported as a first-class profile by giving `halfLifeSeconds` a **negative value** and anchoring on `LAST_ACCESSED`. **The `scoreFloor` choice matters more on the inverted curve than on the forward one** because the inverted curve evaluates to exactly `0.0` immediately after access:
 
 ```cypher
 CREATE DECAY PROFILE memory_consolidation OPTIONS {
@@ -452,11 +454,15 @@ CREATE DECAY PROFILE memory_consolidation OPTIONS {
   function: 'exponential',
   scoreFrom: 'LAST_ACCESSED',     -- age = time since last retrieval
   visibilityThreshold: 0.10,
-  scoreFloor: 0.0
+  scoreFloor: 0.10                -- equals threshold → visible right after access
 }
 ```
 
-A node bound to this profile scores `0.0` immediately after access (suppressed) and strengthens monotonically toward `1.0` as it sits idle. Pair it with a dampening promotion profile to model interference:
+A node bound to this profile scores `0.10` (the floor) immediately after access — visible because suppression uses a strict `<` check — and strengthens monotonically toward `1.0` as it sits idle. The next access drops the score back to `0.10`, never below.
+
+Setting `scoreFloor: 0.0` here would produce a different behavior: every access drops the score to strict zero, the entity is suppressed and deindexed instantly, and stays hidden until ~3.3 hours of idle time pass for the curve to climb back over the threshold. Choose `0.0` only when you explicitly want a "cooldown" memory that disappears between retrievals.
+
+Pair the consolidation profile with a dampening promotion profile to model interference:
 
 ```cypher
 CREATE PROMOTION PROFILE retrieval_interference OPTIONS {

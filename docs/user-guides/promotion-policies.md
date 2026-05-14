@@ -24,8 +24,10 @@ CREATE PROMOTION PROFILE reinforced_tier OPTIONS {
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `multiplier` | `1.0` | Score multiplier. `>1.0` boosts, `1.0` is neutral, `<1.0` dampens. A multiplier of `0.5` halves the decayed score; combined with an inverted decay profile (negative `halfLifeSeconds`) this implements "punish frequent access" semantics where hot nodes are demoted. See [Inverted Decay](decay-profiles.md#inverted-decay-consolidation). |
-| `scoreFloor` | `0.0` | Minimum score after promotion |
+| `scoreFloor` | `0.0` | Minimum score AFTER the multiplier is applied. **Different from the decay bundle's `scoreFloor`** — this one acts inside the promoted-curve computation (`max(promoFloor, base * multiplier)`), the bundle's floor acts as the final clamp on the result. Neither is a visibility cutoff; the suppression check is `visibilityThreshold` on the decay bundle. |
 | `scoreCap` | `1.0` | Maximum score after promotion |
+
+> The decay pipeline is `final = max(decayBundle.scoreFloor, min(promoProfile.scoreCap, max(promoProfile.scoreFloor, base * multiplier)))`, then `suppressed = final < decayBundle.visibilityThreshold`. The promotion floor only matters when the matching `WHEN` predicate fires; the decay floor matters always. Pick the right floor for the right job.
 
 ## Creating a Promotion Policy
 
