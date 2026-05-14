@@ -165,7 +165,53 @@ jobs:
 
       - name: Generate coverage report
         run: |
-          bash scripts/generate-coverage.sh coverage.raw.out coverage.out
+          set -o pipefail
+          # Mirror the test step's grouping so a failing or hung
+          # package surfaces with a name attached instead of timing
+          # out the whole job. Each group appends to the same raw
+          # profile; a single filter pass at the end produces
+          # coverage.out for goveralls. Coverage exclusions
+          # (generated code, GPU stubs, etc.) live in
+          # scripts/generate-coverage.sh so the per-group invocations
+          # don't need to know about them.
+          : > coverage.raw.out
+
+          run_cov_group() {
+            local name="$1"; shift
+            echo "::group::coverage ${name}"
+            if ! bash scripts/generate-coverage.sh --append coverage.raw.out "$name" "$@"; then
+              echo "::error title=coverage failed::group ${name} failed"
+              echo "::endgroup::"
+              return 1
+            fi
+            echo "::endgroup::"
+          }
+
+          run_cov_group util-small \
+            ./pkg/audit/... ./pkg/auth/... ./pkg/buildinfo/... \
+            ./pkg/cache/... ./pkg/compliance/... ./pkg/config/... \
+            ./pkg/convert/... ./pkg/embed/... ./pkg/embeddingutil/... \
+            ./pkg/encryption/... ./pkg/envutil/... ./pkg/errors/... \
+            ./pkg/eval/... ./pkg/fabric/... ./pkg/filter/... \
+            ./pkg/gpu/... ./pkg/heimdall/... ./pkg/indexing/... \
+            ./pkg/inference/... ./pkg/kms/... ./pkg/knowledgepolicy/... \
+            ./pkg/lifecycle/... ./pkg/linkpredict/... ./pkg/localllm/... \
+            ./pkg/math/... ./pkg/mcp/... ./pkg/multidb/... \
+            ./pkg/nornicgrpc/... ./pkg/observability/... ./pkg/pool/... \
+            ./pkg/qdrantgrpc/... ./pkg/retention/... ./pkg/security/... \
+            ./pkg/simd/... ./pkg/storage/lifecycle/... ./pkg/temporal/... \
+            ./pkg/textchunk/... ./pkg/txsession/... ./pkg/util/... \
+            ./pkg/vectorspace/...
+          run_cov_group graphql ./pkg/graphql/...
+          run_cov_group cypher ./pkg/cypher/...
+          run_cov_group search ./pkg/search/...
+          run_cov_group bolt ./pkg/bolt/...
+          run_cov_group storage ./pkg/storage
+          run_cov_group nornicdb ./pkg/nornicdb/...
+          run_cov_group server ./pkg/server/...
+          run_cov_group replication ./pkg/replication/...
+
+          bash scripts/generate-coverage.sh --filter coverage.raw.out coverage.out
 
       - name: Install goveralls
         run: go install github.com/mattn/goveralls@latest
