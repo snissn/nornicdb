@@ -46,6 +46,12 @@ type walWriteRequest struct {
 	posCh   chan uint64 // Channel to receive the WAL position
 	errCh   chan error  // Channel to receive any error
 	waiting bool        // If true, caller is waiting for completion
+
+	// barrier marks a sentinel request. flushWALBatch does not append a
+	// barrier to the WAL but does signal posCh once the surrounding batch
+	// completes. Used by FlushWAL to deterministically wait for every
+	// previously-queued request to drain without sleeping.
+	barrier bool
 }
 
 type replicationWALRecord struct {
@@ -275,6 +281,13 @@ func (a *StorageAdapter) flushWALBatch() {
 	a.walMu.Lock()
 	positions := make([]uint64, 0, len(batch))
 	for _, req := range batch {
+		if req.barrier {
+			// Sentinel for FlushWAL — no WAL append. The post position
+			// signal happens below so callers are blocked until every
+			// real append in this batch has completed.
+			positions = append(positions, 0)
+			continue
+		}
 		if err := a.wal.Append(storage.OperationType("replication_command"), req.record); err != nil {
 			// Send error to waiting request
 			select {
@@ -298,12 +311,25 @@ func (a *StorageAdapter) flushWALBatch() {
 	if len(batch) > 0 {
 		a.walPosition.Store(a.wal.Sequence())
 	}
+	currentPos := a.wal.Sequence()
 	a.walMu.Unlock()
 
 	// Update in-memory WAL outside the lock to avoid deadlock
 	for i, req := range batch {
 		if positions[i] > 0 {
 			a.appendToMemWAL(positions[i], req.record, req.record.Command)
+		}
+	}
+
+	// Release any barrier waiters now that every real entry in the
+	// batch has been appended and walPosition has been updated.
+	for _, req := range batch {
+		if !req.barrier {
+			continue
+		}
+		select {
+		case req.posCh <- currentPos:
+		default:
 		}
 	}
 }
@@ -517,14 +543,56 @@ func (a *StorageAdapter) applyCypher(data []byte) error {
 
 // FlushWAL waits for all pending WAL writes to complete.
 // This is useful for tests or when you need to ensure durability before proceeding.
+//
+// The previous version slept 20ms hoping walWriterLoop would drain the
+// queue — on slow runners (CI) goroutine scheduling jitter could leave
+// the tail request still in walQueue at sync time, so callers that
+// immediately observed GetWALPosition saw a count one short of what
+// they queued. The fix is to send a barrier request through the same
+// channel and wait for its acknowledgement. Because the writer reads
+// requests from walQueue in FIFO order, every request queued before
+// the barrier is guaranteed to be flushed before the barrier itself
+// completes.
 func (a *StorageAdapter) FlushWAL() error {
-	// Flush any pending batch
-	a.flushWALBatch()
+	// Build a sentinel write request. barrier=true tells flushWALBatch
+	// to skip the WAL append for this entry but still ack posCh after
+	// the surrounding batch completes — so the writer goroutine drives
+	// the synchronization without us touching its channels directly.
+	barrier := &walWriteRequest{
+		posCh:   make(chan uint64, 1),
+		errCh:   make(chan error, 1),
+		waiting: true,
+		barrier: true,
+	}
 
-	// Wait a bit for async writes to complete
-	time.Sleep(20 * time.Millisecond)
+	// Push the barrier behind everything already queued.
+	select {
+	case a.walQueue <- barrier:
+	case <-a.walStopCh:
+		// Writer is shutting down; fall through to a best-effort sync.
+		a.walMu.Lock()
+		defer a.walMu.Unlock()
+		if a.wal != nil {
+			return a.wal.Sync()
+		}
+		return nil
+	}
 
-	// Sync the WAL to ensure all writes are on disk
+	// Wait for the writer goroutine to flush the batch containing the
+	// barrier. posCh is signaled inside flushWALBatch after the WAL
+	// append completes, so by the time we read from it every prior
+	// request is also persisted.
+	select {
+	case <-barrier.posCh:
+	case err := <-barrier.errCh:
+		if err != nil {
+			return fmt.Errorf("flush wal: %w", err)
+		}
+	case <-a.walStopCh:
+		// Adapter closing; drop barrier wait.
+	}
+
+	// Sync the WAL to ensure all writes are on disk.
 	a.walMu.Lock()
 	defer a.walMu.Unlock()
 	if a.wal != nil {
