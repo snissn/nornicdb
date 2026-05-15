@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupOnAccessE2E(t *testing.T, bundles map[string]*knowledgepolicy.DecayProfileBundle, bindings map[string]*knowledgepolicy.DecayProfileBinding, policies map[string]*knowledgepolicy.PromotionPolicyDef) (*storage.BadgerEngine, *knowledgepolicy.AccessFlusher, *StorageExecutor, context.Context) {
+func setupOnAccessE2E(t *testing.T, bundles map[string]*knowledgepolicy.DecayProfileBundle, bindings map[string]*knowledgepolicy.DecayProfileBinding, policies map[string]*knowledgepolicy.PromotionPolicyDef) (*storage.BadgerEngine, *knowledgepolicy.AccessAccumulator, *knowledgepolicy.AccessFlusher, *StorageExecutor, context.Context) {
 	t.Helper()
 	be, err := storage.NewBadgerEngineInMemory()
 	require.NoError(t, err)
@@ -40,7 +40,15 @@ func setupOnAccessE2E(t *testing.T, bundles map[string]*knowledgepolicy.DecayPro
 			exec.InvalidateEntityCaches(entityID, tokens)
 		}
 	})
-	return be, flusher, exec, context.Background()
+	return be, acc, flusher, exec, context.Background()
+}
+
+func requireBufferedAccessCounts(t *testing.T, acc *knowledgepolicy.AccessAccumulator, expected map[string]int64) {
+	t.Helper()
+	for entityID, want := range expected {
+		got := acc.ReadThrough(entityID, "accessCount", 0)
+		require.Equalf(t, want, got, "unexpected buffered accessCount for %s", entityID)
+	}
 }
 
 func TestE2E_OnAccessAcceleratesDecayUntilSuppressed(t *testing.T) {
@@ -108,7 +116,7 @@ func TestE2E_OnAccessAcceleratesDecayUntilSuppressed(t *testing.T) {
 		},
 	}
 
-	be, flusher, exec, ctx := setupOnAccessE2E(t, bundles, bindings, policies)
+	be, acc, flusher, exec, ctx := setupOnAccessE2E(t, bundles, bindings, policies)
 
 	now := time.Now()
 	_, err := be.CreateNode(&storage.Node{ID: "test:source-1", Labels: []string{"DecaySource"}, Properties: map[string]interface{}{"title": "source", "body": "volatile"}, CreatedAt: now, UpdatedAt: now})
@@ -123,7 +131,21 @@ func TestE2E_OnAccessAcceleratesDecayUntilSuppressed(t *testing.T) {
 		result, err := exec.Execute(ctx, query, nil)
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 1, "access %d should still be visible before post-access flush", i+1)
+		if i == 0 {
+			requireBufferedAccessCounts(t, acc, map[string]int64{
+				"test:source-1": 1,
+				"test:edge-1":   1,
+				"test:target-1": 1,
+			})
+		}
 		flusher.Flush()
+		if i == 0 {
+			requireBufferedAccessCounts(t, acc, map[string]int64{
+				"test:source-1": 0,
+				"test:edge-1":   0,
+				"test:target-1": 0,
+			})
+		}
 	}
 
 	nodes, err := be.GetNodesByLabel("DecaySource")
@@ -211,7 +233,7 @@ func TestE2E_OnAccessPropertyPreservationKeepsOnlyAllowedFields(t *testing.T) {
 		},
 	}
 
-	be, flusher, exec, ctx := setupOnAccessE2E(t, bundles, bindings, policies)
+	be, acc, flusher, exec, ctx := setupOnAccessE2E(t, bundles, bindings, policies)
 
 	now := time.Now()
 	_, err := be.CreateNode(&storage.Node{ID: "test:prop-source-1", Labels: []string{"PropertySource"}, Properties: map[string]interface{}{"title": "keep-me", "body": "hide-me"}, CreatedAt: now, UpdatedAt: now})
@@ -226,6 +248,13 @@ func TestE2E_OnAccessPropertyPreservationKeepsOnlyAllowedFields(t *testing.T) {
 		result, err := exec.Execute(ctx, query, nil)
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 1)
+		if i == 0 {
+			requireBufferedAccessCounts(t, acc, map[string]int64{
+				"test:prop-source-1": 1,
+				"test:prop-edge-1":   1,
+				"test:prop-target-1": 0,
+			})
+		}
 		flusher.Flush()
 	}
 
@@ -250,4 +279,157 @@ func TestE2E_OnAccessPropertyPreservationKeepsOnlyAllowedFields(t *testing.T) {
 	require.Equal(t, int64(42), edgeProps["weight"])
 	_, hasSummary := edgeProps["summary"]
 	require.False(t, hasSummary, "summary should be suppressed after repeated access")
+}
+
+func TestE2E_OnAccessDoesNotTriggerForWhereOnlyEvaluation(t *testing.T) {
+	bundles := map[string]*knowledgepolicy.DecayProfileBundle{
+		"node_decay": {
+			Name:                "node_decay",
+			Scope:               knowledgepolicy.ScopeNode,
+			Function:            knowledgepolicy.DecayFunctionExponential,
+			HalfLifeSeconds:     10,
+			VisibilityThreshold: 0.10,
+			ScoreFrom:           knowledgepolicy.ScoreFromCustom,
+			ScoreFromProperty:   "degradeAt",
+			Enabled:             true,
+			DecayEnabled:        true,
+		},
+	}
+	bindings := map[string]*knowledgepolicy.DecayProfileBinding{
+		"node_bind": {
+			Name:         "node_bind",
+			ProfileRef:   "node_decay",
+			TargetLabels: []string{"WhereOnlySource"},
+		},
+	}
+	policies := map[string]*knowledgepolicy.PromotionPolicyDef{
+		"node_policy": {
+			Name:         "node_policy",
+			TargetLabels: []string{"WhereOnlySource"},
+			Enabled:      true,
+			OnAccess: &knowledgepolicy.PromotionPolicyOnAccess{Mutations: []knowledgepolicy.OnAccessMutation{
+				{Expression: "n.accessCount = coalesce(n.accessCount, 0) + 1"},
+				{Expression: "n.degradeAt = timestamp() - (n.accessCount * 700000000)"},
+			}},
+		},
+	}
+
+	be, acc, flusher, exec, ctx := setupOnAccessE2E(t, bundles, bindings, policies)
+
+	now := time.Now()
+	_, err := be.CreateNode(&storage.Node{
+		ID:         "test:where-only-1",
+		Labels:     []string{"WhereOnlySource"},
+		Properties: map[string]interface{}{"title": "candidate", "kind": "ignore-me"},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+	require.NoError(t, err)
+	_, err = be.CreateNode(&storage.Node{
+		ID:         "test:where-only-2",
+		Labels:     []string{"WhereOnlySource"},
+		Properties: map[string]interface{}{"title": "other", "kind": "other-kind"},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `MATCH (n:WhereOnlySource) WHERE n.kind = 'missing-kind' RETURN n`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 0, "WHERE-only evaluation should not materialize the node")
+	requireBufferedAccessCounts(t, acc, map[string]int64{
+		"test:where-only-1": 0,
+		"test:where-only-2": 0,
+	})
+
+	flusher.Flush()
+
+	entry, err := be.GetAccessMeta("test:where-only-1")
+	require.NoError(t, err)
+	require.Nil(t, entry, "WHERE evaluation must not trigger ON ACCESS mutations")
+	entry, err = be.GetAccessMeta("test:where-only-2")
+	require.NoError(t, err)
+	require.Nil(t, entry, "non-materialized peers must not be queued for ON ACCESS")
+
+	result, err = exec.Execute(ctx, `MATCH (n:WhereOnlySource) WHERE n.kind = 'ignore-me' RETURN n`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1, "returning the node should materialize it")
+	materialized, ok := result.Rows[0][0].(*storage.Node)
+	require.True(t, ok, "RETURN n should materialize a storage node")
+	require.Equal(t, storage.NodeID("where-only-1"), materialized.ID, "namespaced executor should expose the user-facing node ID")
+	requireBufferedAccessCounts(t, acc, map[string]int64{
+		"test:where-only-1": 1,
+		"test:where-only-2": 0,
+	})
+
+	flusher.Flush()
+
+	entry, err = be.GetAccessMeta("test:where-only-1")
+	require.NoError(t, err)
+	require.NotNil(t, entry, "materialized RETURN should trigger ON ACCESS")
+	require.Equal(t, int64(1), entry.Fixed.AccessCount)
+	entry, err = be.GetAccessMeta("test:where-only-2")
+	require.NoError(t, err)
+	require.Nil(t, entry, "only the materialized node should be flushed")
+}
+
+func TestE2E_OnAccessDoesNotTriggerForScalarProjection(t *testing.T) {
+	bundles := map[string]*knowledgepolicy.DecayProfileBundle{
+		"node_decay": {
+			Name:                "node_decay",
+			Scope:               knowledgepolicy.ScopeNode,
+			Function:            knowledgepolicy.DecayFunctionExponential,
+			HalfLifeSeconds:     10,
+			VisibilityThreshold: 0.10,
+			ScoreFrom:           knowledgepolicy.ScoreFromCustom,
+			ScoreFromProperty:   "degradeAt",
+			Enabled:             true,
+			DecayEnabled:        true,
+		},
+	}
+	bindings := map[string]*knowledgepolicy.DecayProfileBinding{
+		"node_bind": {
+			Name:         "node_bind",
+			ProfileRef:   "node_decay",
+			TargetLabels: []string{"WhereOnlySource"},
+		},
+	}
+	policies := map[string]*knowledgepolicy.PromotionPolicyDef{
+		"node_policy": {
+			Name:         "node_policy",
+			TargetLabels: []string{"WhereOnlySource"},
+			Enabled:      true,
+			OnAccess: &knowledgepolicy.PromotionPolicyOnAccess{Mutations: []knowledgepolicy.OnAccessMutation{
+				{Expression: "n.accessCount = coalesce(n.accessCount, 0) + 1"},
+				{Expression: "n.degradeAt = timestamp() - (n.accessCount * 700000000)"},
+			}},
+		},
+	}
+
+	be, acc, flusher, exec, ctx := setupOnAccessE2E(t, bundles, bindings, policies)
+
+	now := time.Now()
+	_, err := be.CreateNode(&storage.Node{
+		ID:         "test:scalar-only-1",
+		Labels:     []string{"WhereOnlySource"},
+		Properties: map[string]interface{}{"title": "candidate", "kind": "ignore-me"},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `MATCH (n:WhereOnlySource) WHERE n.kind = 'ignore-me' RETURN n.kind`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1, "scalar projection should still return one row")
+	require.Len(t, result.Rows[0], 1)
+	require.Equal(t, "ignore-me", result.Rows[0][0])
+	requireBufferedAccessCounts(t, acc, map[string]int64{
+		"test:scalar-only-1": 0,
+	})
+
+	flusher.Flush()
+
+	entry, err := be.GetAccessMeta("test:scalar-only-1")
+	require.NoError(t, err)
+	require.Nil(t, entry, "scalar projection must not count as materializing the node")
 }

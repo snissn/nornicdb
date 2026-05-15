@@ -990,6 +990,11 @@ func queryDeletesNodes(query string) bool {
 //	and execution failures with Neo4j-compatible error codes.
 func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map[string]interface{}) (result *ExecuteResult, retErr error) {
 	e.resetHotPathTrace()
+	defer func() {
+		if retErr == nil && result != nil {
+			e.recordMaterializedResultAccess(result)
+		}
+	}()
 
 	// TRC-15: top-level cypher execute span. Started before timing so the
 	// span duration matches the metric observation window exactly. The span

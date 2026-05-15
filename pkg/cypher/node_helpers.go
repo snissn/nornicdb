@@ -44,6 +44,58 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+type materializedAccessRecorder interface {
+	RecordMaterializedAccess(entityID string)
+}
+
+func (e *StorageExecutor) recordMaterializedResultAccess(result *ExecuteResult) {
+	if result == nil {
+		return
+	}
+	recorder, ok := e.storage.(materializedAccessRecorder)
+	if !ok || recorder == nil {
+		return
+	}
+	for _, row := range result.Rows {
+		for _, value := range row {
+			e.recordMaterializedValue(recorder, value)
+		}
+	}
+}
+
+func (e *StorageExecutor) recordMaterializedValue(recorder materializedAccessRecorder, value interface{}) {
+	switch v := value.(type) {
+	case *storage.Node:
+		if v != nil {
+			recorder.RecordMaterializedAccess(string(v.ID))
+		}
+	case *storage.Edge:
+		if v != nil {
+			recorder.RecordMaterializedAccess(string(v.ID))
+		}
+	case map[string]interface{}:
+		if nodeID, ok := v["_nodeId"].(string); ok && nodeID != "" {
+			recorder.RecordMaterializedAccess(nodeID)
+			return
+		}
+		if edgeID, ok := v["_edgeId"].(string); ok && edgeID != "" {
+			recorder.RecordMaterializedAccess(edgeID)
+			return
+		}
+		for _, nested := range v {
+			e.recordMaterializedValue(recorder, nested)
+		}
+	case []interface{}:
+		for _, nested := range v {
+			e.recordMaterializedValue(recorder, nested)
+		}
+	case []map[string]interface{}:
+		for _, nested := range v {
+			e.recordMaterializedValue(recorder, nested)
+		}
+	}
+}
+
 // nodeToMap converts a storage.Node to a map for result output.
 // Filters out internal properties like embeddings which are huge.
 // Properties are included at the top level for Neo4j compatibility.

@@ -94,3 +94,22 @@ func TestBeginTransaction_DoesNotConflictAfterClockSkew(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(2), got.Properties["v"])
 }
+
+func TestSnapshotIsolationConflict_UsesTimestampWhenSequenceSaturated(t *testing.T) {
+	tx := &BadgerTransaction{
+		readTS: MVCCVersion{
+			CommitTimestamp: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC),
+			CommitSequence:  maxMVCCCommitSequence,
+		},
+	}
+
+	require.True(t, tx.snapshotIsolationConflict(MVCCVersion{
+		CommitTimestamp: tx.readTS.CommitTimestamp.Add(time.Nanosecond),
+		CommitSequence:  maxMVCCCommitSequence,
+	}), "later saturated timestamp should still count as a concurrent write")
+
+	require.False(t, tx.snapshotIsolationConflict(MVCCVersion{
+		CommitTimestamp: tx.readTS.CommitTimestamp,
+		CommitSequence:  maxMVCCCommitSequence,
+	}), "same saturated timestamp should not count as a conflict")
+}

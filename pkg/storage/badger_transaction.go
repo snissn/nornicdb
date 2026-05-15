@@ -1803,9 +1803,18 @@ func (tx *BadgerTransaction) validateSnapshotIsolationConflicts() error {
 // an atomic uint64 incremented at every allocateMVCCVersion call —
 // it cannot move non-monotonically. A real concurrent commit MUST
 // bump seq past tx.readTS.CommitSequence for it to have written
-// anything. So conflict iff head.CommitSequence > tx.readTS.CommitSequence.
+// anything. When the global sequence saturates at MaxUint64 we can no
+// longer distinguish commits by seq, so allocateMVCCVersion forces
+// strictly increasing commit timestamps and this check falls back to
+// timestamp ordering only for the equal-MaxUint64 case.
 func (tx *BadgerTransaction) snapshotIsolationConflict(headVersion MVCCVersion) bool {
-	return headVersion.CommitSequence > tx.readTS.CommitSequence
+	if headVersion.CommitSequence != tx.readTS.CommitSequence {
+		return headVersion.CommitSequence > tx.readTS.CommitSequence
+	}
+	if headVersion.CommitSequence == maxMVCCCommitSequence {
+		return headVersion.CommitTimestamp.After(tx.readTS.CommitTimestamp)
+	}
+	return false
 }
 
 func (tx *BadgerTransaction) checkNodeCreateConflict(nodeID NodeID) error {

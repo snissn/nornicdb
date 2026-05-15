@@ -87,3 +87,12 @@ func (b *BadgerEngine) ScanAccessMeta() ([]*knowledgepolicy.AccessMetaEntry, err
 	}
 	return entries, nil
 }
+
+// RecordMaterializedAccess records an access only after the query executor has
+// fully materialized the entity into a result row.
+func (b *BadgerEngine) RecordMaterializedAccess(entityID string) {
+	if b == nil || b.accumulator == nil || entityID == "" {
+		return
+	}
+	b.accumulator.IncrementAccess(entityID)
+}

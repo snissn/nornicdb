@@ -52,6 +52,31 @@ func TestWriteNodeMVCCHeadForFreshCreateInTxn_FloorEqualsVersion(t *testing.T) {
 	}))
 }
 
+func TestAllocateMVCCVersion_FallsBackToTimestampOrderingWhenSequenceExhausted(t *testing.T) {
+	be := NewMemoryEngine()
+	t.Cleanup(func() { _ = be.Close() })
+
+	be.mvccSeq.Store(maxMVCCCommitSequence)
+	base := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	be.mvccHighWaterNanos.Store(base.UnixNano())
+
+	var version MVCCVersion
+	err := be.db.Update(func(txn *badger.Txn) error {
+		var allocErr error
+		version, allocErr = be.allocateMVCCVersion(txn, base.Add(-time.Hour))
+		return allocErr
+	})
+	require.NoError(t, err)
+	require.Equal(t, maxMVCCCommitSequence, version.CommitSequence)
+	require.Equal(t, base.Add(time.Nanosecond), version.CommitTimestamp,
+		"saturated allocator should fall back to a strictly increasing high-water timestamp")
+	require.Equal(t, maxMVCCCommitSequence, be.mvccSeq.Load(), "allocator must not wrap back to zero on exhaustion")
+
+	persistedSeq, loadErr := be.loadPersistedMVCCSequence()
+	require.NoError(t, loadErr)
+	require.Equal(t, uint64(0), persistedSeq, "timestamp-only fallback must not rewrite the persisted sequence key")
+}
+
 func TestWriteEdgeMVCCHeadForFreshCreateInTxn_FloorEqualsVersion(t *testing.T) {
 	be := NewMemoryEngine()
 	t.Cleanup(func() { _ = be.Close() })

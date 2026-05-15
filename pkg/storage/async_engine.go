@@ -2545,6 +2545,14 @@ func (ae *AsyncEngine) AddToPendingEmbeddings(nodeID NodeID) {
 	}
 }
 
+// RecordMaterializedAccess delegates result-materialization access recording to
+// the underlying engine, if supported.
+func (ae *AsyncEngine) RecordMaterializedAccess(entityID string) {
+	if recorder, ok := ae.engine.(interface{ RecordMaterializedAccess(string) }); ok {
+		recorder.RecordMaterializedAccess(entityID)
+	}
+}
+
 // PendingEmbeddingsCount delegates to the underlying engine, if supported.
 func (ae *AsyncEngine) PendingEmbeddingsCount() int {
 	if mgr, ok := ae.engine.(interface{ PendingEmbeddingsCount() int }); ok {

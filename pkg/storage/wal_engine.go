@@ -261,6 +261,14 @@ func (w *WALEngine) GetInnerEngine() Engine {
 	return w.engine
 }
 
+// RecordMaterializedAccess delegates result-materialization access recording to
+// the underlying engine, if supported.
+func (w *WALEngine) RecordMaterializedAccess(entityID string) {
+	if recorder, ok := w.engine.(interface{ RecordMaterializedAccess(string) }); ok {
+		recorder.RecordMaterializedAccess(entityID)
+	}
+}
+
 // EnableAutoCompaction starts automatic snapshot creation and WAL truncation.
 // Snapshots are created at the configured SnapshotInterval, and the WAL is
 // truncated after each successful snapshot to prevent unbounded growth.

@@ -51,7 +51,8 @@ func (b *BadgerEngine) BeginQueryRevealScope(reveal bool) func() {
 }
 
 // filterNodeByDecay returns true if the node should be suppressed from results.
-// When a node survives filtering and an accumulator is set, it records the access.
+// It only decides visibility. Access recording is deferred until a query
+// actually materializes the entity into the final result set.
 func (b *BadgerEngine) filterNodeByDecay(node *Node, nowNanos int64) bool {
 	if !b.decayEnabled || node == nil {
 		return false
@@ -94,8 +95,6 @@ func (b *BadgerEngine) filterNodeByDecay(node *Node, nowNanos int64) bool {
 		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
 			kp.IncReadFilterDropped("node", "")
 		}
-	} else if b.accumulator != nil {
-		b.accumulator.IncrementAccess(string(node.ID))
 	}
 	return suppress
 }
@@ -140,8 +139,6 @@ func (b *BadgerEngine) filterEdgeByDecay(edge *Edge, nowNanos int64) bool {
 		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
 			kp.IncReadFilterDropped("edge", "")
 		}
-	} else if b.accumulator != nil {
-		b.accumulator.IncrementAccess(string(edge.ID))
 	}
 	return suppress
 }

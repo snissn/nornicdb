@@ -1209,6 +1209,18 @@ func (n *NamespacedEngine) AddToPendingEmbeddings(nodeID NodeID) {
 	}
 }
 
+// RecordMaterializedAccess records a result-materialization access against the
+// fully qualified entity ID in the underlying engine.
+func (n *NamespacedEngine) RecordMaterializedAccess(entityID string) {
+	if recorder, ok := n.inner.(interface{ RecordMaterializedAccess(string) }); ok {
+		prefixed := entityID
+		if !strings.Contains(entityID, n.separator) {
+			prefixed = n.namespace + n.separator + entityID
+		}
+		recorder.RecordMaterializedAccess(prefixed)
+	}
+}
+
 // LastWriteTime returns the last known write time from the underlying engine, if available.
 func (n *NamespacedEngine) LastWriteTime() time.Time {
 	// Intentionally return zero here because a global LastWriteTime from the

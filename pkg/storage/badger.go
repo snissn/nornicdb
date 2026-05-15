@@ -19,6 +19,8 @@ import (
 	"github.com/orneryd/nornicdb/pkg/observability"
 )
 
+const maxMVCCCommitSequence = ^uint64(0)
+
 // Key prefixes for BadgerDB storage organization
 // Using single-byte prefixes for efficiency
 const (
@@ -867,26 +869,56 @@ func (b *BadgerEngine) loadPersistedMVCCSequence() (uint64, error) {
 }
 
 func (b *BadgerEngine) allocateMVCCVersion(txn *badger.Txn, commitTime time.Time) (MVCCVersion, error) {
-	seq := b.mvccSeq.Add(1)
-	encodedSeq := make([]byte, 8)
-	binary.BigEndian.PutUint64(encodedSeq, seq)
-	if err := txn.Set(mvccSequenceKey(), encodedSeq); err != nil {
+	seq, saturated := b.nextMVCCSequence()
+	if !saturated {
+		encodedSeq := make([]byte, 8)
+		binary.BigEndian.PutUint64(encodedSeq, seq)
+		if err := txn.Set(mvccSequenceKey(), encodedSeq); err != nil {
+			return MVCCVersion{}, err
+		}
+	}
+	commitStamp, err := b.reserveMVCCCommitTimestamp(commitTime.UTC(), saturated)
+	if err != nil {
 		return MVCCVersion{}, err
 	}
+	return MVCCVersion{
+		CommitTimestamp: commitStamp,
+		CommitSequence:  seq,
+	}, nil
+}
+
+func (b *BadgerEngine) nextMVCCSequence() (uint64, bool) {
+	for {
+		cur := b.mvccSeq.Load()
+		if cur == maxMVCCCommitSequence {
+			return cur, true
+		}
+		next := cur + 1
+		if b.mvccSeq.CompareAndSwap(cur, next) {
+			return next, false
+		}
+	}
+}
+
+func (b *BadgerEngine) reserveMVCCCommitTimestamp(commitTime time.Time, forceAdvance bool) (time.Time, error) {
 	stampNanos := commitTime.UTC().UnixNano()
 	for {
 		cur := b.mvccHighWaterNanos.Load()
-		if stampNanos <= cur {
-			break
+		next := stampNanos
+		if forceAdvance {
+			if cur == int64(^uint64(0)>>1) {
+				return time.Time{}, fmt.Errorf("mvcc commit timestamp exhausted: %w", ErrExhausted)
+			}
+			if next <= cur {
+				next = cur + 1
+			}
+		} else if next <= cur {
+			return commitTime.UTC(), nil
 		}
-		if b.mvccHighWaterNanos.CompareAndSwap(cur, stampNanos) {
-			break
+		if b.mvccHighWaterNanos.CompareAndSwap(cur, next) {
+			return time.Unix(0, next).UTC(), nil
 		}
 	}
-	return MVCCVersion{
-		CommitTimestamp: commitTime.UTC(),
-		CommitSequence:  seq,
-	}, nil
 }
 
 func (b *BadgerEngine) readSchemaVersion() (int, error) {
