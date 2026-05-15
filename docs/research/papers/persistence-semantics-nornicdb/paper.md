@@ -6,7 +6,7 @@
 
 ## Abstract
 
-Agent memory systems often conflate durable facts, episodic memories, behavioral directives, and inference-time reasoning. This causes factual knowledge to decay, memories to persist indefinitely, or behavioral rules to be promoted from correlated evidence. We present NornicDB, a graph database substrate that exposes persistence semantics as database-native primitives: canonical fact versioning with temporal validity windows, append-only mutation logs with WAL receipts, a proposed profile-and-policy-driven scoring subsystem that gates retrieval visibility, and a proposed two-layer anti-sycophancy defense combining session-aware gating with Kalman-filtered behavioral signals. The implemented primitives include the canonical graph ledger, MVCC version resolution, and the mutation log. The scoring subsystem and declarative Cypher DDL extensions — decay profiles, promotion profiles, and promotion policies — are designed and specified but not yet shipped. We show how this design addresses requirements raised by recent work on temporal GraphRAG [1], enterprise replayable memory [2], and missing knowledge layers in cognitive architectures [3]. The contribution is not a new memory policy, but a storage and query substrate capable of expressing multiple memory policies without hardcoding cognitive categories.
+Agent memory systems often conflate durable facts, episodic memories, behavioral directives, and inference-time reasoning. This causes factual knowledge to decay, memories to persist indefinitely, or behavioral rules to be promoted from correlated evidence. We present NornicDB, a graph database substrate that exposes persistence semantics as database-native primitives: canonical fact versioning with temporal validity windows, append-only mutation logs with WAL receipts, a profile-and-policy-driven scoring subsystem that gates retrieval visibility, and a two-layer anti-sycophancy defense combining session-aware gating with Kalman-filtered behavioral signals. All primitives — the canonical graph ledger, MVCC version resolution, the mutation log, the scoring subsystem, and the declarative Cypher DDL extensions for decay profiles, promotion profiles, and promotion policies — are implemented and shipped in NornicDB v1.1.0. The decay surface supports both forward Ebbinghaus curves and inverse Roynard-style consolidation curves through a single negative-half-life signal, composed with a `LAST_ACCESSED` anchor so that idle time strengthens the score and access resets it. We show how this design addresses requirements raised by recent work on temporal GraphRAG [1], enterprise replayable memory [2], and missing knowledge layers in cognitive architectures [3]. The contribution is not a new memory policy, but a storage and query substrate capable of expressing multiple memory policies without hardcoding cognitive categories.
 
 ---
 
@@ -22,15 +22,15 @@ Roynard [3] identifies a category error in existing cognitive architectures: sys
 
 These three papers converge on a shared diagnosis: the storage layer matters. Temporal validity, append-only provenance, layer-specific decay, evidence-gated promotion, and replay surfaces are not application concerns that can be bolted on after the fact. They are persistence semantics that belong in the database substrate.
 
-NornicDB is a graph database designed for AI agent memory. Rather than implementing a particular cognitive architecture, it exposes persistence semantics as database-native primitives. The canonical graph ledger provides fact versioning and temporal validity. The mutation log and WAL receipts provide append-only provenance and replay. A proposed scoring subsystem — authored through declarative Cypher DDL extensions — would provide policy-driven decay and evidence-gated promotion with scoring-before-visibility semantics. The proposed `reveal()` operator separates visibility policy from compliance retention. A proposed two-layer anti-sycophancy defense combines session-aware gating (removing bias) with Kalman-filtered behavioral signals (removing variance), adapted from a flight-controller gyroscope filter. Together, the implemented and proposed primitives can express the requirements raised by all three lines of work without hardcoding any single cognitive model.
+NornicDB is a graph database designed for AI agent memory. Rather than implementing a particular cognitive architecture, it exposes persistence semantics as database-native primitives. The canonical graph ledger provides fact versioning and temporal validity. The mutation log and WAL receipts provide append-only provenance and replay. The scoring subsystem — authored through declarative Cypher DDL extensions — provides policy-driven decay and evidence-gated promotion with scoring-before-visibility semantics. The `reveal()` operator separates visibility policy from compliance retention. A two-layer anti-sycophancy defense combines session-aware gating (removing bias) with Kalman-filtered behavioral signals (removing variance), adapted from a flight-controller gyroscope filter. Together, these primitives express the requirements raised by all three lines of work without hardcoding any single cognitive model.
 
 By _database-native persistence semantics_, we mean that validity, supersession, decay, promotion, visibility, provenance, and replay are represented as schema, constraints, indexes, query semantics, and transaction-log behavior — rather than as conventions enforced only by an application-side agent loop.
 
 **Contribution statement.**
 
-- _What is new?_ A database substrate that implements temporal validity, supersession, and append-only mutation history as shipped graph-native primitives, and proposes scoring-before-visibility, layer-specific decay, and evidence-gated promotion as designed extensions — all authored through declarative Cypher DDL rather than application-side memory code.
+- _What is new?_ A database substrate that implements temporal validity, supersession, append-only mutation history, scoring-before-visibility, layer-specific decay (including Roynard-style inverse consolidation curves through a negative-half-life signal), and evidence-gated promotion as shipped graph-native primitives — all authored through declarative Cypher DDL rather than application-side memory code.
 - _Why does it matter?_ Current agent memory systems either ignore persistence semantics entirely or implement them as ad hoc application logic, making them non-portable, non-auditable, and difficult to compose. NornicDB makes these semantics configurable per content type through the same schema-oriented mechanisms operators already use for constraints and indexes.
-- _What evidence supports it?_ We demonstrate that NornicDB's implemented and proposed primitives address the specific requirements raised by three independent research threads, provide worked examples with concrete Cypher DDL, and describe a concrete anti-sycophancy mechanism with quantitative dampening behavior.
+- _What evidence supports it?_ We demonstrate that NornicDB's primitives — all of which ship in v1.1.0 [11] — address the specific requirements raised by three independent research threads, provide worked examples with concrete Cypher DDL, and describe a concrete anti-sycophancy mechanism with quantitative dampening behavior.
 
 ---
 
@@ -48,13 +48,13 @@ Srinivasan's DPM [2] treats agent memory as an append-only event log plus a sing
 
 ### 2.3 The Missing Knowledge Layer and Persistence Semantics
 
-Roynard [3] argues that CoALA [8] and JEPA [9] both lack an explicit Knowledge layer with its own persistence semantics, producing a category error where systems apply cognitive decay to factual claims. The four-layer decomposition (Knowledge, Memory, Wisdom, Intelligence) assigns each layer a different update mechanism: supersession, Ebbinghaus decay, evidence-gated revision, and ephemeral inference. Roynard explicitly critiques NornicDB's earlier three-tier decay model — the critique motivated a full redesign of NornicDB's scoring architecture from hardcoded tiers to a declarative profile-and-policy system. Roynard subsequently reviewed the redesigned architecture and assessed it as "a substantive response to the critique," noting that the four-layer profile set is "a four-different-update-mechanisms mapping, which is precisely what the paper's persistence-semantics table argues for" [10].
+Roynard [3] argues that CoALA [8] and JEPA [9] both lack an explicit Knowledge layer with its own persistence semantics, producing a category error where systems apply cognitive decay to factual claims. The four-layer decomposition (Knowledge, Memory, Wisdom, Intelligence) assigns each layer a different update mechanism: supersession, Ebbinghaus decay, evidence-gated revision, and ephemeral inference. Roynard explicitly critiques NornicDB's earlier three-tier decay model — the critique motivated a full redesign of NornicDB's scoring architecture from hardcoded tiers to a declarative profile-and-policy system. Roynard subsequently reviewed the redesigned architecture and assessed it as "a substantive response to the critique," noting that the four-layer profile set is "a four-different-update-mechanisms mapping, which is precisely what the paper's persistence-semantics table argues for" [10]. The redesigned subsystem ships in NornicDB v1.1.0 [11], including a negative-half-life signal that inverts any decay function family in place — when paired with a `LAST_ACCESSED` anchor, it implements the consolidation-by-idleness curve that Roynard's model attributes to Memory-tier content that is rehearsed via spacing rather than fresh retrieval.
 
 ### 2.4 Existing Graph Memory Systems
 
 MemGPT [4] pioneered OS-style memory management for LLMs. Mem0 [5] applies identical CRUD operations to facts and experiences. Graphiti [6] introduced bi-temporal event sourcing for graph-based agent memory. Signet applies uniform 0.95^days decay to all content types regardless of category. These systems advance the state of agent memory but do not expose persistence semantics as configurable database primitives — the update mechanics are hardcoded per system.
 
-**Summary.** All four threads demonstrate that temporal and memory-aware retrieval improves agents. NornicDB asks a different question: which of those semantics should be enforced by the database substrate itself? TG-RAG, Graphiti, and GAM implement temporal semantics above the database. DPM implements replay above the database. Roynard's layer separation exists only as a conceptual framework. NornicDB proposes to make these concerns native to the storage and query layer.
+**Summary.** All four threads demonstrate that temporal and memory-aware retrieval improves agents. NornicDB asks a different question: which of those semantics should be enforced by the database substrate itself? TG-RAG, Graphiti, and GAM implement temporal semantics above the database. DPM implements replay above the database. Roynard's layer separation exists only as a conceptual framework. NornicDB makes these concerns native to the storage and query layer.
 
 ---
 
@@ -77,7 +77,7 @@ NornicDB targets eight persistence-semantic requirements drawn from the gaps ide
 
 ## 4. NornicDB Architecture
 
-This section describes the four architectural components that address the requirements above. NornicDB is implemented in Go and uses Badger as its storage engine. It is Neo4j-compatible at the Cypher and Bolt protocol layers, with NornicDB-specific extensions for persistence semantics. The canonical graph ledger (§4.1) is implemented and shipped. The scoring subsystem (§4.2), anti-sycophancy defense (§4.3), and declarative authoring surface (§4.4) are designed and specified at the type and interface level but not yet shipped; we describe them in the present tense for clarity but mark their status explicitly.
+This section describes the four architectural components that address the requirements above. NornicDB is implemented in Go and uses Badger as its storage engine. It is Neo4j-compatible at the Cypher and Bolt protocol layers, with NornicDB-specific extensions for persistence semantics. All four components — the canonical graph ledger (§4.1), the scoring subsystem (§4.2), the anti-sycophancy defense (§4.3), and the declarative authoring surface (§4.4) — are implemented and shipped in NornicDB v1.1.0 [11].
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -90,11 +90,11 @@ This section describes the four architectural components that address the requir
 │  Authoring Surface│  Sycophancy         │  Scoring                 │
 │                   │  Defense            │                           │
 │  CREATE DECAY     │  Layer 1: Session   │  Decay profiles           │
-│  PROFILE ...      │  gating (bias)      │  Promotion policies       │
-│  CREATE PROMOTION │  Layer 2: Kalman    │  Scoring-before-          │
-│  POLICY ...       │  smoothing          │  visibility               │
-│                   │  (variance)         │  reveal()                 │
-│   [proposed]      │   [proposed]        │   [proposed]              │
+│  PROFILE ...      │  gating (bias)      │  (forward + inverse)      │
+│  CREATE PROMOTION │  Layer 2: Kalman    │  Promotion policies       │
+│  POLICY ...       │  smoothing          │  Scoring-before-          │
+│                   │  (variance)         │  visibility               │
+│                   │                     │  reveal()                 │
 ├───────────────────┴─────────────────────┴───────────────────────────┤
 │                §4.1 Canonical Graph Ledger                         │
 │                                                                     │
@@ -102,13 +102,12 @@ This section describes the four architectural components that address the requir
 │  TEMPORAL NO OVERLAP constraints                                    │
 │  Mutation log + WAL receipts                                        │
 │  MVCC version resolution + time-travel queries                     │
-│                          [implemented]                               │
 ├─────────────────────────────────────────────────────────────────────┤
 │                    Badger Storage Engine                             │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Figure 1.** NornicDB architecture overview. The canonical graph ledger (bottom) is implemented. The scoring subsystem, anti-sycophancy defense, and declarative authoring surface (middle) are proposed.
+**Figure 1.** NornicDB architecture overview. All four components are implemented and shipped in NornicDB v1.1.0 [11].
 
 ### 4.1 Canonical Graph Ledger
 
@@ -126,13 +125,13 @@ The mutation log records every write operation (create, supersede, suppress, res
 
 ### 4.2 Knowledge-Layer Scoring
 
-The proposed scoring subsystem sits between storage and retrieval. When a query touches an entity, the engine resolves and applies scoring _before_ deciding whether the entity is visible to the query. An entity whose final score falls below the visibility threshold would not appear in `MATCH` results, `WHERE` evaluation, or search hits unless the caller explicitly uses `reveal()`.
+The scoring subsystem sits between storage and retrieval. When a query touches an entity, the engine resolves and applies scoring _before_ deciding whether the entity is visible to the query. An entity whose final score falls below the visibility threshold does not appear in `MATCH` results, `WHERE` evaluation, or search hits unless the caller explicitly uses `reveal()`.
 
-The subsystem is designed to be independent from — and layered on top of — the compliance retention subsystem (GDPR Art.17 erasure, legal holds, retention-policy-driven archival). `reveal()` bypasses only the scoring gate; it cannot resurrect compliance-deleted entities.
+The subsystem is independent from — and layered on top of — the compliance retention subsystem (GDPR Art.17 erasure, legal holds, retention-policy-driven archival). `reveal()` bypasses only the scoring gate; it cannot resurrect compliance-deleted entities.
 
 #### 4.2.1 Decay Profiles
 
-Decay profiles define how a score degrades over time. In the proposed design, they are authored through Cypher DDL extensions and targeted to specific node labels, edge types, or wildcards:
+Decay profiles define how a score evolves over time. They are authored through Cypher DDL extensions and targeted to specific node labels, edge types, or wildcards:
 
 ```cypher
 -- Knowledge facts: never decay; supersession is modeled through
@@ -160,25 +159,29 @@ APPLY {
 }
 ```
 
-The design supports four decay functions: `exponential` (Ebbinghaus), `linear`, `step`, and `none`. The decay formula for exponential decay is:
+The implementation supports four decay-function families — `exponential` (Ebbinghaus), `linear`, `step`, and `none` — composed with a sign modifier on `halfLifeSeconds`. A positive half-life produces the standard forgetting curve; a negative half-life inverts the function in place, so the compiled score becomes `1 - f(age, |halfLife|)`. The exponential forward and inverse curves are:
 
-    score(t) = exp(-t × ln(2) / halfLife)
+    forward (positive halfLife):   score(t) = exp(-t × ln(2) / halfLife)
+    inverse (negative halfLife):   score(t) = 1 - exp(-t × ln(2) / |halfLife|)
 
-where _t_ is the elapsed time since the score-start anchor.
+The inversion is purely a curve property and composes with every function family and every score-start anchor; it is not a separate function constant or modifier flag in the schema. Combined with the `LAST_ACCESSED` anchor (below), the inverse exponential implements the Roynard-style consolidation curve in which a memory grows stronger while idle and is reset on access.
 
 **Score-start selection.** Each decay profile declares which timestamp drives decay age through a `scoreFrom` option:
 
 - `CREATED` — decay age begins at the entity's original creation timestamp. Updates do not reset decay.
 - `VERSION` — decay age begins at the latest visible MVCC version timestamp. Updates reset the decay clock. Combined with validity windows, this provides bi-temporal scoring: the MVCC system determines _which_ version is visible, and `scoreFrom: 'VERSION'` determines _how old_ that version appears for scoring purposes.
 - `CUSTOM` — decay age begins at a user-specified property value, enabling domain-specific anchors.
+- `LAST_ACCESSED` — decay age begins at the entity's last access timestamp recorded by the access metadata index, falling back to `CREATED` until an access is observed. Pairs with a negative half-life to model consolidation: idle time grows the score; access resets the anchor and drops the score back toward zero.
 
-The scoring timestamp ("now") is not `time.Now()` — it is the transaction's MVCC snapshot timestamp, passed through the scorer as `scoringTime`. This ensures deterministic, repeatable scoring within a transaction: the same entity queried twice in the same transaction would return the same score.
+The scoring timestamp ("now") is not `time.Now()` — it is the transaction's MVCC snapshot timestamp, passed through the scorer as `scoringTime`. This ensures deterministic, repeatable scoring within a transaction: the same entity queried twice in the same transaction returns the same score.
+
+**`scoreFloor` versus `visibilityThreshold`.** Decay profiles expose two independent levers that are easy to conflate. `scoreFloor` is a *score-value clamp* (the last `max()` in the score pipeline); `visibilityThreshold` is a *suppression cutoff* (`finalScore < visibilityThreshold` hides the entity). They are independent — setting `scoreFloor` alone does not keep an entity visible unless the floor itself is at or above the threshold. The distinction matters most on inverse curves, where the curve evaluates to exactly `0.0` immediately after access: a profile that wants the entity to remain visible right after access must set `scoreFloor >= visibilityThreshold`.
 
 **Property-level and edge-level targeting.** Decay is not limited to whole nodes. Individual properties can receive their own decay rates (e.g., `n.lastConversationSummary` decays with a 30-day half-life while `n.tenantId` is `NO DECAY`). Edges are first-class decay targets — a `CO_ACCESSED` edge can decay independently of its endpoint nodes. Properties participating in structural indexes (lookup, range, composite) are designated immune to decay scoring, ensuring stable aggregation and joins. Vector and fulltext indexes do not confer immunity — property-level decay can exclude content from embeddings without affecting Cypher queryability.
 
 #### 4.2.2 Three-Tier Scoring Optimization
 
-The resolution cascade is designed to be pre-compiled at DDL time into a compiled binding table — a direct `map[string]*CompiledBinding` keyed by sorted label set or edge type. Resolution at query time would be a single map lookup, not a cascade.
+The resolution cascade is pre-compiled at DDL time into a compiled binding table — a direct `map[string]*CompiledBinding` keyed by sorted label set or edge type. Resolution at query time is a single map lookup, not a cascade.
 
 ```
   Query touches entity
@@ -212,17 +215,17 @@ The resolution cascade is designed to be pre-compiled at DDL time into a compile
 
 **Figure 2.** Three-tier scoring optimization. Each tier is cheaper than the next; most entities are resolved without computing a float64 score.
 
-Three proposed optimization tiers keep the hot path fast:
+Three optimization tiers keep the hot path fast:
 
 1. **Tier 1 — Compiled binding table.** One map lookup per entity to find the applicable decay profile and promotion policy. Rebuilt on DDL change (rare).
 
-2. **Tier 2 — Suppressed-bit fast path.** Suppressed entities carry a persisted `VisibilitySuppressed` boolean. The read path checks this bit (one byte) before any profile resolution. If suppressed and no `reveal()`, skip immediately.
+2. **Tier 2 — Suppressed-bit fast path.** Suppressed entities carry a persisted `VisibilitySuppressed` boolean. The read path checks this bit (one byte) before any profile resolution. If suppressed and no `reveal()`, skip immediately. To preserve correctness across label changes, `UpdateNode` re-evaluates suppression under the entity's new labels and rewrites the persisted flag — without this rebind, an entity moved out of a suppressing binding would stay suppressed forever despite the curve permitting visibility under the new label set.
 
-3. **Tier 3 — Integer age comparison.** For exponential decay, pre-compute a threshold age: `thresholdAge = -halfLife × ln(visibilityThreshold) / ln(2)`. At read time, compare `now - scoreFrom > thresholdAge` using integer subtraction on UnixNano values — no `math.Exp()` needed for the visibility check. The precise float64 score is computed lazily only when the entity survives visibility and is projected into results.
+3. **Tier 3 — Integer age comparison.** For monotonic forward decay, pre-compute a threshold age: `thresholdAge = -halfLife × ln(visibilityThreshold) / ln(2)`. At read time, compare `now - scoreFrom > thresholdAge` using integer subtraction on UnixNano values — no `math.Exp()` needed for the visibility check. The precise float64 score is computed lazily only when the entity survives visibility and is projected into results. Inverse curves bypass the threshold-age fast path because they are not monotonically decreasing in age; they always go through the full score calculation, which costs slightly more CPU per read in exchange for the consolidation semantics.
 
 #### 4.2.3 Promotion Policies
 
-Promotion policies contain the logic that determines an entity's promotion tier. In the proposed design, they are separate from decay profiles — promotion is evaluated first, then decay, then the two are composed into a final score:
+Promotion policies contain the logic that determines an entity's promotion tier. They are separate objects from decay profiles — promotion is evaluated first, then decay, then the two are composed into a final score:
 
 ```
 promotedScore = baseDecayScore × promotionMultiplier
@@ -250,15 +253,15 @@ APPLY {
 }
 ```
 
-A critical design decision: `ON ACCESS` mutations would execute _only if the entity passes the visibility gate_. Suppressed entities would not accumulate access state — this prevents suppressed entities from recording "accesses" that occurred only because the scorer was evaluating them, not because a user or query actually retrieved them.
+A critical design decision: `ON ACCESS` mutations execute _only if the entity passes the visibility gate_. Suppressed entities do not accumulate access state — this prevents suppressed entities from recording "accesses" that occurred only because the scorer was evaluating them, not because a user or query actually retrieved them.
 
-`ON ACCESS` mutations would write exclusively to a separate `accessMeta` index (Badger key prefix `0x11`), never to the node or edge itself. Nodes and edges remain read-only during policy evaluation. The proposed `policy()` Cypher function exposes accessMeta for diagnostics (e.g., `policy(n).accessCount`).
+`ON ACCESS` mutations write exclusively to a separate `accessMeta` index (Badger key prefix `0x11`), never to the node or edge itself. Nodes and edges remain read-only during policy evaluation. The `policy()` Cypher function exposes accessMeta for diagnostics (e.g., `policy(n).accessCount`).
 
-**Hot-path performance.** The design calls for `ON ACCESS` increments to be accumulated in-process via per-P (per-processor) sharded counter rings using `sync.Pool` for P-local affinity, targeting zero cross-core contention regardless of graph topology. Each shard would hold a delta, not an absolute value — no msgpack serialization, no Badger write, no allocation on the read path. A background flush goroutine would drain the counter ring on a configurable interval (default 2s) and apply a single batched Badger write. Access counts would be eventually consistent with a bounded lag of one flush interval.
+**Hot-path performance.** `ON ACCESS` increments are accumulated in-process via per-P (per-processor) sharded counter rings using `sync.Pool` for P-local affinity, targeting zero cross-core contention regardless of graph topology. Each shard holds a delta, not an absolute value — no msgpack serialization, no Badger write, no allocation on the read path. A background flush goroutine drains the counter ring on a configurable interval (default 2s) and applies a single batched Badger write. Access counts are eventually consistent with a bounded lag of one flush interval.
 
 #### 4.2.4 Deindexing
 
-When a node or edge becomes visibility-suppressed, it must be removed from secondary indexes. The proposed deindexing mechanism avoids expensive full-index scans through a per-entity `IndexEntryCatalog` that records the exact Badger keys written for each entity across all index types. A background deindex job reads the catalog and performs blind batched deletes against the exact keys. The design uses presence-marker tombstones under a dedicated prefix (`0x17`) — zero-length entries whose existence tells current-time index scans to skip the candidate. Time-travel queries are unaffected because they iterate MVCC version records directly and never touch secondary indexes.
+When a node or edge becomes visibility-suppressed, it must be removed from secondary indexes. The deindexing mechanism avoids expensive full-index scans through a per-entity `IndexEntryCatalog` that records the exact Badger keys written for each entity across all index types. A background deindex job reads the catalog and performs blind batched deletes against the exact keys. Presence-marker tombstones live under a dedicated prefix (`0x17`) — zero-length entries whose existence tells current-time index scans to skip the candidate. Time-travel queries are unaffected because they iterate MVCC version records directly and never touch secondary indexes.
 
 **Addressing R4, R5.**
 
@@ -266,7 +269,7 @@ When a node or edge becomes visibility-suppressed, it must be removed from secon
 
 The Wisdom layer requires evidence-gated promotion (R6). When an LLM evaluates a memory — "how relevant is this?" or "how confident are you in this fact?" — the answer can hallucinate. A mediocre memory might get scored 0.99 confidence because the model was being agreeable (sycophancy), confused, or having a bad inference. Storing that score directly would allow a single hallucinated spike to promote garbage to the canonical knowledge layer.
 
-The proposed defense addresses this with two layers that handle different failure modes:
+The defense addresses this with two layers that handle different failure modes:
 
 ```
   LLM evaluates memory
@@ -308,7 +311,7 @@ The proposed defense addresses this with two layers that handle different failur
 
 LLM-driven access patterns are not just noisy — they can be systematically biased. If the same agent accesses the same memory 50 times in one session (a sycophancy loop), those are not 50 independent observations. They are one observation repeated.
 
-The design provides query context variables projected from HTTP request headers (`X-Query-Session` → `$_session`, `X-Query-Agent` → `$_agent`, `X-Query-Tenant` → `$_tenant`, and any `X-Query-<Key>` → `$_<key>`). These are read-only, ephemeral, and generic — the engine does not decide which context matters. Operators define their own gating logic:
+The engine projects query context variables from HTTP request headers (`X-Query-Session` → `$_session`, `X-Query-Agent` → `$_agent`, `X-Query-Tenant` → `$_tenant`, and any `X-Query-<Key>` → `$_<key>`). These are read-only, ephemeral, and generic — the engine does not decide which context matters. Operators define their own gating logic:
 
 ```cypher
 ON ACCESS {
@@ -328,14 +331,14 @@ With this gating, 50 accesses from one session count as 1. Only genuinely distin
 
 After gating removes bias, the remaining noise in behavioral signals is handled by a scalar Kalman filter. The algorithm is adapted from the imu-f flight controller's gyroscope filter — the same problem of preventing transient sensor spikes from corrupting estimated state.
 
-The proposed filter implementation:
+The filter implementation:
 
 1. **Velocity-based prediction**: `x += (x - lastX)` projects the state forward. A genuine trend continues; a hallucinated spike deviates from the trajectory.
 2. **Error-boosted covariance**: `p = p + q × e`, where `e = |1 - target/lastX|`. Far from the expected state, prediction uncertainty grows.
 3. **Gain-limited measurement update**: `K = p / (p + R)`. When R is high (noisy measurements), K is low, and a single wild measurement barely moves the estimate.
 4. **Adaptive R via variance tracking** (auto mode): R is continuously recalculated as `sqrt(sample_variance) × VARIANCE_SCALE` over a sliding window (default 32 samples), ported directly from the flight controller's `update_kalman_covariance`. As measurements become noisier, R increases and the filter dampens harder.
 
-Three modes would be exposed through the `WITH KALMAN` Cypher modifier:
+Three modes are exposed through the `WITH KALMAN` Cypher modifier:
 
 | Syntax                          | Behavior                                                          |
 | ------------------------------- | ----------------------------------------------------------------- |
@@ -359,7 +362,7 @@ Without the Kalman filter, access 5 would have set `confidenceScore = 0.99` and 
 
 **What to filter and what not to filter.** Kalman smoothing is appropriate for derived behavioral metrics where the input signal has genuine measurement noise: confidence scores from LLM evaluation, relevance assessments, cross-session access rates, agreement ratios. It is _not_ appropriate for raw monotonic counters (`accessCount` — always goes up by 1, no noise) or timestamps (`lastAccessedAt` — a point in time, no noise). These use plain `SET` without `WITH KALMAN`.
 
-Kalman filter state (estimate, gain, covariance, observation count, variance window) would be persisted per-property in a typed `KalmanFilters map[string]*KalmanPropertyState` field on `AccessMetaEntry`, and would be inspectable through the `policy()` Cypher function for diagnostics:
+Kalman filter state (estimate, gain, covariance, observation count, variance window) is persisted per-property in a typed `KalmanFilters map[string]*KalmanPropertyState` field on `AccessMetaEntry`, and is inspectable through the `policy()` Cypher function for diagnostics:
 
 ```cypher
 MATCH (m:MemoryEpisode {id: $id})
@@ -372,7 +375,7 @@ RETURN policy(m).kalmanFilters.confidenceScore.filteredValue AS smoothedConfiden
 
 ### 4.4 Declarative Authoring Surface
 
-In the proposed design, all persistence semantics are authored through Cypher DDL extensions, following the same schema-oriented patterns NornicDB uses for constraints and indexes. The authoring surface consists of three object types:
+All persistence semantics are authored through Cypher DDL extensions, following the same schema-oriented patterns NornicDB uses for constraints and indexes. The authoring surface consists of three object types:
 
 **Decay profiles** are targeted bindings that declare decay behavior for specific labels or edge types:
 
@@ -388,7 +391,7 @@ In the proposed design, all persistence semantics are authored through Cypher DD
 
 At most one decay profile and one promotion policy may target each unique label or edge type — overlapping definitions are rejected at DDL time. A label-specific profile always takes precedence over a wildcard (`FOR (n:*)`).
 
-The entire scoring subsystem would be gated behind a single feature flag (`NORNICDB_MEMORY_DECAY_ENABLED`, default `false`). When disabled, DDL statements would still succeed (profiles and policies persist as schema objects), but runtime scoring, visibility suppression, and `ON ACCESS` mutations would be no-ops. The `decayScore()` function would return `1.0` and `decay(n).applies` would return `false` — queries remain portable without conditional function calls.
+The entire scoring subsystem is gated behind a single feature flag (`NORNICDB_MEMORY_DECAY_ENABLED`, default `false`). When disabled, DDL statements still succeed (profiles and policies persist as schema objects), but runtime scoring, visibility suppression, and `ON ACCESS` mutations are no-ops. The `decayScore()` function returns `1.0` and `decay(n).applies` returns `false` — queries remain portable without conditional function calls.
 
 **Addressing R4, R5, R8.**
 
@@ -503,18 +506,19 @@ Only genuinely independent observations from distinct sessions increment the evi
 
 ## 6. Comparison to Research Requirements
 
-| Requirement from literature       | TG-RAG / DPM / Roynard concern                     | NornicDB mechanism                                            | Status      |
-| --------------------------------- | -------------------------------------------------- | ------------------------------------------------------------- | ----------- |
-| Time-sensitive facts              | Timestamped relations, evolving knowledge [1]      | Temporal graph + MVCC + validity windows                      | Implemented |
-| Incremental updates               | Avoid full reindex/rebuild [1]                     | Mutation log + exact index-entry catalogs                     | Implemented |
-| Deterministic replay              | Event log as source of truth [2]                   | WAL txlog + receipts                                          | Implemented |
-| Auditable rationale               | Regulator/audit inspection of decisions [2]        | Mutation log + provenance metadata per FactVersion            | Implemented |
-| Multi-tenant isolation            | Structural, not policy-based isolation [2]         | Query context variables from `X-Query-Tenant` header          | Proposed    |
-| Knowledge should not decay        | Critique of Ebbinghaus applied to facts [3]        | `NO DECAY` profile, supersession edges                        | Proposed    |
-| Memory should decay               | Episodic observations fade unless reinforced [3]   | Ebbinghaus decay profiles with configurable half-life         | Proposed    |
-| Evidence-gated wisdom             | Sycophancy concern: access ≠ evidence [3]          | Session gating + Kalman-smoothed behavioral signals           | Proposed    |
-| Bi-temporal event sourcing        | Four-timestamp model for temporal conflicts [3, 6] | `scoreFrom: 'VERSION'` + MVCC snapshots + validity windows    | Proposed    |
-| Compliance vs. scoring separation | Legal deletion ≠ retrieval suppression [3]         | `reveal()` bypasses scoring; compliance deletion is permanent | Proposed    |
+| Requirement from literature       | TG-RAG / DPM / Roynard concern                     | NornicDB mechanism                                                                    | Status      |
+| --------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------- | ----------- |
+| Time-sensitive facts              | Timestamped relations, evolving knowledge [1]      | Temporal graph + MVCC + validity windows                                              | Implemented |
+| Incremental updates               | Avoid full reindex/rebuild [1]                     | Mutation log + exact index-entry catalogs                                             | Implemented |
+| Deterministic replay              | Event log as source of truth [2]                   | WAL txlog + receipts                                                                  | Implemented |
+| Auditable rationale               | Regulator/audit inspection of decisions [2]        | Mutation log + provenance metadata per FactVersion                                    | Implemented |
+| Multi-tenant isolation            | Structural, not policy-based isolation [2]         | Query context variables from `X-Query-Tenant` header                                  | Implemented |
+| Knowledge should not decay        | Critique of Ebbinghaus applied to facts [3]        | `NO DECAY` profile, supersession edges                                                | Implemented |
+| Memory should decay               | Episodic observations fade unless reinforced [3]   | Ebbinghaus decay profiles with configurable half-life                                 | Implemented |
+| Memory consolidation              | Idle time strengthens; retrieval interferes [3]    | Negative-half-life inverse curves + `scoreFrom: 'LAST_ACCESSED'`                      | Implemented |
+| Evidence-gated wisdom             | Sycophancy concern: access ≠ evidence [3]          | Session gating + Kalman-smoothed behavioral signals                                   | Implemented |
+| Bi-temporal event sourcing        | Four-timestamp model for temporal conflicts [3, 6] | `scoreFrom: 'VERSION'` + MVCC snapshots + validity windows                            | Implemented |
+| Compliance vs. scoring separation | Legal deletion ≠ retrieval suppression [3]         | `reveal()` bypasses scoring; compliance deletion is permanent                         | Implemented |
 
 ---
 
@@ -548,7 +552,7 @@ We are candid about what NornicDB does not do.
 
 - **Kalman smoothing handles noisy behavioral signals, not truth.** The Kalman filter is a behavioral signal smoother adapted from a flight-controller gyroscope filter. It stabilizes derived metrics where the input is noisy. It does not evaluate whether a directive is actually correct. Labels representing canonical facts should use `NO DECAY` and should either have no promotion policy with `WITH KALMAN` mutations, or have a promotion policy with a neutral multiplier — truth-immune labels derive relevance from semantic matching, not access-pattern promotion.
 
-- **Full benchmark comparisons are future work.** This paper demonstrates architectural coverage of the requirements. Comparative evaluation against MemGPT, Mem0, Graphiti, and other systems on shared benchmarks (e.g., BEAM [3]) is planned but not yet complete.
+- **Full benchmark comparisons are future work.** This paper demonstrates architectural coverage of the requirements. The substrate primitives ship in NornicDB v1.1.0 [11]; comparative evaluation against MemGPT, Mem0, Graphiti, and other systems on shared benchmarks (e.g., BEAM [3]) is planned but not yet complete.
 
 ---
 
@@ -573,3 +577,5 @@ We are candid about what NornicDB does not do.
 [9] Y. LeCun, "A Path Towards Autonomous Machine Intelligence," Open Review, 2022.
 
 [10] M. Roynard, response to NornicDB knowledge-layer-persistence proposal, April 2026.
+
+[11] NornicDB project, "v1.1.0 Release Notes," NornicDB repository, May 2026.
