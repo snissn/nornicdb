@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [v1.1.0-rc] - 2026-05-14
+## [v1.1.0] - 2026-05-14
 
 # ⚠️ Breaking rolling upgrade changes to storage in this release. BACK UP YOUR DATA ⚠️
 
@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Knowledge-policy `ON ACCESS` arithmetic coercion**:
   - fixed runtime type coercion to align with Cypher DDL expectations.
+
+- **Knowledge-policy `ON ACCESS` recording scope**:
+  - moved `ON ACCESS` recording out of storage visibility checks to trigger only for entities actually materialized into query results.
+  - routed recording through storage wrappers to preserve namespaced IDs correctly.
+  - extended e2e coverage with positive and inverse test cases including accumulator contents before flush.
+
+- **MVCC commit ordering at sequence saturation**:
+  - hardened MVCC commit ordering when the global commit sequence reaches `MaxUint64`.
+  - The reason for the monotonic counter is that we can actually record transactions so fast that slower processors can have negative nanos drift causing random conflicts with serial ingesiton. @1m commits/sec it would exhaust in 584.5 million years. @1 billion - 584,500 years.
+  - keep sequence pinned and fall back to strictly increasing high-water timestamps rather than wrapping or failing in said years.
+  - updated snapshot conflict detection to use timestamp ordering only for the saturated equal-sequence case.
+  - added focused regression tests for the saturation fallback.
 
 - **Merge-conflict error surfacing for clients**:
   - fixed unique-merge conflict handling so retryable conflict errors are surfaced and scoped correctly for Bolt clients.
