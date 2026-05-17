@@ -97,6 +97,26 @@ jobs:
             echo "::endgroup::"
           }
 
+          # pkg/server is large enough that running it as one job blows the
+          # runner memory budget and hides which slice failed when the
+          # runner kills the process. Split it into focused sub-groups by
+          # test-name prefix; the trailing server-rest group runs whatever
+          # the named groups did not pick up, so a freshly-added test that
+          # doesn't fit an existing prefix still runs in CI without anyone
+          # having to remember to update this file.
+          #
+          # Adding a new bucket: pick a unique prefix, list it in
+          # SERVER_BUCKETS_HANDLED below, and add a `run_server_group` line.
+          # Adding a new test that fits an existing bucket: name it with
+          # the bucket's prefix (e.g. TestAuthFoo). Adding a one-off test
+          # with no bucket fit: just commit it; the catch-all picks it up.
+          SERVER_BUCKETS_HANDLED='^(TestAuth|TestGDPR|TestExplicit|TestCommit|TestRollback|TestTransaction|TestDatabase|TestExecute|TestDbConfig|TestDB|TestDecay|TestMultiDatabase|TestDatabaseIsolation|TestDefaultDatabaseIsolation|TestComposite|TestCompositeRoot|TestBifrost|TestUI|TestInstrumented|TestCORS|TestSession|TestServe|TestStart|TestNew|TestAddr|TestRoute|TestBaseURL|TestBackup|TestCluster|TestGetCookie|TestGraph|TestSearch|TestCollectLatest|TestCollectSnapshot|TestDiffGraph|TestEdges|TestRetention|TestGPU|TestBuildEmbed|TestBasePathAndRBAC|TestQdrant|TestServerQdrantGRPC|TestMCP|TestSecurity|TestRBAC|TestBasicAuth|TestEmbed|TestNornic)'
+
+          run_server_group() {
+            local name="$1"; local pattern="$2"
+            run_group "server-${name}" -run "${pattern}" ./pkg/server/...
+          }
+
           run_group cmd ./cmd/...
           run_group apoc ./apoc/...
           run_group plugins ./plugins/...
@@ -121,7 +141,18 @@ jobs:
           run_group bolt ./pkg/bolt/...
           run_group storage ./pkg/storage
           run_group nornicdb ./pkg/nornicdb/...
-          run_group server ./pkg/server/...
+
+          # pkg/server, split. Order is roughly cheapest-first.
+          run_server_group core-tx       '^(TestAuth|TestGDPR|TestExplicit|TestCommit|TestRollback|TestTransaction)'
+          run_server_group db            '^(TestDatabase(Adapter|Empty|Info|Unknown)|TestExecute|TestDbConfig|TestDB|TestDecay)'
+          run_server_group multidb       '^(TestMultiDatabase|TestDatabaseIsolation|TestDefaultDatabaseIsolation|TestComposite|TestCompositeRoot)'
+          run_server_group wiring        '^(TestBifrost|TestUI|TestInstrumented|TestCORS|TestSession|TestServe|TestStart|TestNew|TestAddr|TestRoute|TestBaseURL|TestBackup|TestCluster|TestGetCookie)'
+          run_server_group graph-search  '^(TestGraph|TestSearch|TestCollectLatest|TestCollectSnapshot|TestDiffGraph|TestEdges|TestRetention|TestGPU|TestBuildEmbed|TestBasePathAndRBAC)'
+          run_server_group integrations  '^(TestQdrant|TestServerQdrantGRPC|TestMCP|TestSecurity|TestRBAC|TestBasicAuth|TestEmbed|TestNornic)'
+          # Catch-all: everything in pkg/server not picked up by a named
+          # bucket above. -skip is supported on Go 1.20+.
+          run_group server-rest -skip "${SERVER_BUCKETS_HANDLED}" ./pkg/server/...
+
           run_group replication ./pkg/replication/...
 
   coverage:
@@ -187,6 +218,16 @@ jobs:
             echo "::endgroup::"
           }
 
+          # Mirror the test job's pkg/server split. The catch-all covers
+          # any new test prefix not handled by a named bucket so coverage
+          # stays complete without manual maintenance per new test file.
+          SERVER_BUCKETS_HANDLED='^(TestAuth|TestGDPR|TestExplicit|TestCommit|TestRollback|TestTransaction|TestDatabase|TestExecute|TestDbConfig|TestDB|TestDecay|TestMultiDatabase|TestDatabaseIsolation|TestDefaultDatabaseIsolation|TestComposite|TestCompositeRoot|TestBifrost|TestUI|TestInstrumented|TestCORS|TestSession|TestServe|TestStart|TestNew|TestAddr|TestRoute|TestBaseURL|TestBackup|TestCluster|TestGetCookie|TestGraph|TestSearch|TestCollectLatest|TestCollectSnapshot|TestDiffGraph|TestEdges|TestRetention|TestGPU|TestBuildEmbed|TestBasePathAndRBAC|TestQdrant|TestServerQdrantGRPC|TestMCP|TestSecurity|TestRBAC|TestBasicAuth|TestEmbed|TestNornic)'
+
+          run_cov_server_group() {
+            local name="$1"; local pattern="$2"
+            run_cov_group "server-${name}" -run "${pattern}" ./pkg/server/...
+          }
+
           run_cov_group util-small \
             ./pkg/audit/... ./pkg/auth/... ./pkg/buildinfo/... \
             ./pkg/cache/... ./pkg/compliance/... ./pkg/config/... \
@@ -208,7 +249,15 @@ jobs:
           run_cov_group bolt ./pkg/bolt/...
           run_cov_group storage ./pkg/storage
           run_cov_group nornicdb ./pkg/nornicdb/...
-          run_cov_group server ./pkg/server/...
+
+          run_cov_server_group core-tx       '^(TestAuth|TestGDPR|TestExplicit|TestCommit|TestRollback|TestTransaction)'
+          run_cov_server_group db            '^(TestDatabase(Adapter|Empty|Info|Unknown)|TestExecute|TestDbConfig|TestDB|TestDecay)'
+          run_cov_server_group multidb       '^(TestMultiDatabase|TestDatabaseIsolation|TestDefaultDatabaseIsolation|TestComposite|TestCompositeRoot)'
+          run_cov_server_group wiring        '^(TestBifrost|TestUI|TestInstrumented|TestCORS|TestSession|TestServe|TestStart|TestNew|TestAddr|TestRoute|TestBaseURL|TestBackup|TestCluster|TestGetCookie)'
+          run_cov_server_group graph-search  '^(TestGraph|TestSearch|TestCollectLatest|TestCollectSnapshot|TestDiffGraph|TestEdges|TestRetention|TestGPU|TestBuildEmbed|TestBasePathAndRBAC)'
+          run_cov_server_group integrations  '^(TestQdrant|TestServerQdrantGRPC|TestMCP|TestSecurity|TestRBAC|TestBasicAuth|TestEmbed|TestNornic)'
+          run_cov_group server-rest -skip "${SERVER_BUCKETS_HANDLED}" ./pkg/server/...
+
           run_cov_group replication ./pkg/replication/...
 
           bash scripts/generate-coverage.sh --filter coverage.raw.out coverage.out

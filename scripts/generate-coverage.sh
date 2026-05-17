@@ -7,12 +7,15 @@
 #       Default mode (no extra args): discover every coverable package
 #       under ./pkg/..., run them, and produce filtered coverage.
 #
-#   generate-coverage.sh --append raw_out group_name pkg1 pkg2 ...
+#   generate-coverage.sh --append raw_out group_name [-run REGEX] [-skip REGEX] pkg1 pkg2 ...
 #       CI-driven mode: append coverage for the listed packages into
 #       raw_out under the named group. Lets the workflow split the
 #       coverage run into chunks (matching the test-step grouping)
 #       so a failing or hung group surfaces with a name attached
-#       instead of silently killing the whole job.
+#       instead of silently killing the whole job. Optional -run /
+#       -skip flags are forwarded verbatim to `go test` so a single
+#       large package (e.g. pkg/server) can be partitioned into
+#       multiple focused buckets.
 #
 #   generate-coverage.sh --filter raw_out out
 #       Final filtering step after one or more --append calls. Emits
@@ -30,10 +33,14 @@ EXCLUDE_RE='github.com/orneryd/nornicdb/pkg/cypher/(fn|testutil)$|github.com/orn
 run_pkg_with_retry() {
 	local pkg="$1"
 	local prof="$2"
+	shift 2
+	# Remaining args are extra `go test` flags (e.g. -run / -skip) that
+	# the CI workflow uses to subset a large package into named buckets.
+	local extra_flags=("$@")
 	local attempts=3
 
 	for attempt in $(seq 1 "$attempts"); do
-		if go test -p 1 -parallel 4 -timeout 30m -coverprofile="$prof" "$pkg"; then
+		if go test -p 1 -parallel 4 -timeout 30m -coverprofile="$prof" "${extra_flags[@]}" "$pkg"; then
 			return 0
 		fi
 		if [ "$attempt" -lt "$attempts" ]; then
@@ -63,6 +70,29 @@ append_group() {
 	local raw_out="$1"
 	local group="$2"
 	shift 2
+
+	# Optionally consume leading `-run <regex>` / `-skip <regex>` pairs
+	# so the CI workflow can split a single large package into focused
+	# subsets without needing to teach this script about each subset.
+	# Anything after the optional flag pairs is treated as a package
+	# pattern (./pkg/foo, ./pkg/foo/...).
+	local extra_flags=()
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			-run|-skip)
+				if [ "$#" -lt 2 ]; then
+					echo "coverage group '$group': flag $1 requires an argument" >&2
+					return 2
+				fi
+				extra_flags+=("$1" "$2")
+				shift 2
+				;;
+			*)
+				break
+				;;
+		esac
+	done
+
 	local patterns=("$@")
 
 	# Resolve patterns to a concrete package list before logging so
@@ -93,7 +123,7 @@ append_group() {
 		[ -n "$pkg" ] || continue
 		i=$((i + 1))
 		local prof="$tmp_dir/$i.cover"
-		run_pkg_with_retry "$pkg" "$prof"
+		run_pkg_with_retry "$pkg" "$prof" "${extra_flags[@]}"
 		# Skip the per-package mode line; append statement blocks.
 		tail -n +2 "$prof" >> "$raw_out"
 	done <<< "$pkgs"
@@ -112,7 +142,7 @@ case "${1:-}" in
 	--append)
 		shift
 		if [ "$#" -lt 3 ]; then
-			echo "usage: $0 --append raw_out group_name pkg1 [pkg2 ...]" >&2
+			echo "usage: $0 --append raw_out group_name [-run REGEX] [-skip REGEX] pkg1 [pkg2 ...]" >&2
 			exit 2
 		fi
 		append_group "$@"
