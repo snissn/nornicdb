@@ -178,6 +178,8 @@ func (e *StorageExecutor) handleCommit() (*ExecuteResult, error) {
 		}
 		e.txContext.active = false
 		e.txContext = nil
+		// Wire contract: substring "commit failed" is matched by downstream Bolt classifiers.
+		// See docs/plans/consumer-pinned-error-contract-plan.md §2.1.
 		return nil, fmt.Errorf("commit failed: %w", err)
 	}
 

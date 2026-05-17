@@ -335,7 +335,7 @@ func isTraversalWriteConflictE2E(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "changed after transaction start") ||
-		strings.Contains(message, "failed to commit implicit transaction: conflict:")
+		strings.Contains(message, "commit failed: conflict:")
 }
 
 func runBoltSingleRow(ctx context.Context, driver neo4j.DriverWithContext, query string, params map[string]any) ([]any, error) {

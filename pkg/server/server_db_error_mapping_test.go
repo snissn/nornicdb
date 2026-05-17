@@ -21,7 +21,7 @@ func TestMapTransientTransactionError(t *testing.T) {
 	}{
 		{
 			name: "conflict changed after start",
-			err:  fmt.Errorf("failed to commit implicit transaction: %w: node x changed after transaction start", nornicerrors.ErrTransactionConflict),
+			err:  fmt.Errorf("commit failed: %w: node x changed after transaction start", nornicerrors.ErrTransactionConflict),
 			want: "Neo.TransientError.Transaction.Outdated",
 			ok:   true,
 		},

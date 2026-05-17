@@ -1401,6 +1401,8 @@ func (tx *BadgerTransaction) Commit() error {
 	// Final constraint validation before commit
 	if err := tx.validateAllConstraints(); err != nil {
 		tx.closeLocked(TxStatusRolledBack, true, nil)
+		// Wire contract: prefix "constraint violation:" is matched by downstream Bolt classifiers.
+		// See docs/plans/consumer-pinned-error-contract-plan.md §2.1.
 		return fmt.Errorf("constraint violation: %w", err)
 	}
 
@@ -1826,6 +1828,9 @@ func (tx *BadgerTransaction) checkNodeCreateConflict(nodeID NodeID) error {
 		return err
 	}
 	if tx.snapshotIsolationConflict(head.Version) {
+		// Wire contract: substrings "conflict:" and "changed after transaction start" are
+		// matched by downstream Bolt classifiers as transient.
+		// See docs/plans/consumer-pinned-error-contract-plan.md §2.2.
 		return fmt.Errorf("%w: node %s changed after transaction start", ErrConflict, nodeID)
 	}
 	return nil

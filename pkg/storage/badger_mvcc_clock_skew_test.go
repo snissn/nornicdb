@@ -19,8 +19,7 @@ import (
 //
 // This regresses the
 //
-//	failed to commit implicit transaction: conflict: node X changed
-//	after transaction start
+//	commit failed: conflict: node X changed after transaction start
 //
 // failure observed on Linux CI runners under
 // TestExecuteCypher_SetInvalidatesManagedEmbeddings.

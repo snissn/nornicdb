@@ -610,7 +610,9 @@ func TestExecuteWithImplicitTransaction_Branches(t *testing.T) {
 			"CREATE (:COMMITFAIL {ID:'DUP'}), (:COMMITFAIL {ID:'DUP'})",
 		)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "failed to commit implicit transaction")
+		// Wire contract: see consumer-pinned-error-contract-plan.md §2.1.
+		// Aligns with pkg/cypher/transaction.go:181 wrapper.
+		require.Contains(t, err.Error(), "commit failed")
 	})
 }
 

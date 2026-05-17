@@ -68,6 +68,11 @@ func RefreshUniqueConstraintValuesForEngine(engine Engine, schema *SchemaManager
 		if node == nil {
 			continue
 		}
+		// Pinned by docs/plans/consumer-pinned-error-contract-plan.md §2.3 and
+		// TestRefreshUniqueConstraint_KeepsPrefixedIDs_UnderNamespacedEngine. Removing
+		// EnsureNodeIDDatabasePrefixForEngine re-introduces a known false-UNIQUE failure
+		// mode for namespaced engines (the cache holds unprefixed IDs while transaction
+		// commit validation passes prefixed IDs).
 		storageNodeID := EnsureNodeIDDatabasePrefixForEngine(engine, node.ID)
 		for _, label := range node.Labels {
 			for propName, propValue := range node.Properties {

@@ -1,0 +1,212 @@
+---
+name: nornicdb-grpc
+description: Drive NornicDB over gRPC — the Qdrant-compatible surface (Collections, Points, Snapshots) plus the additive NornicSearch service. Use when ingesting via Qdrant SDKs, migrating from Qdrant, or running hybrid text+vector search from a non-Bolt client. Covers connection, RPC catalog, collection→database mapping, point→node mapping, limits, auth, and minimum-viable client examples.
+---
+
+# NornicDB gRPC (Qdrant + NornicSearch)
+
+NornicDB exposes two gRPC services on the same listener:
+
+1. **Qdrant compatibility** — full set of `qdrant.Collections`, `qdrant.Points`, and `qdrant.Snapshots` services. Existing Qdrant SDKs work without modification.
+2. **`NornicSearch`** — one additive RPC, `SearchText`, that returns hybrid (vector + BM25 + RRF) results.
+
+The same client connection talks to both; pick whichever matches the operation.
+
+## Connection
+
+| Setting | Value |
+|---|---|
+| Listen address | `:6334` (`NORNICDB_QDRANT_GRPC_LISTEN_ADDR`) |
+| Default port (host) | `6334` |
+| Auth | Same `Auth.Enabled` flag as Bolt. When off, gRPC is open. When on, basic auth or bearer JWT in the gRPC metadata. |
+| TLS | None by default (run behind a TLS proxy or in a private network). |
+
+Enable the gRPC server (off by default):
+
+```bash
+export NORNICDB_QDRANT_GRPC_ENABLED=true
+```
+
+YAML:
+
+```yaml
+features:
+  qdrant_grpc_enabled: true
+  qdrant_grpc_listen_addr: ":6334"
+  qdrant_grpc_max_vector_dim: 4096
+  qdrant_grpc_max_batch_points: 1000
+  qdrant_grpc_max_top_k: 1000
+```
+
+## Limits (defaults)
+
+| Limit | Default | Override |
+|---|---|---|
+| Max vector dimension | 4096 | `NORNICDB_QDRANT_GRPC_MAX_VECTOR_DIM` |
+| Max points per Upsert batch | 1000 | `NORNICDB_QDRANT_GRPC_MAX_BATCH_POINTS` |
+| Max top-K per Search | 1000 | `NORNICDB_QDRANT_GRPC_MAX_TOP_K` |
+| Max payload bytes per point | 1 MB | (not configurable) |
+| Max filter clauses per request | 100 | (not configurable) |
+| Request timeout | 30 s | (not configurable) |
+| Max gRPC message size (recv/send) | 64 MB | (not configurable) |
+
+## Data model mapping
+
+| Qdrant concept | NornicDB equivalent | Storage detail |
+|---|---|---|
+| Collection | Database (namespace) | `DatabaseManager.GetStorage(collectionName)`; all point keys live under `collectionName:` |
+| Point | Node | Node ID is `qdrant:point:<rawID>`. Labels include `QdrantPoint`, `Point`. |
+| Point payload | `node.Properties` | Internal `_qdrant_*` keys are stripped from outbound responses. |
+| Single vector | `node.NamedEmbeddings["default"]` | |
+| Named vectors | `node.NamedEmbeddings[<vectorName>]` | Each named vector is independently searchable. |
+
+A NornicDB-managed collection is identifiable by the presence of a `_collection_meta` metadata node inside the database.
+
+## Qdrant RPCs implemented
+
+### `qdrant.Collections`
+- `Create` — single-vector and named-vector configs supported
+- `Get` — minimal-but-valid `CollectionInfo`
+- `List` — list all collections
+- `Delete` — drops collection metadata and all its points
+- `Update` — no-op (validates existence; NornicDB manages params)
+- `CollectionExists` — fast existence check
+
+### `qdrant.Points`
+- `Upsert` — dense and named vectors
+- `Get` — with payload/vector selectors
+- `Delete` — by ID list or by filter
+- `Count`
+- `Search` — supports `score_threshold` and `vector_name`
+- `SearchBatch`
+- `Query` — supports `VectorInput` (dense, ID) and `Document` (server-side embedding) when `NORNICDB_EMBEDDING_ENABLED=true`
+- `QueryBatch`
+- `Scroll`
+- `SetPayload`, `OverwritePayload`, `DeletePayload`, `ClearPayload`
+- `UpdateVectors`, `DeleteVectors`
+- `Recommend`, `RecommendBatch`
+- `SearchGroups`
+- `CreateFieldIndex`, `DeleteFieldIndex`
+
+### `qdrant.Snapshots`
+- `Create`, `List`, `Delete` (per collection)
+- `CreateFull`, `ListFull`, `DeleteFull` (database-wide)
+
+For the full Qdrant proto compatibility matrix and divergence notes, see `pkg/qdrantgrpc/COMPAT.md`.
+
+## NornicSearch RPC (additive)
+
+```protobuf
+service NornicSearch {
+  rpc SearchText(SearchTextRequest) returns (SearchTextResponse);
+}
+
+message SearchTextRequest {
+  string database = 1;        // optional; empty uses default
+  string query = 2;
+  uint32 limit = 3;
+  repeated string labels = 4; // optional label/edge-type filter
+  optional float min_similarity = 5;
+}
+
+message SearchTextResponse {
+  string search_method = 1;        // "rrf_hybrid" | "vector_only" | "bm25_only"
+  repeated SearchHit hits = 2;     // node_id, labels, properties, score, rrf_score, vector_rank, bm25_rank
+  bool fallback_triggered = 3;
+  string message = 4;
+  double time_seconds = 5;
+}
+```
+
+`SearchText` runs the same hybrid pipeline as the `db.retrieve` Cypher procedure: vector + BM25, fused with RRF, with adaptive weights based on query length. If embeddings are disabled, falls back to BM25-only and sets `fallback_triggered=true`.
+
+## Minimum-viable clients
+
+### Python (`qdrant-client`, prefer gRPC)
+
+```python
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as m
+
+client = QdrantClient(host="127.0.0.1", grpc_port=6334, prefer_grpc=True)
+
+client.create_collection(
+    collection_name="docs",
+    vectors_config=m.VectorParams(size=1024, distance=m.Distance.COSINE),
+)
+
+client.upsert(
+    collection_name="docs",
+    points=[
+        m.PointStruct(id="d1", vector=[0.1] * 1024, payload={"title": "hello"}),
+    ],
+)
+
+hits = client.search(
+    collection_name="docs",
+    query_vector=[0.1] * 1024,
+    limit=10,
+    with_payload=True,
+)
+```
+
+### Go (`github.com/qdrant/go-client v1.18.1`)
+
+```go
+import (
+    "context"
+    "github.com/qdrant/go-client/qdrant"
+)
+
+client, _ := qdrant.NewClient(&qdrant.Config{
+    Host:   "localhost",
+    Port:   6334,
+    UseTLS: false,
+})
+
+collections, _ := client.ListCollections(ctx)
+
+scroll, _ := client.Scroll(ctx, &qdrant.ScrollPoints{
+    CollectionName: "docs",
+    Limit:          qdrant.PtrOf(uint32(100)),
+    WithPayload:    qdrant.NewWithPayload(true),
+    WithVectors:    qdrant.NewWithVectors(true),
+})
+for _, p := range scroll {
+    _ = p
+}
+```
+
+### Node (`@qdrant/js-client-rest` — note: REST, not gRPC)
+
+The Node ecosystem does not have a maintained gRPC Qdrant client; the official `@qdrant/js-client-rest` talks to the REST surface. NornicDB exposes Qdrant compatibility on gRPC only — for Node/TypeScript clients, drive NornicDB through Bolt (`neo4j-driver`) instead, or use the Cypher `db.index.vector.queryNodes` / `db.retrieve` procedures.
+
+If you do have an existing Node app on `@qdrant/js-client-rest`, you'll need to either run a separate gRPC client (e.g. via `@grpc/grpc-js` against the Qdrant `.proto`) or migrate that path to Bolt.
+
+## Auth
+
+`Auth.Enabled` (the same flag that controls Bolt) gates gRPC too. When enabled:
+
+- **Basic auth** — pass `authorization: Basic <base64(user:pass)>` in the gRPC metadata.
+- **Bearer JWT** — pass `authorization: Bearer <token>`.
+- **Per-collection RBAC** — optional, configured via the `qdrant_grpc_rbac` YAML block, mapping `<Service>/<Method>` to a permission tier (`read`, `write`, `create`, `delete`, `admin`).
+
+When `Auth.Enabled=false`, the gRPC endpoint is open — local-development default.
+
+## When to pick gRPC vs Bolt
+
+| Use case | Pick |
+|---|---|
+| Existing Qdrant SDK code, vector-only workload | gRPC (Qdrant compat) |
+| Existing Neo4j SDK code, graph + vector | Bolt + Cypher |
+| Non-Bolt language (e.g. Rust, C++) needing hybrid search | gRPC + `NornicSearch.SearchText` |
+| Migrating from Qdrant | gRPC; see [`qdrant-migration.skill.md`](qdrant-migration.skill.md) |
+| Migrating from Neo4j | Bolt; see [`neo4j-migration.skill.md`](neo4j-migration.skill.md) |
+| Mixed ingestion (graph + vector) | Bolt; gRPC's collection-as-database model is per-collection isolated |
+
+## See also
+- [`qdrant-migration.skill.md`](qdrant-migration.skill.md) — end-to-end Qdrant → NornicDB migration.
+- [`neo4j-migration.skill.md`](neo4j-migration.skill.md) — Neo4j → NornicDB via Bolt.
+- [`bolt-client.skill.md`](bolt-client.skill.md) — the Bolt surface and retry classifier.
+- `docs/user-guides/qdrant-grpc.md` — long-form documentation including the full proto compatibility matrix.
+- `docs/user-guides/nornic-search-grpc.md` — additive `NornicSearch` proto setup.

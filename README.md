@@ -208,6 +208,8 @@ with driver.session() as session:
 - **Drop-in compatibility** via Bolt + Cypher for existing applications.
 - **Canonical graph ledger model** for temporal validity, tritemporal fact modeling, as-of reads, and audit-oriented mutation tracking.
 
+> 🚚 **Migrating?** [Neo4j → NornicDB skill](docs/skills/neo4j-migration.skill.md) · runnable Python/Go/Node scripts in [`scripts/migration/neo4j/`](scripts/migration/neo4j/).
+
 ## Why Switch from Qdrant?
 
 - **Graph + vector in one engine**: combine semantic retrieval with native graph traversal and Cypher queries.
@@ -215,6 +217,8 @@ with driver.session() as session:
 - **Hybrid retrieval built in**: vector + BM25 fusion and optional reranking in the same query pipeline.
 - **Canonical truth modeling**: versioned facts, temporal validity windows, tritemporal facts, and as-of reads for governance-heavy use cases.
 - **Protocol flexibility**: use REST, GraphQL, Bolt/Cypher, Qdrant-compatible gRPC, and additive Nornic gRPC on one platform.
+
+> 🚚 **Migrating?** [Qdrant → NornicDB skill](docs/skills/qdrant-migration.skill.md) · [gRPC surface skill](docs/skills/grpc.skill.md) · runnable Python/Go/Node scripts in [`scripts/migration/qdrant/`](scripts/migration/qdrant/).
 
 ## Features
 
@@ -232,6 +236,8 @@ Designed to work with existing Neo4j drivers and Bolt/Cypher workflows, with min
 - **Cypher Queries** — Full query language support
 - **Schema Management** — Constraints, indexes, vector indexes
 - **Qdrant gRPC API Compatible** — Works with Qdrant-style gRPC vector workflows
+
+> 🤖 **Agent skill:** [Bolt Client](docs/skills/bolt-client.skill.md) — connection defaults, retry classification, MERGE under concurrent writers, batch sizing.
 
 ### 🧠 Knowledge-Layer Scoring
 
@@ -486,6 +492,7 @@ Start with the docs hub for role/task navigation, then use the issue index for s
 | [User Guides](docs/user-guides/README.md)                                     | Complete examples & patterns                    |
 | [Performance](docs/performance/README.md)                                     | Benchmarks vs Neo4j                             |
 | [Neo4j Migration](docs/neo4j-migration/README.md)                             | Compatibility & feature parity                  |
+| [Migration Scripts](scripts/migration/README.md)                              | Runnable Neo4j and Qdrant → NornicDB migrations (Python, Go, Node) |
 | [Architecture](docs/architecture/README.md)                                   | System design & internals                       |
 | [Docker Guide](docker/README.md)                                              | Build & deployment                              |
 | [Development](docs/development/README.md)                                     | Contributing & development                      |

@@ -1975,7 +1975,13 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 		if info := e.analyzer.Analyze(cypher); IsRetrySafeMergeCommitQuery(info) {
 			err = nornicerrors.MarkMergeCommitTimeUniqueConflict(err)
 		}
-		return nil, fmt.Errorf("failed to commit implicit transaction: %w", err)
+		// Wire contract: substring "commit failed" is matched by downstream Bolt classifiers.
+		// See docs/plans/consumer-pinned-error-contract-plan.md §2.1.
+		// The implicit-autocommit path was historically wrapped with "failed to commit
+		// implicit transaction: ..." which broke the consumer-pinned classifier; aligned
+		// with pkg/cypher/transaction.go:181 so the explicit and implicit paths produce the
+		// same wire shape.
+		return nil, fmt.Errorf("commit failed: %w", err)
 	}
 
 	// Attach receipt metadata if WAL markers were recorded.

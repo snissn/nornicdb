@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Latest Changes]
 
-- See `docs/latest-untagged.md` for the untagged `latest` image changelog.
+- See `docs/latest-untagged.md` for the full untagged changelog with rationale and file cites.
+
+### Fixed
+
+- **Bolt commit-failure wrapper unified across both commit paths.** The implicit-autocommit path now produces `"commit failed: ..."` (matching the explicit `BEGIN/COMMIT` path) instead of the legacy `"failed to commit implicit transaction: ..."`. Downstream Bolt classifiers that match on the substring no longer need to handle two shapes for the same race.
+
+### Internal
+
+- **Consumer-pinned error contract pinned with regression tests.** Five new tests cover the optimistic-conflict message shapes, commit-time UNIQUE wrapping, MERGE idempotency under concurrent writers, namespaced-engine constraint refresh, and parsed-default values. See `docs/plans/consumer-pinned-error-contract-plan.md`.
+
+### Documentation
+
+- **`docs/skills/` — agent-ready skill files** for every consumer-facing surface: hot-path Cypher cookbook, Bolt client, gRPC (Qdrant + NornicSearch), Qdrant migration, Neo4j migration, knowledge policies, decay tuning, promotion policies, managed embeddings, vector & full-text search, RAG procedures.
+- **Knowledge-policy user guides rewritten** with disambiguated bundle-vs-binding language: bundles are inert parameter packages; bindings carry the `FOR` target; decay is pure time math evaluated on read; `ON ACCESS` belongs to promotion only; `LAST_ACCESSED` decay only reads access metadata.
+- **Documentation site consolidated to 8 top-level groups** (was 14). Every published `.md` is now in `nav:`, fixing the bug where clicking a search result loaded the content but left the sidebar empty. Canonical URLs emit on every page; URL ↔ sidebar ↔ content stay synchronized when navigating from a search result.
+
+### Tools & Scripts
+
+- **`scripts/migration/neo4j/`** — runnable Neo4j → NornicDB migrations in Python, Go, and Node. Schema-first (constraints + indexes including fulltext and vector), then nodes via `UnwindSimpleMergeBatch`, then edges via `UnwindMultiMatchCreateBatch`. Keyset-paginated, idempotent.
+- **`scripts/migration/qdrant/`** — runnable Qdrant → NornicDB migrations in Python, Go, and Node, using the Qdrant-compatible gRPC surface end-to-end (REST in the Node script). Replicates collection vector configs, scrolls and upserts points in batches, verifies counts.
 
 ## [v1.1.0] - 2026-05-14
 

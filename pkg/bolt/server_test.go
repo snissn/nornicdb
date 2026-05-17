@@ -2214,9 +2214,9 @@ func TestMapBoltQueryError(t *testing.T) {
 		},
 		{
 			name:     "commit conflict maps to transient transaction error",
-			err:      fmt.Errorf("failed to commit implicit transaction: %w: edge nornic:abc changed after transaction start", storage.ErrConflict),
+			err:      fmt.Errorf("commit failed: %w: edge nornic:abc changed after transaction start", storage.ErrConflict),
 			wantCode: "Neo.TransientError.Transaction.Outdated",
-			wantMsg:  "failed to commit implicit transaction: conflict: edge nornic:abc changed after transaction start",
+			wantMsg:  "commit failed: conflict: edge nornic:abc changed after transaction start",
 		},
 		{
 			name:     "deadlock maps to transient transaction error",
@@ -2240,13 +2240,13 @@ func TestMapBoltQueryError(t *testing.T) {
 }
 
 func TestMapBoltQueryErrorForQueryCommitTimeUniqueConflictRequiresMerge(t *testing.T) {
-	err := nornicerrors.MarkMergeCommitTimeUniqueConflict(fmt.Errorf("failed to commit implicit transaction: constraint violation: %w", &storage.ConstraintViolationError{
+	err := nornicerrors.MarkMergeCommitTimeUniqueConflict(fmt.Errorf("commit failed: constraint violation: %w", &storage.ConstraintViolationError{
 		Type:       storage.ConstraintUnique,
 		Label:      "TerraformResource",
 		Properties: []string{"uid"},
 		Message:    "Node with uid=X already exists (nodeID: nornic:abc)",
 	}))
-	nonMergeErr := fmt.Errorf("failed to commit implicit transaction: constraint violation: %w", &storage.ConstraintViolationError{
+	nonMergeErr := fmt.Errorf("commit failed: constraint violation: %w", &storage.ConstraintViolationError{
 		Type:       storage.ConstraintUnique,
 		Label:      "TerraformResource",
 		Properties: []string{"uid"},

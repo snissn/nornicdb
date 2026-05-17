@@ -276,7 +276,9 @@ func (b *BadgerEngine) scanForUniqueViolationInTxn(txn *badger.Txn, namespace, l
 					Type:       ConstraintUnique,
 					Label:      label,
 					Properties: []string{property},
-					Message:    fmt.Sprintf("Node with %s=%v already exists (nodeID: %s)", property, value, existingNode.ID),
+					// Wire contract: "Node with ... already exists" is matched by downstream
+					// Bolt classifiers. See docs/plans/consumer-pinned-error-contract-plan.md §2.1.
+					Message: fmt.Sprintf("Node with %s=%v already exists (nodeID: %s)", property, value, existingNode.ID),
 				}
 			}
 		}
@@ -340,7 +342,9 @@ func (b *BadgerEngine) scanForNodeKeyViolationInTxn(txn *badger.Txn, namespace, 
 				Type:       ConstraintNodeKey,
 				Label:      label,
 				Properties: properties,
-				Message:    fmt.Sprintf("Node with key %v=%v already exists (nodeID: %s)", properties, values, existingNode.ID),
+				// Wire contract: "Node with ... already exists" is matched downstream.
+				// See docs/plans/consumer-pinned-error-contract-plan.md §2.1.
+				Message: fmt.Sprintf("Node with key %v=%v already exists (nodeID: %s)", properties, values, existingNode.ID),
 			}
 		}
 	}
@@ -656,7 +660,9 @@ func (b *BadgerEngine) checkEdgeUniquenessInTxn(txn *badger.Txn, edge *Edge, c C
 					Type:       c.Type,
 					Label:      edge.Type,
 					Properties: []string{prop},
-					Message:    fmt.Sprintf("Relationship with %s=%v already exists (edgeID: %s)", prop, newVal, existingEdge.ID),
+					// Wire contract: "Relationship with ... already exists" is matched downstream.
+					// See docs/plans/consumer-pinned-error-contract-plan.md §2.1.
+					Message: fmt.Sprintf("Relationship with %s=%v already exists (edgeID: %s)", prop, newVal, existingEdge.ID),
 				}
 			}
 		} else {
@@ -683,7 +689,9 @@ func (b *BadgerEngine) checkEdgeUniquenessInTxn(txn *badger.Txn, edge *Edge, c C
 					Type:       c.Type,
 					Label:      edge.Type,
 					Properties: c.Properties,
-					Message:    fmt.Sprintf("Relationship with duplicate composite key already exists (edgeID: %s)", existingEdge.ID),
+					// Wire contract: "Relationship with ... already exists" is matched downstream.
+					// See docs/plans/consumer-pinned-error-contract-plan.md §2.1.
+					Message: fmt.Sprintf("Relationship with duplicate composite key already exists (edgeID: %s)", existingEdge.ID),
 				}
 			}
 		}
