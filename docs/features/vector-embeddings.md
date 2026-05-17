@@ -33,8 +33,11 @@ ollama serve
 ollama pull mxbai-embed-large
 
 # Configure NornicDB
-export NORNICDB_EMBEDDING_URL=http://localhost:11434
+export NORNICDB_EMBEDDING_ENABLED=true
+export NORNICDB_EMBEDDING_PROVIDER=ollama
+export NORNICDB_EMBEDDING_API_URL=http://localhost:11434
 export NORNICDB_EMBEDDING_MODEL=mxbai-embed-large
+export NORNICDB_EMBEDDING_DIMENSIONS=1024
 ```
 
 ### OpenAI
@@ -49,9 +52,12 @@ export NORNICDB_EMBEDDING_MODEL=text-embedding-3-small
 
 ```bash
 export NORNICDB_EMBEDDING_PROVIDER=local
-export NORNICDB_EMBEDDING_MODEL_PATH=/models/mxbai-embed-large.gguf
-export NORNICDB_EMBEDDING_GPU_LAYERS=-1  # Auto-detect
+export NORNICDB_EMBEDDING_MODEL=mxbai-embed-large    # filename stem under NORNICDB_MODELS_DIR
+export NORNICDB_MODELS_DIR=/models                   # directory containing the .gguf files
+export NORNICDB_EMBEDDING_GPU_LAYERS=-1              # auto-detect
 ```
+
+The local provider resolves the model file as `${NORNICDB_MODELS_DIR}/${NORNICDB_EMBEDDING_MODEL}.gguf`.
 
 ### Which properties are embedded
 

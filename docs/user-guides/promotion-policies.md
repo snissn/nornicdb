@@ -1,13 +1,24 @@
 # Promotion Policies
 
-Promotion policies boost an entity's decay score when specific conditions are met. They contain logic: `FOR` targets, `APPLY` blocks with `ON ACCESS` mutations, and `WHEN` predicates that select promotion profiles.
+Promotion is the optional layer on top of decay. Decay handles time-based fade entirely on its own and **does not need promotion to function**. Promotion does two distinct things:
+
+1. **Tracks access** via `ON ACCESS { ... }` — `SET` mutations write to per-entity access metadata (counters, last-access timestamps, smoothed signals). This is the only mechanism that updates access metadata.
+2. **Changes scores conditionally** via `WHEN <predicate> APPLY PROFILE '<name>'` — when a predicate matches at score time, the named promotion profile's `multiplier`/`scoreFloor`/`scoreCap` apply to the decayed score.
+
+The two responsibilities are independent:
+
+- A policy with `ON ACCESS` and no `WHEN` clauses **only tracks**. It updates access metadata so a `LAST_ACCESSED`-anchored decay binding can use it. Scores are not promoted.
+- A policy with `WHEN` and no `ON ACCESS` **only promotes**. It evaluates predicates against existing properties or pre-existing metadata at score time.
+- A policy with both does both.
 
 ## Architecture
 
-Promotion has two components:
+Promotion has two object kinds. One is an inert parameter package; the other carries a `FOR (...)` target that selects entities.
 
-1. **Promotion Profiles** — named parameter bundles declaring multiplier, score floor, score cap (no logic, no targets)
-2. **Promotion Policies** — targeted bindings with `FOR`, `APPLY`, `ON ACCESS`, and `WHEN` clauses
+| Kind | DDL form | Has target? | What it does on its own |
+|---|---|---|---|
+| **Promotion profile** | `CREATE PROMOTION PROFILE <name> OPTIONS { ... }` | No | Nothing — names a `multiplier`/`scoreFloor`/`scoreCap` set |
+| **Promotion policy** | `CREATE PROMOTION POLICY <name> FOR (...) APPLY { ON ACCESS { ... } WHEN ... APPLY PROFILE '...' }` | Yes (`FOR`) | Tracks access, applies promotion profiles when `WHEN` predicates match, or both |
 
 ## Creating a Promotion Profile
 
@@ -117,12 +128,22 @@ APPLY {
 
 ## ON ACCESS Semantics
 
-`ON ACCESS` mutations execute when the target entity is accessed and passes the suppression gate. Key rules:
+`ON ACCESS` mutations execute when the target entity is read or traversed and passes the suppression gate.
 
-- Mutations apply exclusively to the **accessMeta index**, never to the target node/edge itself
-- Property reads (e.g., `n.accessCount`) resolve from accessMeta first, then fall back to stored properties
-- Suppressed entities (score below visibility threshold) do not accumulate access state
-- `WHEN` predicates read persisted + buffered accessMeta state from prior accesses
+What ON ACCESS *does*:
+
+- **Trigger:** every read or traversal of an entity matching the policy's `FOR` clause fires the block. A query that doesn't touch the entity does not.
+- **Target of writes:** the per-entity **access metadata** store, keyed by entity ID. This store is separate from `n.Properties`; the node payload is never mutated by `ON ACCESS`.
+- **Read inside `SET`:** property reads (e.g., `n.accessCount`) resolve from access metadata first, then fall back to stored properties. You can also reference parameters (`$x`) and use Cypher expressions on the right-hand side.
+- **Timing:** mutations are buffered by an access flusher and committed in batches. A read taken immediately after an access may not yet observe the new counter.
+- **Predicate fairness:** suppressed entities (score below `visibilityThreshold`) do not accumulate access state, so policies cannot use ON ACCESS to "rescue" hidden items.
+- **`WHEN` evaluation:** runs at score time against the persisted + buffered access metadata.
+
+What ON ACCESS does **not** do:
+
+- It does not trigger or "tick" decay. Decay runs on every read regardless of whether any `ON ACCESS` has fired.
+- It does not mutate `n.Properties`. The stored payload is unchanged; use `policy(n)` or `nornicdb.knowledgepolicy.resolve(...)` to inspect access metadata.
+- It does not return values. The block has no `RETURN`; it only mutates.
 
 ## WITH KALMAN
 

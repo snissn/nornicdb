@@ -736,8 +736,12 @@ export NORNICDB_SEARCH_MIN_SIMILARITY=0.5
 export NORNICDB_PERSIST_SEARCH_INDEXES=true   # Save/load BM25 and vector indexes (requires data_dir)
 
 # Embeddings
-export NORNICDB_EMBEDDINGS_PROVIDER=local
-export NORNICDB_EMBEDDINGS_MODEL=bge-m3
+export NORNICDB_EMBEDDING_ENABLED=true
+export NORNICDB_EMBEDDING_PROVIDER=local           # local | ollama | openai
+export NORNICDB_EMBEDDING_MODEL=bge-m3
+export NORNICDB_EMBEDDING_DIMENSIONS=1024
+export NORNICDB_EMBEDDING_API_URL=http://localhost:11434
+export NORNICDB_MODELS_DIR=./models                # used by provider=local
 ```
 
 ## Qdrant gRPC Endpoint (Qdrant SDK Compatibility)

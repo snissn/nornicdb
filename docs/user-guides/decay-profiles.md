@@ -1,8 +1,17 @@
 # Decay Profiles
 
-Decay profiles define how a node or edge's visibility score decreases over time. Every decay profile must include `FOR` and `APPLY` clauses that bind it to a specific target.
+NornicDB's decay surface uses **two distinct objects**, both spelled `CREATE DECAY PROFILE`. The parser distinguishes them by what follows the name:
 
-## Creating a Targeted Decay Profile
+| Form | Object kind | Has target? | What it does on its own |
+|---|---|---|---|
+| `CREATE DECAY PROFILE <name> OPTIONS { ... }` | **Decay bundle** | No | Nothing — names a reusable parameter set |
+| `CREATE DECAY PROFILE <name> FOR (...) APPLY { ... }` | **Decay binding** | Yes (`FOR`) | Activates decay scoring for matched entities; references a bundle and/or sets parameters inline |
+
+A **bundle** is a parameter package. It never selects entities, never runs code, and never changes any score on its own. A **binding** has the `FOR (...)` clause that targets entities and the `APPLY { ... }` block that either references a bundle by name (`DECAY PROFILE 'bundle_name'`) or sets parameters via inline directives.
+
+Decay is **pure time math, evaluated on every read** — a binding alone is sufficient. It does not need a promotion policy or `ON ACCESS` to function. (`ON ACCESS` belongs to promotion policies, not decay bindings.)
+
+## Creating a Targeted Decay Binding
 
 ```cypher
 CREATE DECAY PROFILE <name>
@@ -48,7 +57,7 @@ n.propertyName NO DECAY
 
 ## Creating a Parameter Bundle
 
-Parameter bundles are reusable configuration objects with no `FOR` clause. They declare values only and are referenced by name inside targeted profiles:
+Parameter bundles are reusable configuration objects with **no target** — no `FOR` clause, no effect on any entity until a binding references them. A bundle is purely a named parameter package:
 
 ```cypher
 CREATE DECAY PROFILE working_memory OPTIONS {
@@ -57,6 +66,14 @@ CREATE DECAY PROFILE working_memory OPTIONS {
   visibilityThreshold: 0.10,
   scoreFloor: 0.01
 }
+```
+
+The bundle does nothing on its own. Decay scoring activates only when a binding references it:
+
+```cypher
+CREATE DECAY PROFILE memory_binding
+FOR (n:Memory)
+APPLY { DECAY PROFILE 'working_memory' }
 ```
 
 ### Bundle Parameters

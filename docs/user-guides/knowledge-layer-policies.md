@@ -1,14 +1,22 @@
 # Knowledge-Layer Policies
 
-NornicDB's knowledge-layer scoring system manages the lifecycle and visibility of graph entities through declarative profiles and policies. This guide covers the system architecture and how the pieces fit together.
+NornicDB's knowledge-layer scoring system manages the lifecycle and visibility of graph entities through declarative parameter packages and targeted bindings. This guide covers the system architecture and how the pieces fit together.
 
 ## Architecture
 
-The scoring system has three layers:
+There are **four distinct object kinds** in the catalog. Two are inert parameter packages (no target, no effect on their own); two carry a `FOR (...)` target that selects which entities they affect.
 
-1. **Decay Profiles** — targeted bindings (`FOR` + `APPLY`) defining how scores decrease over time
-2. **Parameter Bundles** — reusable configuration objects (no `FOR`) referenced by name inside profiles
-3. **Promotion Policies** — targeted bindings with `ON ACCESS` mutations and `WHEN` predicates that boost scores
+| Kind | DDL form | Has target? | What it does on its own |
+|---|---|---|---|
+| **Decay bundle** | `CREATE DECAY PROFILE <name> OPTIONS { ... }` | No | Nothing — names a parameter set |
+| **Decay binding** | `CREATE DECAY PROFILE <name> FOR (...) APPLY { ... }` | Yes | Activates decay scoring for matched entities, using a referenced bundle and/or inline overrides |
+| **Promotion profile** | `CREATE PROMOTION PROFILE <name> OPTIONS { ... }` | No | Nothing — names a multiplier/floor/cap set |
+| **Promotion policy** | `CREATE PROMOTION POLICY <name> FOR (...) APPLY { ON ACCESS { ... } WHEN ... APPLY PROFILE '...' }` | Yes | Tracks access (via `ON ACCESS`) and/or applies promotion profiles when `WHEN` predicates match |
+
+Two important consequences:
+
+- **`CREATE DECAY PROFILE` is overloaded.** With `OPTIONS { ... }` it creates a bundle; with `FOR (...) APPLY { ... }` it creates a binding. Same keyword, two distinct objects in the catalog.
+- **There is one targeting mechanism — the `FOR` clause.** It is used by decay bindings and promotion policies; it is not used by bundles or promotion profiles.
 
 ```
                     ┌─────────────┐
@@ -80,36 +88,74 @@ RETURN n ORDER BY decayScore(n) DESC
 
 ## How Scoring Works
 
+Decay is **pure time math, evaluated on every read**. Nothing has to "tick" or fire — when a query touches an entity, the scorer computes the score on the spot from timestamps already on the entity. A decay binding is sufficient on its own; it does not need a promotion policy to function.
+
 When an entity is queried, the scorer:
 
-1. **Resolves** the decay profile by matching the entity's labels (or edge type) against bindings
-2. **Calculates** the base decay score using the profile's function and half-life
-3. **Applies** any matching promotion policy multiplier
-4. **Determines** visibility: if the final score is below the threshold, the entity is suppressed
+1. **Resolves** the most specific decay binding whose `FOR` clause matches the entity's labels or edge type. If no binding matches, the score is `1.0` and suppression never applies.
+2. **Reads** the binding's compiled parameters (half-life, function, threshold, floor, scoreFrom) and the entity's anchor timestamp (selected by `scoreFrom`).
+3. **Computes** the base decay score: `baseDecay(t)` where `t = now - anchor`.
+4. **Looks for a promotion policy** targeting this entity. If one is configured and a `WHEN` predicate matches, the predicate's promotion profile contributes a `multiplier`, `scoreFloor`, and `scoreCap`. If no policy targets the entity (or no `WHEN` matches), `multiplier = 1.0` and the promotion floor/cap don't apply.
+5. **Suppresses** if the final score is below the binding's `visibilityThreshold`.
 
 ### Score Formula
 
 ```
-finalScore = max(scoreFloor, baseDecay(t) * promotionMultiplier)
-suppressed = finalScore < visibilityThreshold       // strict less-than
+t            = now - anchor                                 // anchor selected by binding's scoreFrom
+baseScore    = baseDecay(t)                                 // exponential / linear / step / none
+multiplier   = (matched WHEN's promotion profile).multiplier if matched else 1.0
+promoted     = baseScore * multiplier
+clampedPromo = min(promoCap, max(promoFloor, promoted))     // promotion profile's floor/cap (only if matched)
+finalScore   = max(decayBindingFloor, clampedPromo)         // decay binding's floor
+suppressed   = finalScore < visibilityThreshold             // strict less-than
 ```
 
-`scoreFloor` clamps the score value upward; `visibilityThreshold` is the boolean cutoff for suppression. They are independent — setting `scoreFloor` alone does not keep an entity visible unless the floor itself is at or above `visibilityThreshold`. See [`scoreFloor` vs `visibilityThreshold`](decay-profiles.md#scorefloor-vs-visibilitythreshold--they-are-independent) for lifecycle examples.
+`scoreFloor` (on the decay binding) clamps the score value upward; `visibilityThreshold` is the boolean cutoff for suppression. They are independent — setting `scoreFloor` alone does not keep an entity visible unless the floor itself is at or above `visibilityThreshold`. See [`scoreFloor` vs `visibilityThreshold`](decay-profiles.md#scorefloor-vs-visibilitythreshold--they-are-independent) for lifecycle examples.
 
-Where `baseDecay(t)` depends on the decay function:
+`baseDecay(t)`:
 - **Exponential:** `e^(-ln(2)/halfLife * t)` where halfLife is in seconds
-- **Linear:** `max(0, 1 - t/fullLife)`
+- **Linear:** `max(0, 1 - t/(2*halfLife))` (reaches 0.5 at one half-life, 0.0 at two half-lives)
 - **Step:** `1.0` if `t < halfLife`, else `0.0`
 - **None:** Always `1.0`
 
+A **negative `halfLifeSeconds`** inverts the curve: the score becomes `1 - f(age, |halfLife|)`. Pair with `scoreFrom: 'LAST_ACCESSED'` for a consolidation curve. The reset on access only works if a promotion policy on the same target writes `lastAccessedAt` in its `ON ACCESS` block — see [Combining decay with access tracking](#combining-decay-with-access-tracking) below.
+
+### scoreFrom Modes
+
+| Mode | Anchor used as `t = 0` | Where it comes from |
+|---|---|---|
+| `CREATED` (default) | entity creation time | `node.CreatedAt` / `edge.CreatedAt` |
+| `VERSION` | last property update | `node.UpdatedAt` |
+| `CUSTOM` | a property (`scoreFromProperty`) | the property must hold a timestamp |
+| `LAST_ACCESSED` | last access | access metadata's `lastAccessedAt`; falls back to `CreatedAt` until first access is recorded |
+
+`LAST_ACCESSED` decay only **reads** access metadata. It does not write. To make it actually advance on each access, a promotion policy on the same target must update the metadata.
+
 ## Binding Resolution Order
 
-When multiple bindings could match:
+When multiple decay bindings could match:
 
 1. Multi-label target (most labels) takes precedence over single-label
-2. Exact label match takes precedence over wildcard
-3. If two bindings have equal specificity, the resolver returns a diagnostic warning
-4. No binding → entity scores 1.0 (no decay)
+2. Exact label match takes precedence over wildcard `FOR ()`
+3. If two bindings have equal specificity, the resolver records a diagnostic; the first-registered binding is used
+4. No binding → entity scores 1.0, suppression never applies
+
+Promotion-policy resolution uses the same rules.
+
+When decay is globally disabled (`memory.decay_enabled: false`), every entity scores `1.0` regardless of bindings. Confirm with `CALL nornicdb.knowledgepolicy.info()`.
+
+## Combining decay with access tracking
+
+Decay and promotion are independent objects with independent purposes:
+
+| Want | Build |
+|---|---|
+| Forgetting curve, no access tracking needed | A decay bundle + a decay binding. No promotion policy required. |
+| Consolidation curve that resets on each access | A decay bundle with `scoreFrom: 'LAST_ACCESSED'` + a decay binding **plus** a promotion policy on the same target whose `ON ACCESS { SET n.lastAccessedAt = timestamp() }` keeps the anchor moving. |
+| Reinforcement after N accesses | A decay binding (any anchor) + a promotion profile with `multiplier > 1` + a promotion policy whose `ON ACCESS` increments a counter and whose `WHEN` references the matching profile. |
+| Dampening for hot paths | Same as reinforcement but with `multiplier < 1`. |
+
+Without a promotion policy, decay still runs — `ON ACCESS` is a feature of promotion only.
 
 ## Cypher Diagnostics
 

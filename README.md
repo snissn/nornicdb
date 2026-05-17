@@ -54,6 +54,12 @@ Open [http://localhost:7474](http://localhost:7474) for the admin UI. For NVIDIA
 
 ---
 
+> **Writing queries?** Start with the [Hot-Path Cypher Cookbook](docs/performance/hot-path-query-cookbook.md) — proven query shapes that route through the executor's specialized fast paths.
+>
+> 🤖 **Building with Claude / agents?** The [`docs/skills/`](docs/skills/) directory contains agent-ready skill files for every Cypher surface: query shapes, decay/promotion policies, managed embeddings, vector & hybrid search, and RAG procedures. Drop them into `.claude/skills/` to make agents fluent in NornicDB.
+
+---
+
 > Note: Docker on macOS does not expose Metal acceleration. The Apple Silicon image still runs, but GPU acceleration on macOS requires a native install from the [releases page](https://github.com/orneryd/NornicDB/releases) or a local build.
 
 ## What NornicDB Is
@@ -265,6 +271,8 @@ RETURN n ORDER BY decayScore(n) DESC
 ```
 
 > 📖 Deep dive: [Knowledge-Layer Policies](docs/user-guides/knowledge-layer-policies.md), [Decay Profiles](docs/user-guides/decay-profiles.md), [Promotion Policies](docs/user-guides/promotion-policies.md), and [Ebbinghaus-Roynard Bootstrap](docs/user-guides/ebbinghaus-roynard-bootstrap.md).
+>
+> 🤖 **Agent skills:** [Knowledge Policies](docs/skills/knowledge-policies.skill.md) · [Decay Tuning](docs/skills/decay-tuning.skill.md) · [Promotion Policies](docs/skills/promotion-policies.skill.md)
 
 ### 🔗 Auto-Relationships
 
@@ -280,6 +288,8 @@ NornicDB weaves connections automatically:
 Native semantic search with GPU acceleration and hybrid retrieval support.
 
 > 📖 Deep dive: [Vector Search Guide](docs/user-guides/vector-search.md) and [Qdrant gRPC Endpoint](docs/user-guides/qdrant-grpc.md).
+>
+> 🤖 **Agent skills:** [Vector & Full-Text Search](docs/skills/vector-search.skill.md) · [Managed Embeddings](docs/skills/managed-embeddings.skill.md) · [RAG Procedures](docs/skills/rag-procedures.skill.md)
 
 **Cypher (Neo4j-compatible):**
 
@@ -466,17 +476,19 @@ Start with the docs hub for role/task navigation, then use the issue index for s
 - [Documentation Hub](docs/README.md)
 - [Issue Index](docs/ISSUES-INDEX.md)
 
-| Guide                                                                         | Description                    |
-| ----------------------------------------------------------------------------- | ------------------------------ |
-| [Getting Started](docs/getting-started/README.md)                             | Installation & quick start     |
-| [Docker Image Quick Reference](docs/getting-started/image-quick-reference.md) | Full runtime image matrix      |
-| [API Reference](docs/api-reference/README.md)                                 | Cypher functions & procedures  |
-| [User Guides](docs/user-guides/README.md)                                     | Complete examples & patterns   |
-| [Performance](docs/performance/README.md)                                     | Benchmarks vs Neo4j            |
-| [Neo4j Migration](docs/neo4j-migration/README.md)                             | Compatibility & feature parity |
-| [Architecture](docs/architecture/README.md)                                   | System design & internals      |
-| [Docker Guide](docker/README.md)                                              | Build & deployment             |
-| [Development](docs/development/README.md)                                     | Contributing & development     |
+| Guide                                                                         | Description                                     |
+| ----------------------------------------------------------------------------- | ----------------------------------------------- |
+| [Getting Started](docs/getting-started/README.md)                             | Installation & quick start                      |
+| [Docker Image Quick Reference](docs/getting-started/image-quick-reference.md) | Full runtime image matrix                       |
+| [Hot-Path Cypher Cookbook](docs/performance/hot-path-query-cookbook.md)       | Proven query shapes for fast latency            |
+| [Agent Skills](docs/skills/README.md)                                         | Claude/agent skill files for the Cypher surface |
+| [API Reference](docs/api-reference/README.md)                                 | Cypher functions & procedures                   |
+| [User Guides](docs/user-guides/README.md)                                     | Complete examples & patterns                    |
+| [Performance](docs/performance/README.md)                                     | Benchmarks vs Neo4j                             |
+| [Neo4j Migration](docs/neo4j-migration/README.md)                             | Compatibility & feature parity                  |
+| [Architecture](docs/architecture/README.md)                                   | System design & internals                       |
+| [Docker Guide](docker/README.md)                                              | Build & deployment                              |
+| [Development](docs/development/README.md)                                     | Contributing & development                      |
 
 Additional deep dives referenced above:
 
