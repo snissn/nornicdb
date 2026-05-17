@@ -231,7 +231,7 @@ sudo systemctl start nornicdb
 | `NORNICDB_HTTP_PORT` | HTTP port | `7474` |
 | `NORNICDB_BOLT_PORT` | Bolt port | `7687` |
 | `NORNICDB_DATA_DIR` | Data directory | `./data` |
-| `NORNICDB_NO_AUTH` | Disable auth | `false` |
+| `NORNICDB_AUTH` | `none` to disable; `user/pass` to enable | `none` (auth off) |
 | `NORNICDB_JWT_SECRET` | JWT signing key | Required |
 | `NORNICDB_ENCRYPTION_PASSWORD` | Encryption key | Optional |
 

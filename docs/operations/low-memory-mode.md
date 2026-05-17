@@ -170,7 +170,7 @@ services:
     environment:
       - NORNICDB_LOW_MEMORY=true
       - NORNICDB_EMBEDDING_PROVIDER=ollama
-      - NORNICDB_EMBEDDING_URL=http://ollama:11434
+      - NORNICDB_EMBEDDING_API_URL=http://ollama:11434
   
   ollama:
     image: ollama/ollama:latest

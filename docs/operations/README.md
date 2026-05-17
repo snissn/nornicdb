@@ -34,4 +34,4 @@ This section is the canonical runbook set for deploying, operating, and recoveri
 - Auth errors (401/403): [troubleshooting.md#authentication-issues](troubleshooting.md#authentication-issues)
 - Slow queries or high CPU: [troubleshooting.md#performance-issues](troubleshooting.md#performance-issues)
 - OOM or memory pressure: [troubleshooting.md#high-memory-usage](troubleshooting.md#high-memory-usage)
-- Crash recovery or corruption: [troubleshooting.md#data-integrity--recovery](troubleshooting.md#data-integrity--recovery)
+- Crash recovery or corruption: [troubleshooting.md#data-integrity-recovery](troubleshooting.md#data-integrity-recovery)

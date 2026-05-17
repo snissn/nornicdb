@@ -78,7 +78,7 @@ Two specific things that catch people:
 When multiple decay bindings could match an entity:
 1. Multi-label binding (most labels matched) wins over fewer-label.
 2. Exact-label binding wins over wildcard `FOR ()`.
-3. Equal specificity → resolver records a diagnostic; the first-registered binding is used.
+3. Two bindings against the same target with different `Order` values: the lower `Order` wins. Two bindings against the same target with the same `Order` cause the binding-table build to return a conflict error, so this state is rejected at DDL time rather than silently picked.
 4. No binding matches → score is `1.0`, suppression never applies.
 
 Promotion-policy resolution uses the same priority rules.
@@ -186,10 +186,12 @@ APPLY {
     APPLY PROFILE 'hot_episode'
 }
 
-ALTER PROMOTION POLICY episode_reinforcement DISABLE   -- or ENABLE / SET OPTIONS { ... }
+ALTER PROMOTION POLICY episode_reinforcement DISABLE   -- or ENABLE
 DROP   PROMOTION POLICY IF EXISTS episode_reinforcement
 SHOW PROMOTION POLICIES
 ```
+
+`ALTER PROMOTION POLICY` only honors enable/disable today. To change the target, the `WHEN` predicates, or the `ON ACCESS` block, drop and recreate the policy. Use `ALTER PROMOTION PROFILE … SET OPTIONS { multiplier, scoreFloor, scoreCap, enabled }` to change the math without rebuilding the binding.
 
 ON ACCESS rules:
 - Each `SET` is a mutation against access metadata. Inspect the result with `policy(n)` or `nornicdb.knowledgepolicy.resolve(...)` — `n.Properties` is unchanged.
@@ -272,7 +274,7 @@ MATCH (n:Document) RETURN reveal(n) AS node, decayScore(n) AS score
 ## Authoring workflow
 
 1. **Bundle first.** Create the parameter set (`OPTIONS { ... }`). Nothing scores differently yet — confirm with `SHOW DECAY PROFILES` (the bundle appears with `kind='bundle'`).
-2. **Binding next.** `CREATE DECAY PROFILE <bindingName> FOR (...) APPLY { DECAY PROFILE '<bundleName>' ... }`. Decay is now active for matched entities. Confirm with `CALL nornicdb.knowledgepolicy.resolve('', '<labels>', '')` — `ResolvedDecayProfileID` should be the bundle name; `EffectiveRate`, `EffectiveThreshold`, `EffectiveFloor` should match what you intended.
+2. **Binding next.** `CREATE DECAY PROFILE <bindingName> FOR (...) APPLY { DECAY PROFILE '<bundleName>' ... }`. Decay is now active for matched entities. Confirm with `CALL nornicdb.knowledgepolicy.resolve('', '<labels>', '')` — `ResolvedDecayProfileID` should be the bundle name; `EffectiveRate`, `EffectiveThreshold`, and `EffectiveMultiplier` should match what you intended. (For the floor value, read `floor` from `decay(n)` on a real entity — the `resolve()` projection does not include the floor directly.)
 3. **Promotion only when needed.** Create promotion profiles (`OPTIONS`) and a promotion policy (`FOR ... APPLY { ... }`). Even a policy with only `ON ACCESS` and no `WHEN` is useful — it lets a `LAST_ACCESSED` decay binding work correctly.
 4. **Tune by altering the bundle.** Most tuning changes only the math; `ALTER DECAY PROFILE <bundleName> SET OPTIONS { ... }` propagates to every binding that references it. Drop and recreate a binding only when the target needs to change.
 5. **Validate again** after every change: `SHOW DECAY PROFILES`, `SHOW PROMOTION POLICIES`, `CALL nornicdb.knowledgepolicy.resolve(...)`, then `MATCH (n:Label) RETURN decay(n)` on a known entity.

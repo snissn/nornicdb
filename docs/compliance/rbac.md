@@ -400,7 +400,7 @@ auth:
 export NORNICDB_JWT_SECRET="your-super-secret-jwt-key-min-32-chars"
 
 # Optional: Disable auth for development
-export NORNICDB_NO_AUTH=true
+export NORNICDB_AUTH=none
 ```
 
 ---

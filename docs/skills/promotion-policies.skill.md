@@ -198,7 +198,11 @@ SHOW PROMOTION POLICIES
 -- Combined catalog including profile vs policy rows
 CALL nornicdb.knowledgepolicy.policies()
 
--- Effective resolution including which profile a WHEN matched
+-- Effective resolution for an entity. Reports the resolved decay binding,
+-- the targeted promotion policy, and the promotion profile NornicDB would
+-- pick for this entity if every WHEN matched. Note: resolve() runs as a
+-- dry-run with empty access metadata, so WHEN predicates that depend on
+-- access counts may not reflect the live decision.
 CALL nornicdb.knowledgepolicy.resolve('nornic:abc-123', '', '')
 
 -- Inspect access metadata

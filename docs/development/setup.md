@@ -150,7 +150,7 @@ go test ./pkg/nornicdb/...
 | `NORNICDB_DATA_DIR`   | Data directory | `./data`          |
 | `NORNICDB_HTTP_PORT`  | HTTP API port  | `7474`            |
 | `NORNICDB_BOLT_PORT`  | Bolt port      | `7687`            |
-| `NORNICDB_NO_AUTH`    | Disable auth   | `false`           |
+| `NORNICDB_AUTH`       | Set to `none` to disable, or `user/pass` to enable | `none` (auth off) |
 | `NORNICDB_JWT_SECRET` | JWT secret     | Required for auth |
 | `NORNICDB_HEADLESS`   | Disable web UI | `false`           |
 

@@ -10,7 +10,7 @@ When a node or edge's decay score drops below the visibility threshold, NornicDB
 suppressed = finalScore < visibilityThreshold       // strict less-than
 ```
 
-It is independent from `scoreFloor`, which is a *score-value clamp* (the score never drops below it). A non-zero floor does not, on its own, keep an entity visible — it only does so if the floor itself is at or above `visibilityThreshold`. See [`scoreFloor` vs `visibilityThreshold`](decay-profiles.md#scorefloor-vs-visibilitythreshold--they-are-independent) for lifecycle examples.
+It is independent from `scoreFloor`, which is a *score-value clamp* (the score never drops below it). A non-zero floor does not, on its own, keep an entity visible — it only does so if the floor itself is at or above `visibilityThreshold`. See [`scoreFloor` vs `visibilityThreshold`](decay-profiles.md#scorefloor-vs-visibilitythreshold-they-are-independent) for lifecycle examples.
 
 Each decay profile specifies a `DECAY VISIBILITY THRESHOLD` (default: `0.05`). When an entity's score falls below this value:
 

@@ -6,17 +6,17 @@
 
 ## Table of Contents
 
-1. [Search & Hybrid Retrieval Pipeline](#1-search--hybrid-retrieval-pipeline)
+1. [Search & Hybrid Retrieval Pipeline](#1-search-hybrid-retrieval-pipeline)
 2. [Cypher Query Engine](#2-cypher-query-engine)
-3. [Auth & RBAC](#3-auth--rbac)
-4. [Heimdall AI Assistant & MCP Integration](#4-heimdall-ai-assistant--mcp-integration)
-5. [Storage Engine & WAL](#5-storage-engine--wal)
-6. [Server & Per-Database Configuration](#6-server--per-database-configuration)
-7. [macOS App & File Indexer](#7-macos-app--file-indexer)
+3. [Auth & RBAC](#3-auth-rbac)
+4. [Heimdall AI Assistant & MCP Integration](#4-heimdall-ai-assistant-mcp-integration)
+5. [Storage Engine & WAL](#5-storage-engine-wal)
+6. [Server & Per-Database Configuration](#6-server-per-database-configuration)
+7. [macOS App & File Indexer](#7-macos-app-file-indexer)
 8. [Web UI (Bifrost)](#8-web-ui-bifrost)
-9. [Multi-Database, Replication & GraphQL](#9-multi-database-replication--graphql)
-10. [Infrastructure & Build](#10-infrastructure--build)
-11. [Experimental: Index Persistence & IVF-HNSW at Scale](#11-experimental-index-persistence--ivf-hnsw-at-scale)
+9. [Multi-Database, Replication & GraphQL](#9-multi-database-replication-graphql)
+10. [Infrastructure & Build](#10-infrastructure-build)
+11. [Experimental: Index Persistence & IVF-HNSW at Scale](#11-experimental-index-persistence-ivf-hnsw-at-scale)
 12. [Upgrade Notes](#12-upgrade-notes)
 
 ---
@@ -189,7 +189,7 @@ NORNICDB_VECTOR_HYBRID_ROUTING_W_LEX=0.3
 NORNICDB_VECTOR_HYBRID_ROUTING_LEX_TOP_TERMS=64
 ```
 
-> **Note:** Hybrid cluster routing requires k-means clustering to be enabled. K-means has significant startup cost and is only beneficial at large scale — see [§11](#11-experimental-index-persistence--ivf-hnsw-at-scale) for guidance on when to enable it.
+> **Note:** Hybrid cluster routing requires k-means clustering to be enabled. K-means has significant startup cost and is only beneficial at large scale — see [§11](#11-experimental-index-persistence-ivf-hnsw-at-scale) for guidance on when to enable it.
 
 ---
 

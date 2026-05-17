@@ -6,22 +6,17 @@ Three runnable migrations to move collections + points from a source Qdrant inst
 |---|---|---|---|
 | [`migrate.py`](migrate.py)  | Python 3.10+, `qdrant-client` | gRPC (`prefer_grpc=True`) | gRPC (`prefer_grpc=True`) |
 | [`migrate.go`](migrate.go)  | Go 1.21+, `github.com/qdrant/go-client v1.18+` | gRPC | gRPC |
-| [`migrate.mjs`](migrate.mjs) | Node 20+, `@qdrant/js-client-rest` | REST | NornicDB **REST** on port 7474 (Node has no maintained gRPC Qdrant client) |
+| [`migrate.mjs`](migrate.mjs) | Node 20+, `@qdrant/js-client-rest` + `neo4j-driver` | REST (Qdrant) | Bolt (NornicDB), since there is no Qdrant-compatible REST surface on NornicDB and no maintained Qdrant gRPC client for Node |
 
-All three implement the same flow:
+The Python and Go scripts implement a **same-API replay**: list collections, replicate vector configs (single and named), scroll points, upsert with `wait=true`, verify counts. Re-running is idempotent — `Upsert` is keyed by point ID, and existing collections can be skipped with `--skip-existing`.
 
-1. List collections on source.
-2. For each: replicate the vector config (size, distance, named vectors) into the target if missing.
-3. Scroll points in batches; upsert into target.
-4. Verify point count matches.
-
-Re-running is idempotent — `Upsert` is keyed by point ID, and existing collections can be skipped with `--skip-existing`.
+The Node script implements a **bridge**: it reads from Qdrant over REST and writes into NornicDB over Bolt as nodes (one label per source collection, vector on `n.embedding`, payload merged into the node properties). Named-vector collections are not handled by the Node script — use Python or Go for that case.
 
 ## Choosing a script
 
 - **Python** — quickest to set up, talks gRPC end-to-end. Use this unless you need otherwise.
 - **Go** — no Python runtime, vendorable for CI pipelines. Talks gRPC end-to-end.
-- **Node** — pick this only if you already have a Node/TS pipeline. Uses REST against NornicDB, which means port `7474` (HTTP), not `6334` (gRPC). The two surfaces are not interchangeable; if your NornicDB deployment only exposes gRPC, prefer Python or Go.
+- **Node** — pick this only if you already have a Node/TS pipeline. Different shape: writes into NornicDB through Bolt rather than gRPC, so the result is graph nodes (with vector + payload) rather than Qdrant-collection-shaped data.
 
 ## Common flags
 

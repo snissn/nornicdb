@@ -86,7 +86,7 @@ services:
       - nornicdb-logs:/logs
     environment:
       - NORNICDB_EMBEDDING_PROVIDER=ollama
-      - NORNICDB_EMBEDDING_URL=http://ollama:11434
+      - NORNICDB_EMBEDDING_API_URL=http://ollama:11434
       - NORNICDB_EMBEDDING_MODEL=mxbai-embed-large
       - NORNICDB_EMBEDDING_ENABLED=true
     restart: unless-stopped
@@ -154,7 +154,7 @@ Use the canonical runtime references instead of maintaining a partial Docker-onl
 Common Docker-specific overrides that are verified in the runtime docs:
 
 - `NORNICDB_LOW_MEMORY=true` to reduce memory usage.
-- `NORNICDB_EMBEDDING_ENABLED=true` with `NORNICDB_EMBEDDING_PROVIDER`, `NORNICDB_EMBEDDING_URL`, and `NORNICDB_EMBEDDING_MODEL` to enable semantic search.
+- `NORNICDB_EMBEDDING_ENABLED=true` with `NORNICDB_EMBEDDING_PROVIDER`, `NORNICDB_EMBEDDING_API_URL`, and `NORNICDB_EMBEDDING_MODEL` to enable semantic search.
 - `NORNICDB_QDRANT_GRPC_ENABLED=true` and `NORNICDB_QDRANT_GRPC_LISTEN_ADDR=:6334` when exposing the Qdrant-compatible gRPC interface.
 
 ### Volume Mounts

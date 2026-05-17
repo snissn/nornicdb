@@ -36,8 +36,7 @@ These procedures are read-only and designed to map directly to internal contract
   - This is useful for fully manual Cypher search pipelines.
 
 - `db.infer` caching behavior
-  - Not cached by default.
-  - Opt in per-call with `cache: true` in the request map when deterministic reuse is desired.
+  - The procedure itself does not cache; each call invokes the configured inference manager. Caching, when applicable, is the responsibility of the inference manager / model provider.
 
 ## Example
 
@@ -69,7 +68,7 @@ If you use `db.index.vector.embed()`, pass the returned `embedding` array into
 `db.index.vector.queryNodes(..., embedding)` (or an inline array equivalent) for explicit pipeline control.
 
 ```cypher
-CALL db.infer({prompt: 'Summarize: ...', cache: true, temperature: 0.0}) YIELD text
+CALL db.infer({prompt: 'Summarize: ...', temperature: 0.0}) YIELD text
 RETURN text
 ```
 

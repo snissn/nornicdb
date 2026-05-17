@@ -13,7 +13,7 @@ This skill covers the migration plan and the exact query shapes used. Runnable s
 
 1. **Schema** — constraints, then indexes (vector and fulltext last). Idempotent via `IF NOT EXISTS`.
 2. **Nodes** — `UNWIND $rows MERGE (n:_Migrated {_neo4j_id: row.id}) SET n += row.props` per label, keyset-paginated by `elementId`. Hits [`UnwindSimpleMergeBatch`](cypher-queries.skill.md#7-write-hot-paths).
-3. **Edges** — `UNWIND $rows MATCH (a) MATCH (b) CREATE (a)-[:T]->(b)` per relationship type. Hits [`UnwindMultiMatchCreateBatch`](cypher-queries.skill.md#multi-match--create-bulk-seed-unwindmultimatchcreatebatch).
+3. **Edges** — `UNWIND $rows MATCH (a) MATCH (b) CREATE (a)-[:T]->(b)` per relationship type. Hits [`UnwindMultiMatchCreateBatch`](cypher-queries.skill.md#multi-match-create-bulk-seed-unwindmultimatchcreatebatch).
 
 Reordering breaks the edge phase because it depends on `_Migrated` nodes being present.
 

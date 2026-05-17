@@ -90,7 +90,7 @@ htop
 
 2. **Check auth is disabled (dev only):**
    ```bash
-   NORNICDB_NO_AUTH=true
+   NORNICDB_AUTH=none
    ```
 
 3. **Check JWT secret:**
@@ -343,8 +343,9 @@ On startup, NornicDB will:
 
 2. **Check configuration:**
    ```bash
-   NORNICDB_EMBEDDING_URL=http://ollama:11434
+   NORNICDB_EMBEDDING_API_URL=http://ollama:11434
    NORNICDB_EMBEDDING_MODEL=mxbai-embed-large
+   NORNICDB_EMBEDDING_PROVIDER=ollama
    ```
 
 3. **Check pending queue:**

@@ -118,10 +118,14 @@ go run ./scripts/migration/qdrant/migrate.go \
     --target-host nornicdb.local --target-port 6334 \
     --batch-size 512
 
-# Node (REST end-to-end — uses NornicDB HTTP port 7474)
+# Node (Qdrant REST source → NornicDB Bolt target)
+# Each Qdrant point becomes a node on label `${labelPrefix}_${collection}`
+# with its vector on n.embedding and payload merged into n.Properties.
+# Named-vector collections are not handled on this path — use Python or Go.
 node scripts/migration/qdrant/migrate.mjs \
     --source-url http://qdrant.prod:6333 \
-    --target-url http://nornicdb.local:7474
+    --target-url bolt://nornicdb.local:7687 \
+    --target-user neo4j --target-pass <pw>
 ```
 
 ## Verification afterwards

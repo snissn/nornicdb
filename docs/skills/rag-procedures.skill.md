@@ -77,7 +77,7 @@ RETURN id, final_score
 ORDER BY final_score DESC
 ```
 
-`db.rerank` requires `NORNICDB_SEARCH_RERANK_ENABLED=true` and a configured provider. Candidates must include a non-empty `id`; missing `content` is allowed but will hurt rerank quality.
+`db.rerank` exercises the cross-encoder when one is configured (`NORNICDB_SEARCH_RERANK_ENABLED=true` plus a provider). Without a configured reranker the procedure still succeeds and returns candidates in pass-through order — the `cross_score` and `final_score` simply equal the input `score`, and rank order is unchanged. Candidates must include a non-empty `id`; missing `content` is allowed but will hurt rerank quality when the reranker is on.
 
 ## `db.infer` — LLM generation
 

@@ -123,7 +123,7 @@ services:
     environment:
       - NORNICDB_EMBEDDING_ENABLED=true
       - NORNICDB_EMBEDDING_PROVIDER=ollama
-      - NORNICDB_EMBEDDING_URL=http://ollama:11434
+      - NORNICDB_EMBEDDING_API_URL=http://ollama:11434
       - NORNICDB_EMBEDDING_MODEL=mxbai-embed-large
 
 volumes:

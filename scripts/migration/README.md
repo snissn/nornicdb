@@ -4,8 +4,8 @@ Runnable migrations from common sources into NornicDB. Each subdirectory ships *
 
 | Source | Directory | Skill |
 |---|---|---|
-| Neo4j 5 (Bolt → Bolt) | [`neo4j/`](neo4j/) | [`docs/skills/neo4j-migration.skill.md`](../../docs/skills/neo4j-migration.skill.md) |
-| Qdrant (gRPC → gRPC) | [`qdrant/`](qdrant/) | [`docs/skills/qdrant-migration.skill.md`](../../docs/skills/qdrant-migration.skill.md) |
+| Neo4j 5 (Bolt → Bolt, all three languages) | [`neo4j/`](neo4j/) | [`docs/skills/neo4j-migration.skill.md`](../../docs/skills/neo4j-migration.skill.md) |
+| Qdrant (Python and Go: gRPC → gRPC; Node: Qdrant REST → NornicDB Bolt) | [`qdrant/`](qdrant/) | [`docs/skills/qdrant-migration.skill.md`](../../docs/skills/qdrant-migration.skill.md) |
 
 ## Common shape
 
@@ -25,7 +25,7 @@ Every script:
 | Go | No Python runtime, vendorable into CI. |
 | Node | You already have a Node/TS data pipeline. |
 
-All three accept the same flags within a source. See each subdirectory's `README.md` for source-specific options.
+Each subdirectory's `README.md` lists the language-specific flags. Within a single source, flag names are kept aligned across languages where the wire shape allows it — the Qdrant Node script is the one exception, since it talks Bolt to the target instead of gRPC.
 
 ## See also
 
