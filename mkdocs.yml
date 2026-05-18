@@ -335,7 +335,6 @@ nav:
           - Native Package Distribution Plan: plans/native-package-distribution-plan.md
           - nornicdb-admin Import Plan: plans/nornicdb-admin-import-plan.md
           - UI Enhancements: plans/ui-enhancements.md
-          - UI Grid: plans/ui-grid.md
       - Research:
           - Persistence Semantics — Paper: research/papers/persistence-semantics-nornicdb/paper.md
           - Persistence Semantics — Eval Plan: research/papers/persistence-semantics-nornicdb/eval-plan.md

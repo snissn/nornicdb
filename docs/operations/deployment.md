@@ -37,7 +37,7 @@ docker run -d \
   -v /opt/nornicdb/config:/config \
   -e NORNICDB_ADDRESS=0.0.0.0 \
   -e NORNICDB_ENCRYPTION_PASSWORD="${ENCRYPTION_PASSWORD}" \
-  -e NORNICDB_JWT_SECRET="${JWT_SECRET}" \
+  -e NORNICDB_AUTH_JWT_SECRET="${JWT_SECRET}" \
   --memory=4g \
   --cpus=2 \
   timothyswt/nornicdb-arm64-metal:latest
@@ -60,7 +60,7 @@ services:
     environment:
       NORNICDB_ADDRESS: "0.0.0.0"
       NORNICDB_ENCRYPTION_PASSWORD: "${ENCRYPTION_PASSWORD}"
-      NORNICDB_JWT_SECRET: "${JWT_SECRET}"
+      NORNICDB_AUTH_JWT_SECRET: "${JWT_SECRET}"
     restart: unless-stopped
     deploy:
       resources:
@@ -101,7 +101,7 @@ spec:
         env:
         - name: NORNICDB_ADDRESS
           value: "0.0.0.0"
-        - name: NORNICDB_JWT_SECRET
+        - name: NORNICDB_AUTH_JWT_SECRET
           valueFrom:
             secretKeyRef:
               name: nornicdb-secrets
@@ -232,7 +232,7 @@ sudo systemctl start nornicdb
 | `NORNICDB_BOLT_PORT` | Bolt port | `7687` |
 | `NORNICDB_DATA_DIR` | Data directory | `./data` |
 | `NORNICDB_AUTH` | `none` to disable; `user/pass` to enable | `none` (auth off) |
-| `NORNICDB_JWT_SECRET` | JWT signing key | Required |
+| `NORNICDB_AUTH_JWT_SECRET` | JWT signing key | Required |
 | `NORNICDB_ENCRYPTION_PASSWORD` | Encryption key | Optional |
 
 ### CLI Flags

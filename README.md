@@ -482,20 +482,20 @@ Start with the docs hub for role/task navigation, then use the issue index for s
 - [Documentation Hub](docs/README.md)
 - [Issue Index](docs/issues-index.md)
 
-| Guide                                                                         | Description                                     |
-| ----------------------------------------------------------------------------- | ----------------------------------------------- |
-| [Getting Started](docs/getting-started/README.md)                             | Installation & quick start                      |
-| [Docker Image Quick Reference](docs/getting-started/image-quick-reference.md) | Full runtime image matrix                       |
-| [Hot-Path Cypher Cookbook](docs/performance/hot-path-query-cookbook.md)       | Proven query shapes for fast latency            |
-| [Agent Skills](docs/skills/README.md)                                         | Claude/agent skill files for the Cypher surface |
-| [API Reference](docs/api-reference/README.md)                                 | Cypher functions & procedures                   |
-| [User Guides](docs/user-guides/README.md)                                     | Complete examples & patterns                    |
-| [Performance](docs/performance/README.md)                                     | Benchmarks vs Neo4j                             |
-| [Neo4j Migration](docs/neo4j-migration/README.md)                             | Compatibility & feature parity                  |
+| Guide                                                                         | Description                                                        |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [Getting Started](docs/getting-started/README.md)                             | Installation & quick start                                         |
+| [Docker Image Quick Reference](docs/getting-started/image-quick-reference.md) | Full runtime image matrix                                          |
+| [Hot-Path Cypher Cookbook](docs/performance/hot-path-query-cookbook.md)       | Proven query shapes for fast latency                               |
+| [Agent Skills](docs/skills/README.md)                                         | Claude/agent skill files for the Cypher surface                    |
+| [API Reference](docs/api-reference/README.md)                                 | Cypher functions & procedures                                      |
+| [User Guides](docs/user-guides/README.md)                                     | Complete examples & patterns                                       |
+| [Performance](docs/performance/README.md)                                     | Benchmarks vs Neo4j                                                |
+| [Neo4j Migration](docs/neo4j-migration/README.md)                             | Compatibility & feature parity                                     |
 | [Migration Scripts](scripts/migration/README.md)                              | Runnable Neo4j and Qdrant → NornicDB migrations (Python, Go, Node) |
-| [Architecture](docs/architecture/README.md)                                   | System design & internals                       |
-| [Docker Guide](docker/README.md)                                              | Build & deployment                              |
-| [Development](docs/development/README.md)                                     | Contributing & development                      |
+| [Architecture](docs/architecture/README.md)                                   | System design & internals                                          |
+| [Docker Guide](docker/README.md)                                              | Build & deployment                                                 |
+| [Development](docs/development/README.md)                                     | Contributing & development                                         |
 
 Additional deep dives referenced above:
 
@@ -579,6 +579,7 @@ make cross-all             # All platforms
 ### Completed
 
 - [x] Neo4j Bolt protocol
+- [x] Configurable RBAC and oAuth support
 - [x] Cypher query engine (52 functions)
 - [x] Memory decay system
 - [x] GPU acceleration (Metal, CUDA)
@@ -590,12 +591,13 @@ make cross-all             # All platforms
 - [x] Clustering support
 - [x] Sharding (Composite DB + Remote Constituents)
 - [x] Data Explorer UI (Browser query editor, semantic search, node details)
+- [x] GDPR Compliance
 
 ### Planned (from `docs/plans`)
 
+- [ ] Bulk Import and per-DB Search Index Overrides for BM2 and HNSW as independently levers for deferred or skipped construction (`docs/plans/nornicdb-admin-import-plan.md`)
 - [ ] GPU-assisted HNSW construction with CPU-serving persistence parity (`docs/plans/gpu-hnsw-construction-plan.md`)
 - [ ] Neo4j-compatible end-to-end streaming execution + wrapper driver/ORM (`docs/plans/neo4j-compatible-streaming-driver-and-server-plan.md`)
-- [ ] GDPR compliance hardening: user-data detection, relationship export/delete/anonymization, and audit-log coverage (`docs/plans/gdpr-compliance-fixes.md`)
 - [ ] UI enhancement backlog (search/config/admin UX improvements) (`docs/plans/ui-enhancements.md`)
 
 ## Contributors

@@ -96,7 +96,7 @@ htop
 3. **Check JWT secret:**
    ```bash
    # Must be at least 32 characters
-   NORNICDB_JWT_SECRET="your-32-character-secret-key-here"
+   NORNICDB_AUTH_JWT_SECRET="your-32-character-secret-key-here"
    ```
 
 ### 403 Forbidden

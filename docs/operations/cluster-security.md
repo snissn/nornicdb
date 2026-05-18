@@ -68,21 +68,14 @@ openssl rand -base64 48
 
 ```bash
 # .env file for ALL cluster nodes
-NORNICDB_JWT_SECRET=K7xB2mN9pQr4sT6uV8wY0zA3bC5dE7fG9hI1jK3lM5nO7pQ9rS1tU3vW5xY7zA==
-NORNICDB_BOLT_REQUIRE_AUTH=true
+NORNICDB_AUTH_JWT_SECRET=K7xB2mN9pQr4sT6uV8wY0zA3bC5dE7fG9hI1jK3lM5nO7pQ9rS1tU3vW5xY7zA==
+NORNICDB_AUTH=admin/your-strong-password
 ```
 
 #### Step 3: Generate Cluster Tokens
 
-Via API:
-```bash
-curl -X POST http://localhost:7474/api/v1/auth/cluster-token \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"node_id": "node-2", "role": "admin"}'
-```
+Cluster tokens are generated through the embedded Go API. There is no dedicated HTTP route for cluster-token generation; for general API tokens see `POST /auth/api-token` (admin permission required), but inter-node tokens are scoped via `pkg/auth.Authenticator.GenerateClusterToken`:
 
-Via Go code:
 ```go
 // Token never expires (default)
 token, _ := authenticator.GenerateClusterToken("node-2", auth.RoleAdmin)
@@ -122,24 +115,24 @@ const driver = neo4j.driver(
 
 ### Service Account Setup
 
-Create service accounts for cluster nodes:
+Service accounts for cluster nodes are users with admin role and a strong password. Create them through the standard user-management API:
 
 ```bash
-# Via HTTP API (port 7474 for HTTP, 7687 for Bolt)
-curl -X POST http://localhost:7474/api/v1/service-accounts \
+# Via HTTP API (admin permission required)
+curl -X POST http://localhost:7474/auth/users \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "cluster-node-1",
-    "secret": "secure-generated-password",
-    "role": "admin"
+    "username": "cluster-node-1",
+    "password": "secure-generated-password",
+    "roles": ["admin"]
   }'
 ```
 
 Via Go code:
 ```go
 // Create service account for cluster node
-authenticator.CreateUser("cluster-node-1", "secure-password", 
+authenticator.CreateUser("cluster-node-1", "secure-password",
     []auth.Role{auth.RoleAdmin})
 ```
 
@@ -152,9 +145,8 @@ services:
   nornicdb-node1:
     image: nornicdb:latest
     environment:
-      NORNICDB_JWT_SECRET: ${SHARED_JWT_SECRET}
-      NORNICDB_BOLT_REQUIRE_AUTH: "true"
-      NORNICDB_BOLT_ALLOW_ANONYMOUS: "false"
+      NORNICDB_AUTH_JWT_SECRET: ${SHARED_JWT_SECRET}
+      NORNICDB_AUTH: "admin/${ADMIN_PASSWORD}"
     secrets:
       - jwt-secret
 
@@ -193,41 +185,32 @@ networks:
 
 ### 3. Secret Rotation
 
-Rotate secrets quarterly:
-
-```go
-func RotateServiceAccountSecret(auth *Authenticator, accountID string) (string, error) {
-    newSecret := generateSecureSecret()
-    err := auth.UpdateServiceAccountSecret(accountID, newSecret)
-    return newSecret, err
-}
-```
+Rotate cluster credentials by updating the user's password and roles through the standard auth API. Rotate the shared `NORNICDB_JWT_SECRET` quarterly via your secrets manager and restart cluster nodes in a controlled rolling order.
 
 ## Troubleshooting
 
 ### Authentication Failures
 
 ```bash
-# Check service account exists (HTTP API port 7474)
-curl -X GET http://localhost:7474/api/v1/service-accounts/cluster-node-1 \
+# List all users (admin permission required)
+curl -X GET http://localhost:7474/auth/users \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
 ### Permission Denied
 
 ```bash
-# Check/update account role
-curl -X PATCH http://localhost:7474/api/v1/service-accounts/cluster-node-1 \
+# Update the user's roles
+curl -X PUT http://localhost:7474/auth/users/cluster-node-1 \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"role": "admin"}'
+  -d '{"roles": ["admin"]}'
 ```
 
 ### Debug Logging
 
 ```bash
 export NORNICDB_LOG_LEVEL=debug
-export NORNICDB_AUTH_DEBUG=true
 ```
 
 ## See Also

@@ -350,22 +350,15 @@ curl -X POST http://localhost:7474/auth/api-token \
 
 ### Account Lockout
 
-After repeated failed login attempts, accounts are locked automatically:
-
-```yaml
-auth:
-  max_failed_attempts: 5
-  lockout_duration: 15m
-```
+After repeated failed login attempts, accounts are locked automatically. The lockout threshold and duration use built-in defaults (`pkg/auth/auth.go`); they are not exposed through configuration.
 
 ### Password Policy
+
+The minimum password length is configurable via `auth.min_password_length` (default 8). Complexity rules (uppercase / number / special-character requirements) are not exposed through configuration today — passwords are validated only against the minimum length.
 
 ```yaml
 auth:
   min_password_length: 12
-  require_uppercase: true
-  require_number: true
-  require_special: true
 ```
 
 Passwords are hashed using **bcrypt** with automatic salt generation. Plain-text passwords are never stored.
@@ -381,30 +374,22 @@ Tokens can be revoked (logout) by adding them to a server-side blacklist. Revoke
 ```yaml
 auth:
   enabled: true
-
-  # JWT
-  jwt_secret: "${NORNICDB_JWT_SECRET}"  # Min 32 characters
-  jwt_expiry: 24h
-
-  # Password policy
+  username: admin
+  password: "${ADMIN_PASSWORD}"
+  jwt_secret: "${NORNICDB_AUTH_JWT_SECRET}"  # Min 32 characters
+  token_expiry: 24h
   min_password_length: 12
-  require_uppercase: true
-  require_number: true
-  require_special: true
-  bcrypt_cost: 10
-
-  # Security
-  max_failed_attempts: 5
-  lockout_duration: 15m
 ```
 
 ```bash
 # Required: JWT signing secret (min 32 characters)
-export NORNICDB_JWT_SECRET="your-super-secret-jwt-key-min-32-chars"
+export NORNICDB_AUTH_JWT_SECRET="your-super-secret-jwt-key-min-32-chars"
 
 # Optional: Disable auth for development
 export NORNICDB_AUTH=none
 ```
+
+The configurable surface is intentionally small: the auth block above (`enabled`, `username`, `password`, `min_password_length`, `token_expiry`, `jwt_secret`) is the full set. Bcrypt cost, password complexity rules, and lockout thresholds are not exposed through configuration today; they default to the values in `pkg/auth/auth.go`.
 
 ---
 

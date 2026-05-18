@@ -73,10 +73,14 @@ Every user has a unique identity. NornicDB supports JWT-based authentication wit
 ```yaml
 auth:
   enabled: true
-  session_timeout: 15m
-  max_failed_attempts: 3
-  lockout_duration: 30m
+  username: admin
+  password: "${ADMIN_PASSWORD}"
+  jwt_secret: "${NORNICDB_AUTH_JWT_SECRET}"
+  token_expiry: 15m
+  min_password_length: 12
 ```
+
+Lockout thresholds and password complexity rules use built-in defaults (`pkg/auth/auth.go`).
 
 ### Role-Based Access Control
 
@@ -262,30 +266,32 @@ When deploying NornicDB:
 # HIPAA-aligned NornicDB configuration
 database:
   encryption_enabled: true
+  encryption_provider: aws-kms
+  encryption_aws_region: us-east-1
+  encryption_aws_kms_key_id: "arn:aws:kms:us-east-1:123456789012:key/..."
 
-tls:
-  enabled: true
-  min_version: TLS1.2
+server:
+  tls:
+    enabled: true
+    cert_file: /etc/nornicdb/server.crt
+    key_file: /etc/nornicdb/server.key
+  bolt_tls_enabled: true
 
 auth:
   enabled: true
-  session_timeout: 15m
-  max_failed_attempts: 3
-  lockout_duration: 30m
+  username: admin
+  password: "${ADMIN_PASSWORD}"
+  jwt_secret: "${NORNICDB_AUTH_JWT_SECRET}"
+  token_expiry: 15m
+  min_password_length: 12
 
-audit:
-  enabled: true
-  retention_days: 2555
-  alert_on_failures: true
-  integrity:
-    enabled: true
-    algorithm: SHA-256
-    chain: true
-
-rbac:
-  enabled: true
-  default_role: none
+compliance:
+  audit_enabled: true
+  audit_log_path: /var/log/nornicdb/audit.log
+  audit_retention_days: 2555
 ```
+
+Roles, per-database access, and per-database privileges are managed at runtime through `/auth/roles`, `/auth/access/databases`, and `/auth/access/privileges`. See [Per-Database RBAC](../security/per-database-rbac.md).
 
 ---
 

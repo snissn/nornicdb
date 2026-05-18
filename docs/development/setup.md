@@ -151,7 +151,7 @@ go test ./pkg/nornicdb/...
 | `NORNICDB_HTTP_PORT`  | HTTP API port  | `7474`            |
 | `NORNICDB_BOLT_PORT`  | Bolt port      | `7687`            |
 | `NORNICDB_AUTH`       | Set to `none` to disable, or `user/pass` to enable | `none` (auth off) |
-| `NORNICDB_JWT_SECRET` | JWT secret     | Required for auth |
+| `NORNICDB_AUTH_JWT_SECRET` | JWT secret (min 32 characters) | Required for auth |
 | `NORNICDB_HEADLESS`   | Disable web UI | `false`           |
 
 ### Embedding & AI Features
