@@ -313,4 +313,4 @@ The build system automatically detects available CUDA libraries via yzma.
 - **yzma Project**: [github.com/hybridgroup/yzma](https://github.com/hybridgroup/yzma)
 - **llama.cpp Project**: [github.com/ggerganov/llama.cpp](https://github.com/ggerganov/llama.cpp)
 - **NVIDIA CUDA Documentation**: [docs.nvidia.com/cuda](https://docs.nvidia.com/cuda)
-- **NornicDB Architecture**: See [Architecture Guide](../architecture/)
+- **NornicDB Architecture**: See [Architecture Guide](../architecture/README.md)

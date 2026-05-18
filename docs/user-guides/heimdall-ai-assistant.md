@@ -544,7 +544,7 @@ The SLM interprets your request and outputs action commands. If actions don't ex
 Create custom plugins to add new capabilities:
 
 - [Writing Heimdall Plugins](./heimdall-plugins.md)
-- [Plugin Architecture](../architecture/COGNITIVE_SLM_PROPOSAL.md)
+- [Plugin Architecture](../architecture/cognitive-slm-proposal.md)
 
 ### Plugin Features
 
@@ -671,4 +671,4 @@ func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 - [Writing Heimdall Plugins](heimdall-plugins.md)
 - [Heimdall Context & Tokens](heimdall-context.md)
 - [Configuration Reference](../operations/configuration.md)
-- [API Reference](../api-reference/)
+- [API Reference](../api-reference/README.md)

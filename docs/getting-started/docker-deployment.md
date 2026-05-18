@@ -226,7 +226,7 @@ docker stats nornicdb
 
 ### Prometheus Metrics
 
-For metrics exposure, scrape the supported endpoints described in [API Reference](../api-reference/OPENAPI.md) and the monitoring guidance in [Operations](../operations/README.md). Keep deployment docs focused on container topology and leave runtime observability settings to the canonical operations pages.
+For metrics exposure, scrape the supported endpoints described in [API Reference](../api-reference/openapi.md) and the monitoring guidance in [Operations](../operations/README.md). Keep deployment docs focused on container topology and leave runtime observability settings to the canonical operations pages.
 
 ## 🔄 Backup & Restore
 

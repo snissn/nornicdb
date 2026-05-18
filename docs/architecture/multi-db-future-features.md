@@ -610,4 +610,4 @@ SHOW USAGE FOR DATABASE tenant_a
 ## See Also
 
 - [Multi-Database User Guide](../user-guides/multi-database.md) - Current multi-database features
-- [Multi-Database Implementation Spec](MULTI_DB_IMPLEMENTATION_SPEC.md) - Current implementation details
+- [Multi-Database Implementation Spec](multi-db-implementation-spec.md) - Current implementation details

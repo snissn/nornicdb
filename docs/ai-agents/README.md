@@ -19,4 +19,4 @@ Use this section to connect NornicDB with IDE copilots, MCP clients, and Heimdal
 - Capability-level feature docs: [../features/README.md](../features/README.md)
 - Task-level product usage: [../user-guides/README.md](../user-guides/README.md)
 - API and endpoint references: [../api-reference/README.md](../api-reference/README.md)
-- Symptom-based issue routing: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
+- Symptom-based issue routing: [../issues-index.md](../issues-index.md)

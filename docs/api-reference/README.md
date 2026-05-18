@@ -4,7 +4,7 @@ This section is the canonical source for protocol and endpoint definitions.
 
 ## Start Here
 
-- HTTP endpoint reference: [OPENAPI.md](OPENAPI.md)
+- HTTP endpoint reference: [openapi.md](openapi.md)
 - Machine-readable HTTP spec: [openapi.yaml](openapi.yaml)
 - Cypher function index: [cypher-functions/README.md](cypher-functions/README.md)
 - Bolt protocol notes: [bolt-protocol.md](bolt-protocol.md)
@@ -17,7 +17,7 @@ This section is the canonical source for protocol and endpoint definitions.
 
 ### HTTP (Neo4j-compatible + Nornic extensions)
 
-- Human-readable reference: [OPENAPI.md](OPENAPI.md)
+- Human-readable reference: [openapi.md](openapi.md)
 - OpenAPI source: [openapi.yaml](openapi.yaml)
 
 ### Bolt
@@ -31,7 +31,7 @@ This section is the canonical source for protocol and endpoint definitions.
 
 ## Common Questions
 
-- "What endpoint should I call?" → [OPENAPI.md](OPENAPI.md)
+- "What endpoint should I call?" → [openapi.md](openapi.md)
 - "Can I generate clients from this API?" → [openapi.yaml](openapi.yaml)
 - "Which Cypher function should I use?" → [cypher-functions/README.md](cypher-functions/README.md)
 - "Will my Neo4j driver work?" → [../neo4j-migration/feature-parity.md](../neo4j-migration/feature-parity.md)
@@ -39,5 +39,5 @@ This section is the canonical source for protocol and endpoint definitions.
 ## Related Docs
 
 - Usage walkthroughs: [../user-guides/README.md](../user-guides/README.md)
-- Troubleshooting by symptom: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
+- Troubleshooting by symptom: [../issues-index.md](../issues-index.md)
 - Operations and deployment behavior: [../operations/README.md](../operations/README.md)

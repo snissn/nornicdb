@@ -31,7 +31,7 @@ If you know your goal, start in **"Find by task"**. If you are debugging, start 
 
 ## Find by Issue
 
-- Symptom-driven index: [Issue Index](ISSUES-INDEX.md)
+- Symptom-driven index: [Issue Index](issues-index.md)
 - Ops troubleshooting: [Operations Troubleshooting](operations/troubleshooting.md)
 
 ## Find by Role

@@ -171,7 +171,9 @@ nav:
           - Heimdall Plugins: user-guides/heimdall-plugins.md
           - Heimdall Context & Tokens: user-guides/heimdall-context.md
       - Plugins & Extensions:
+          - features/README.md
           - Plugin System (User Guide): user-guides/plugin-system.md
+          - Plugin System (Feature Reference): features/plugin-system.md
           - APOC Functions: features/apoc-functions.md
           - Stored Procedure Parity: features/stored-procedure-parity.md
           - Auto-TLP: features/auto-tlp.md
@@ -208,13 +210,13 @@ nav:
       - From Qdrant:
           - Qdrant gRPC Endpoint: user-guides/qdrant-grpc.md
           - Qdrant → NornicDB Skill: skills/qdrant-migration.skill.md
-      - Migration Notice: MIGRATION_NOTICE.md
+      - Migration Notice: migration-notice.md
 
   - API Reference:
       - api-reference/README.md
       - Bolt Protocol: api-reference/bolt-protocol.md
       - Cypher Functions: api-reference/cypher-functions/README.md
-      - OpenAPI: api-reference/OPENAPI.md
+      - OpenAPI: api-reference/openapi.md
       - GraphQL: user-guides/graphql.md
       - Nornic Search gRPC: user-guides/nornic-search-grpc.md
       - Property Key Dictionary: property-key-dictionary.md
@@ -227,7 +229,7 @@ nav:
           - Embedding & Search Examples: architecture/embedding-search-examples.md
           - Embedding & Search Flow Diagrams: architecture/embedding-search-flow-diagrams.md
           - Embedding & Search Overview: architecture/embedding-search.md
-          - Embedding & Search Index: architecture/README-embedding-search.md
+          - Embedding & Search Index: architecture/embedding-search-index.md
           - Indexing Memory for Large Datasets: architecture/indexing-memory-large-datasets.md
           - Graph-RAG vs NornicDB: architecture/graph-rag-nornicdb-comparison.md
           - Replication: architecture/replication.md
@@ -237,12 +239,12 @@ nav:
           - NEON SIMD Implementation: architecture/neon-simd-implementation.md
           - Norns Mythology: architecture/norns-mythology.md
           - Clustering Roadmap: architecture/clustering-roadmap.md
-          - Cognitive SLM Proposal: architecture/COGNITIVE_SLM_PROPOSAL.md
-          - Composite DB Analysis: architecture/COMPOSITE_DB_ANALYSIS.md
-          - Multi-DB Implementation Spec: architecture/MULTI_DB_IMPLEMENTATION_SPEC.md
-          - Multi-DB Future Features: architecture/MULTI_DB_FUTURE_FEATURES.md
-          - Vision Pipeline Proposal: architecture/VISION_PIPELINE_PROPOSAL.md
-          - ADR 0001 — Observability: architecture/adr/0001-observability.md
+          - Cognitive SLM Proposal: architecture/cognitive-slm-proposal.md
+          - Composite DB Analysis: architecture/composite-db-analysis.md
+          - Multi-DB Implementation Spec: architecture/multi-db-implementation-spec.md
+          - Multi-DB Future Features: architecture/multi-db-future-features.md
+          - Vision Pipeline Proposal: architecture/vision-pipeline-proposal.md
+          - Observability: architecture/adr/0001-observability.md
 
   - Operating:
       - operations/README.md
@@ -315,8 +317,8 @@ nav:
           - Setup: development/setup.md
           - Code Style: development/code-style.md
           - Testing: development/testing.md
-          - K-Means Testing: development/KMEANS_TESTING.md
-          - Multi-DB E2E Test: development/MULTI_DB_E2E_TEST.md
+          - K-Means Testing: development/kmeans-testing.md
+          - Multi-DB E2E Test: development/multi-db-e2e-test.md
       - Advanced Topics:
           - advanced/README.md
           - Search Evaluation: advanced/search-evaluation.md
@@ -343,14 +345,14 @@ nav:
           - Kalman: plans/kalman.md
           - Memory Gap: plans/memory-gap.md
           - UI Enhancements: plans/ui-enhancements.md
-          - UI Grid: plans/uiGrid.md
+          - UI Grid: plans/ui-grid.md
       - Research:
           - Persistence Semantics — Paper: research/papers/persistence-semantics-nornicdb/paper.md
           - Persistence Semantics — Eval Plan: research/papers/persistence-semantics-nornicdb/eval-plan.md
           - Persistence Semantics — Related Work: research/papers/persistence-semantics-nornicdb/related-work.md
       - Support:
           - GPU Embeddings UI Reply: support/reply-user-config-gpu-embeddings-ui.md
-      - Issues Index: ISSUES-INDEX.md
+      - Issues Index: issues-index.md
       - Latest Untagged: latest-untagged.md
       - Release Notes Since v1.0.11: release-notes-since-v1.0.11.md
       - Contributing: contributing.md

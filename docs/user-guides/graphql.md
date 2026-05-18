@@ -687,7 +687,7 @@ data = response.json()
 
 ## Related Documentation
 
-- **[API Reference](../api-reference/)** - Complete function documentation
+- **[API Reference](../api-reference/README.md)** - Complete function documentation
 - **[Cypher Queries](cypher-queries.md)** - Cypher language guide
 - **[Vector Search](vector-search.md)** - Semantic search guide
 - **[Complete Examples](complete-examples.md)** - Full application examples

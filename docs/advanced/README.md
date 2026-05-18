@@ -25,12 +25,12 @@
 ### K-Means Clustering
 Learn how to use K-Means clustering on embeddings for improved search and organization.
 
-[Explore K-Means clustering →](k-means-clustering/)
+[Explore K-Means clustering →](k-means-clustering/README.md)
 
 ### Embeddings
 Generate and manage vector embeddings locally or via API.
 
-[Explore embeddings →](embeddings/)
+[Explore embeddings →](embeddings/README.md)
 
 ### Extensibility
 Extend NornicDB with custom functions and plugins.
@@ -39,4 +39,4 @@ Extend NornicDB with custom functions and plugins.
 
 ---
 
-**Start exploring** → **[K-Means Clustering](k-means-clustering/)**
+**Start exploring** → **[K-Means Clustering](k-means-clustering/README.md)**

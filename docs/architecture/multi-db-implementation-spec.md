@@ -426,4 +426,4 @@ Comprehensive unit tests verify:
 
 - [Multi-Database User Guide](../user-guides/multi-database.md) - User-facing guide with examples
 - [Configuration Guide](../operations/configuration.md) - Configuration options
-- [Neo4j Migration Guide](../neo4j-migration/) - Migrating from Neo4j
+- [Neo4j Migration Guide](../neo4j-migration/README.md) - Migrating from Neo4j

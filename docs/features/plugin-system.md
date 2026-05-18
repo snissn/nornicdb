@@ -588,7 +588,7 @@ func (p *MonitoringPlugin) getCPU(ctx heimdall.ActionContext) (*heimdall.ActionR
 - **[APOC Functions](apoc-functions.md)** - Complete function reference
 - **[Heimdall](auto-tlp-heimdall.md)** - SLM subsystem management
 - **[Development Guide](../development/README.md)** - Plugin development details
-- **[API Reference](../api-reference/)** - Function documentation
+- **[API Reference](../api-reference/README.md)** - Function documentation
 
 ---
 

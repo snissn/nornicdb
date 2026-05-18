@@ -250,5 +250,5 @@ if err == gpu.ErrGPUUnavailable {
 
 - **[Vector Search](../user-guides/vector-search.md)** - Search guide
 - **[Memory Decay](memory-decay.md)** - Time-based scoring
-- **[Performance](../performance/)** - Benchmarks
+- **[Performance](../performance/README.md)** - Benchmarks
 

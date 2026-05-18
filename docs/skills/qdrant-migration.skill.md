@@ -7,7 +7,7 @@ description: Migrate from Qdrant to NornicDB end-to-end through NornicDB's Qdran
 
 NornicDB's Qdrant-compatible gRPC service means migration is a **same-API replay**: the source and target speak the same wire, so the script reading from Qdrant can write into NornicDB through the same client library. There is no protocol bridge to build, no schema translation to invent.
 
-This skill covers the migration surface itself. Runnable scripts are in [`scripts/migration/qdrant/`](../../scripts/migration/qdrant/).
+This skill covers the migration surface itself. Runnable scripts are in [`scripts/migration/qdrant/`](https://github.com/orneryd/nornicdb/tree/main/scripts/migration/qdrant).
 
 ## Prerequisites
 
@@ -141,5 +141,5 @@ for col in c.get_collections().collections:
 
 ## See also
 - [`grpc.skill.md`](grpc.skill.md) — the gRPC surface the migration calls.
-- [`scripts/migration/qdrant/`](../../scripts/migration/qdrant/) — Python, Go, Node migration scripts.
+- [`scripts/migration/qdrant/`](https://github.com/orneryd/nornicdb/tree/main/scripts/migration/qdrant) — Python, Go, Node migration scripts.
 - [`docs/user-guides/qdrant-grpc.md`](../user-guides/qdrant-grpc.md) — full Qdrant proto compatibility matrix.

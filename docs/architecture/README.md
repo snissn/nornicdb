@@ -57,8 +57,8 @@
 - **[MVCC Lifecycle and Background Work](mvcc-lifecycle-background-work.md)** - Maintenance behavior and background work control
 - **[Replication](replication.md)** - Clustering internals
 - **[Clustering Guide](../user-guides/clustering.md)** - User documentation
-- **[Performance](../performance/)** - Benchmarks and optimization
-- **[Development](../development/)** - Contributing guide
+- **[Performance](../performance/README.md)** - Benchmarks and optimization
+- **[Development](../development/README.md)** - Contributing guide
 
 ---
 

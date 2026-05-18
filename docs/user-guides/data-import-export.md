@@ -196,10 +196,10 @@ curl -X POST http://localhost:7474/gdpr/delete \
 
 ## Related Documentation
 
-- **[Getting Started](../getting-started/)** - Installation guide
+- **[Getting Started](../getting-started/README.md)** - Installation guide
 - **[Cypher Queries](cypher-queries.md)** - Query language reference
-- **[API Reference](../api-reference/)** - Complete API docs
+- **[API Reference](../api-reference/README.md)** - Complete API docs
 
 ---
 
-**Ready to migrate?** → **[Getting Started](../getting-started/)**
+**Ready to migrate?** → **[Getting Started](../getting-started/README.md)**

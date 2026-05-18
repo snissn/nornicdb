@@ -32,6 +32,6 @@ The mental model in every skill is Neo4j Cypher with NornicDB extensions noted e
 
 ## See also
 
-- [`docs/user-guides/`](../user-guides/) — long-form human documentation for the same features.
-- [`docs/features/`](../features/) — feature overviews and architecture references.
+- [`docs/user-guides/`](../user-guides/README.md) — long-form human documentation for the same features.
+- [`docs/features/`](../features/README.md) — feature overviews and architecture references.
 - [`docs/operations/configuration.md`](../operations/configuration.md) — environment variable and YAML configuration reference.

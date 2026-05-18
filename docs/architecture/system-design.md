@@ -363,4 +363,4 @@ go test ./pkg/mcp/... -run Integration
 
 ---
 
-_See also: [Vector Search Guide](../user-guides/vector-search.md) | [User Guides](../user-guides/) | [API Reference](../api-reference/)_
+_See also: [Vector Search Guide](../user-guides/vector-search.md) | [User Guides](../user-guides/README.md) | [API Reference](../api-reference/README.md)_

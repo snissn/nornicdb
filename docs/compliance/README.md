@@ -29,4 +29,4 @@ This section maps regulatory requirements to NornicDB controls and procedures.
 
 - Runtime security controls: [../security/README.md](../security/README.md)
 - Production operations and runbooks: [../operations/README.md](../operations/README.md)
-- Symptom-based routing: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
+- Symptom-based routing: [../issues-index.md](../issues-index.md)

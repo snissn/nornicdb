@@ -11,16 +11,16 @@ The Prometheus registry is the canonical metrics contract. OTEL metric export re
 
 ## Endpoints
 
-| Endpoint | Auth Required | Description |
-|----------|---------------|-------------|
-| `:7474/health` | No | Legacy basic health check |
-| `:7474/status` | Yes | Detailed status |
-| `:7474/metrics` | Yes | Legacy authenticated metrics endpoint |
-| `:9090/metrics` | No | Preferred telemetry listener metrics endpoint |
-| `:9090/livez` | No | Process liveness |
-| `:9090/readyz` | No | Readiness and warm-up phase |
-| `:9090/version` | No | Plain-text build version |
-| `127.0.0.1:9091/debug/pprof/*` | No | Opt-in profiling listener |
+| Endpoint                       | Auth Required | Description                                   |
+| ------------------------------ | ------------- | --------------------------------------------- |
+| `:7474/health`                 | No            | Legacy basic health check                     |
+| `:7474/status`                 | Yes           | Detailed status                               |
+| `:7474/metrics`                | Yes           | Legacy authenticated metrics endpoint         |
+| `:9090/metrics`                | No            | Preferred telemetry listener metrics endpoint |
+| `:9090/livez`                  | No            | Process liveness                              |
+| `:9090/readyz`                 | No            | Readiness and warm-up phase                   |
+| `:9090/version`                | No            | Plain-text build version                      |
+| `127.0.0.1:9091/debug/pprof/*` | No            | Opt-in profiling listener                     |
 
 The `:9090` telemetry listener is the preferred scrape target. The `:7474/metrics` data-plane endpoint remains available for migration compatibility, but the observability ADR treats the telemetry listener as the stable monitoring surface.
 
@@ -31,7 +31,7 @@ The `:9090` telemetry listener is the preferred scrape target. The `:7474/metric
 - When OTLP push is enabled, the OTEL pipeline exports the same measurements rather than a second, separately-maintained metric tree.
 - Tenant-scoped labels can be disabled with `observability.metrics.tenant_labels_enabled` when database labels would be too sensitive or too high-cardinality for a deployment.
 
-For the architecture-level contract, see [ADR 0001](../architecture/adr/0001-observability.md). For the generated catalog, see [metrics-reference.md](metrics-reference.md).
+For the architecture-level contract, see [Observability](../architecture/adr/0001-observability.md). For the generated catalog, see [metrics-reference.md](metrics-reference.md).
 
 ## Health Check
 
@@ -180,18 +180,18 @@ nornicdb_knowledge_policy_suppressions_total{entity_kind="node",reason="below_th
 
 The knowledge-policy subsystem adds a dedicated `nornicdb_knowledge_policy_*` family. These metrics are the primary OTEL/Prometheus signals for decay, suppression, on-access mutation work, and deindex churn.
 
-| Metric | Type | Use |
-|--------|------|-----|
-| `nornicdb_knowledge_policy_scored_total` | Counter | Total visible, suppressed, and no-decay scoring evaluations |
-| `nornicdb_knowledge_policy_decay_score` | Histogram | Score distribution, sampled 1 in 32 |
-| `nornicdb_knowledge_policy_suppressions_total` | Counter | Why suppressions happen |
-| `nornicdb_knowledge_policy_access_flush_batch_rows` | Histogram | Batch pressure in the access flusher |
-| `nornicdb_knowledge_policy_access_flush_duration_seconds` | Histogram | Cost of a flush cycle |
-| `nornicdb_knowledge_policy_access_flush_buffer_fullness` | Gauge | Backpressure tripwire for the flush buffer |
-| `nornicdb_knowledge_policy_on_access_mutations_total` | Counter | Promotion-policy mutation workload |
-| `nornicdb_knowledge_policy_deindex_enqueued_total` | Counter | Secondary-index cleanup workload after suppression |
-| `nornicdb_knowledge_policy_read_filter_dropped_total` | Counter | Read-path drops caused by visibility filtering |
-| `nornicdb_knowledge_policy_reconcile_total` | Counter | Schema or startup-driven reconcile activity |
+| Metric                                                    | Type      | Use                                                         |
+| --------------------------------------------------------- | --------- | ----------------------------------------------------------- |
+| `nornicdb_knowledge_policy_scored_total`                  | Counter   | Total visible, suppressed, and no-decay scoring evaluations |
+| `nornicdb_knowledge_policy_decay_score`                   | Histogram | Score distribution, sampled 1 in 32                         |
+| `nornicdb_knowledge_policy_suppressions_total`            | Counter   | Why suppressions happen                                     |
+| `nornicdb_knowledge_policy_access_flush_batch_rows`       | Histogram | Batch pressure in the access flusher                        |
+| `nornicdb_knowledge_policy_access_flush_duration_seconds` | Histogram | Cost of a flush cycle                                       |
+| `nornicdb_knowledge_policy_access_flush_buffer_fullness`  | Gauge     | Backpressure tripwire for the flush buffer                  |
+| `nornicdb_knowledge_policy_on_access_mutations_total`     | Counter   | Promotion-policy mutation workload                          |
+| `nornicdb_knowledge_policy_deindex_enqueued_total`        | Counter   | Secondary-index cleanup workload after suppression          |
+| `nornicdb_knowledge_policy_read_filter_dropped_total`     | Counter   | Read-path drops caused by visibility filtering              |
+| `nornicdb_knowledge_policy_reconcile_total`               | Counter   | Schema or startup-driven reconcile activity                 |
 
 Practical interpretation:
 
@@ -216,10 +216,10 @@ Those spans are the right place to investigate long-running flush cycles, schema
 ```yaml
 # prometheus.yml
 scrape_configs:
-  - job_name: 'nornicdb'
+  - job_name: "nornicdb"
     static_configs:
-      - targets: ['localhost:9090']
-    metrics_path: '/metrics'
+      - targets: ["localhost:9090"]
+    metrics_path: "/metrics"
 ```
 
 In Kubernetes, prefer a `ServiceMonitor` or `PodMonitor` bound to the telemetry port rather than scraping the data plane.
@@ -471,7 +471,6 @@ exit 0
 - **[Troubleshooting](troubleshooting.md)** - Common issues
 - **[Metrics Reference](metrics-reference.md)** - Auto-generated metric catalog
 - **[Knowledge Policy Metrics](../observability/knowledge-policy-metrics.md)** - Detailed knowledge-policy metric reference
-- **[ADR 0001: Observability](../architecture/adr/0001-observability.md)** - Telemetry architecture and contract
+- **[Observability](../architecture/adr/0001-observability.md)** - Telemetry architecture and contract
 - **[pprof Quick Guide](../performance/pprof-quick-guide.md)** - Interactive profiling workflow
 - **[Audit Logging](../compliance/audit-logging.md)** - Security monitoring
-

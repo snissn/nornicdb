@@ -861,4 +861,4 @@ No `Authorization` header on incoming request
 ## See Also
 
 - [Configuration Guide](../operations/configuration.md) - Configuration options for multi-database
-- [Future Features Plan](../architecture/MULTI_DB_FUTURE_FEATURES.md) - Plans for cross-database queries
+- [Future Features Plan](../architecture/multi-db-future-features.md) - Plans for cross-database queries

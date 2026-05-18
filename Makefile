@@ -834,7 +834,6 @@ else
 endif
 endif
 
-# LOG-09 falsifiability gate (Phase 2 / ADR-0001 §2.5).
 #
 # Rejects two forbidden patterns in the four LOG-01 business packages
 # (and cmd/nornicdb), so the slog migration cannot regress in CI:

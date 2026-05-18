@@ -492,7 +492,7 @@ RETURN
   duration({days: 7}) AS oneWeek
 ```
 
-See [Cypher Functions Reference](../api-reference/cypher-functions/) for complete list.
+See [Cypher Functions Reference](../api-reference/cypher-functions/README.md) for complete list.
 
 ## Aggregations
 
@@ -680,7 +680,7 @@ RETURN city
 
 ## ⏭️ Next Steps
 
-- **[Cypher Functions Reference](../api-reference/cypher-functions/)** - Complete function list
+- **[Cypher Functions Reference](../api-reference/cypher-functions/README.md)** - Complete function list
 - **[Graph Traversal](graph-traversal.md)** - Advanced pattern matching
 - **[Complete Examples](complete-examples.md)** - Full applications
 - **[Performance Guide](../performance/searching.md)** - Query optimization

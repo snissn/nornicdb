@@ -26,4 +26,4 @@ This section contains benchmark evidence, profiling guides, and tuning playbooks
 
 - Product usage guides: [../user-guides/README.md](../user-guides/README.md)
 - Operations runbooks: [../operations/README.md](../operations/README.md)
-- Symptom-based issue routing: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
+- Symptom-based issue routing: [../issues-index.md](../issues-index.md)

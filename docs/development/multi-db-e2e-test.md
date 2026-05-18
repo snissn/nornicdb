@@ -763,7 +763,7 @@ After completing this test:
 ## Related Documentation
 
 - [Multi-Database User Guide](../user-guides/multi-database.md)
-- [Multi-Database Architecture](../architecture/MULTI_DB_IMPLEMENTATION_SPEC.md)
+- [Multi-Database Architecture](../architecture/multi-db-implementation-spec.md)
 - [Composite Databases Guide](../user-guides/multi-database.md#composite-databases)
-- [Future Features](../architecture/MULTI_DB_FUTURE_FEATURES.md)
+- [Future Features](../architecture/multi-db-future-features.md)
 

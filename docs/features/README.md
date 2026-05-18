@@ -33,4 +33,4 @@ Use this page to find a feature area quickly, then follow links to canonical how
 
 - Task-oriented usage: [../user-guides/README.md](../user-guides/README.md)
 - Protocol/API details: [../api-reference/README.md](../api-reference/README.md)
-- Symptom-to-doc routing: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
+- Symptom-to-doc routing: [../issues-index.md](../issues-index.md)

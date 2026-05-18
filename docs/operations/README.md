@@ -9,7 +9,7 @@ This section is the canonical runbook set for deploying, operating, and recoveri
 - Environment variables: [environment-variables.md](environment-variables.md)
 - Retention policy setup: [../user-guides/retention-policies.md](../user-guides/retention-policies.md)
 - Symptom-based triage: [troubleshooting.md](troubleshooting.md)
-- Global issue map: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
+- Global issue map: [../issues-index.md](../issues-index.md)
 
 ## Common Tasks
 

@@ -375,7 +375,7 @@ See **[Cursor Chat Mode Guide](../ai-agents/chat-modes.md)** for detailed usage.
 - **[MCP Tools Quick Reference](../features/mcp-integration.md)** - Tool cheat sheet
 - **[Vector Search Guide](../user-guides/vector-search.md)** - Learn semantic search
 - **[Cypher Queries](../user-guides/cypher-queries.md)** - Master Neo4j queries
-- **[API Reference](../api-reference/)** - Complete API docs
+- **[API Reference](../api-reference/README.md)** - Complete API docs
 
 ## Troubleshooting
 

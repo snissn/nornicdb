@@ -341,4 +341,4 @@ go test ./pkg/cypher/... -run "Cache|Security" -v
 
 **See Also:**
 - [HTTP Security](http-security.md) - Network-level protections
-- [Compliance Guide](../compliance/) - Regulatory requirements
+- [Compliance Guide](../compliance/README.md) - Regulatory requirements

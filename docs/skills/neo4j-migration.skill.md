@@ -7,7 +7,7 @@ description: Migrate from Neo4j 5 to NornicDB end-to-end over Bolt. Covers schem
 
 NornicDB speaks Bolt and Cypher. Migration is a Bolt → Bolt replay using the same drivers Neo4j users already have (`neo4j`, `neo4j-driver`, `neo4j-go-driver/v5`). No protocol bridge, no ETL service.
 
-This skill covers the migration plan and the exact query shapes used. Runnable scripts live in [`scripts/migration/neo4j/`](../../scripts/migration/neo4j/).
+This skill covers the migration plan and the exact query shapes used. Runnable scripts live in [`scripts/migration/neo4j/`](https://github.com/orneryd/nornicdb/tree/main/scripts/migration/neo4j).
 
 ## Phase order (do not reorder)
 
@@ -180,6 +180,6 @@ Common flags: `--labels A,B`, `--types T,U`, `--skip-schema | --skip-nodes | --s
 ## See also
 - [`bolt-client.skill.md`](bolt-client.skill.md) — Bolt connection, retry classification, MERGE under concurrent writers.
 - [`cypher-queries.skill.md`](cypher-queries.skill.md) — the hot-path catalog this migration's UNWIND/MERGE shapes target.
-- [`scripts/migration/neo4j/`](../../scripts/migration/neo4j/) — Python, Go, Node migration scripts.
+- [`scripts/migration/neo4j/`](https://github.com/orneryd/nornicdb/tree/main/scripts/migration/neo4j) — Python, Go, Node migration scripts.
 - [`docs/neo4j-migration/cypher-compatibility.md`](../neo4j-migration/cypher-compatibility.md) — full Cypher feature parity matrix.
 - [`docs/performance/hot-path-query-cookbook.md`](../performance/hot-path-query-cookbook.md) — the long-form cookbook the script's batch shapes pin to.

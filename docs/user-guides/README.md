@@ -56,4 +56,4 @@ Use this section for task-oriented product workflows and examples.
 - API details and signatures: [../api-reference/README.md](../api-reference/README.md)
 - Feature capability index: [../features/README.md](../features/README.md)
 - Performance tuning and benchmarks: [../performance/README.md](../performance/README.md)
-- Symptom-based issue routing: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
+- Symptom-based issue routing: [../issues-index.md](../issues-index.md)

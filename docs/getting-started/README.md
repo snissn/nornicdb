@@ -38,5 +38,5 @@ Use this section to install NornicDB quickly and run your first successful query
 
 ## If Something Fails During Setup
 
-- Symptom-based index: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
+- Symptom-based index: [../issues-index.md](../issues-index.md)
 - Ops troubleshooting: [../operations/troubleshooting.md](../operations/troubleshooting.md)

@@ -329,8 +329,8 @@ Now that you know the basics:
 
 1. **[Vector Search Guide](../user-guides/vector-search.md)** - Semantic search
 2. **[Complete Examples](../user-guides/complete-examples.md)** - Full applications
-3. **[Cypher Functions Reference](../api-reference/cypher-functions/)** - All functions
-4. **[Advanced Topics](../advanced/)** - K-Means clustering, embeddings, custom functions
+3. **[Cypher Functions Reference](../api-reference/cypher-functions/README.md)** - All functions
+4. **[Advanced Topics](../advanced/README.md)** - K-Means clustering, embeddings, custom functions
 
 ## 🆘 Common Issues
 
@@ -349,4 +349,4 @@ Now that you know the basics:
 ---
 
 **Need more examples?** → **[Complete Examples](../user-guides/complete-examples.md)**  
-**Ready for advanced features?** → **[User Guides](../user-guides/)**
+**Ready for advanced features?** → **[User Guides](../user-guides/README.md)**

@@ -29,4 +29,4 @@ This section is the canonical source for runtime security controls.
 
 - Auth failures (`401`/`403`): [../operations/troubleshooting.md#authentication-issues](../operations/troubleshooting.md#authentication-issues)
 - Misconfigured security env/config: [../operations/configuration.md](../operations/configuration.md)
-- Security symptom triage map: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
+- Security symptom triage map: [../issues-index.md](../issues-index.md)

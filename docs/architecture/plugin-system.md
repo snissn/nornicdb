@@ -326,7 +326,7 @@ RETURN my.hello('World') AS greeting
 
 ## Related Documentation
 
-- [Functions Index](../api-reference/cypher-functions/) - Built-in functions
+- [Functions Index](../api-reference/cypher-functions/README.md) - Built-in functions
 - [APOC Compatibility](../features/apoc-functions.md) - APOC function status
 - [Contributing](../contributing.md) - How to contribute plugins
 
