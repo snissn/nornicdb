@@ -44,40 +44,39 @@ NornicDB provides features to help organizations achieve SOC2 compliance for the
 
 ### Authentication
 
+JWT-based authentication is enabled by setting `NORNICDB_AUTH=admin/password` and `NORNICDB_AUTH_JWT_SECRET=<32+ chars>`. The minimum password length is configurable; password complexity rules and MFA are not currently exposed.
+
 ```yaml
 auth:
   enabled: true
-  jwt:
-    algorithm: HS256
-    expiry: 24h
-  password:
-    min_length: 12
-    require_complexity: true
-  mfa:
-    enabled: true  # When available
+  username: admin
+  password: "${ADMIN_PASSWORD}"
+  jwt_secret: "${NORNICDB_AUTH_JWT_SECRET}"
+  token_expiry: 24h
+  min_password_length: 12
 ```
 
 ### Authorization
 
-```yaml
-rbac:
-  enabled: true
-  roles:
-    - name: admin
-      permissions: [read, write, admin]
-    - name: operator
-      permissions: [read, write]
-    - name: viewer
-      permissions: [read]
-```
+NornicDB ships built-in `admin`, `editor`, and `viewer` roles. Custom roles, per-database access (allowlist), and per-(role, database) read/write privileges are managed at runtime through the `/auth/roles`, `/auth/access/databases`, and `/auth/access/privileges` admin APIs (see [RBAC](rbac.md) and [Per-Database RBAC](../security/per-database-rbac.md)).
 
 ### Access Reviews
 
+There is no `nornicdb soc2 access-review` subcommand. Generate access reviews from the audit log JSONL file (default `/var/log/nornicdb/audit.log`) and the live role/allowlist state:
+
 ```bash
-# Generate access review report
-nornicdb soc2 access-review \
-  --period monthly \
-  --output access-review-december.pdf
+# Active users and roles
+curl -s http://localhost:7474/auth/users -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Allowlist (which roles can see which databases)
+curl -s http://localhost:7474/auth/access/databases -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Per-(role, database) read/write privileges
+curl -s http://localhost:7474/auth/access/privileges -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Login activity for the review window
+jq -c 'select(.event_type == "LOGIN" and .timestamp >= "2024-12-01")' \
+  /var/log/nornicdb/audit.log
 ```
 
 ## System Monitoring (CC7.2)
@@ -85,34 +84,17 @@ nornicdb soc2 access-review \
 ### Audit Logging
 
 ```yaml
-audit:
-  enabled: true
-  retention_days: 2555  # 7 years
-  
-  events:
-    - authentication
-    - authorization
-    - data_access
-    - configuration
-    - system_events
+compliance:
+  audit_enabled: true
+  audit_log_path: /var/log/nornicdb/audit.log
+  audit_retention_days: 2555  # 7 years (covers SOC2)
 ```
+
+NornicDB writes structured JSONL covering authentication, authorization, data access, configuration changes, and system events. Per-event-class toggles are not exposed; the logger emits all relevant categories whenever audit logging is enabled.
 
 ### Metrics & Alerting
 
-```yaml
-monitoring:
-  prometheus:
-    enabled: true
-    port: 9090
-  
-  alerts:
-    failed_logins:
-      threshold: 5
-      window: 15m
-    error_rate:
-      threshold: 1%
-      window: 5m
-```
+NornicDB exposes Prometheus-compatible metrics on the telemetry listener at `:9090/metrics` (and the legacy `/metrics` route on the data plane). Alerting thresholds are not configured inside NornicDB — define them in your Prometheus or Alertmanager rules. See [Monitoring](../operations/monitoring.md) for the metric catalog and an example alerting rule set.
 
 ### Health Checks
 
@@ -130,13 +112,7 @@ curl http://localhost:7474/status \
 
 ### Configuration Control
 
-```yaml
-# Version-controlled configuration
-config:
-  version: "1.2.3"
-  last_modified: "2024-12-01T10:00:00Z"
-  modified_by: "admin"
-```
+NornicDB does not annotate its YAML config with version metadata. Track configuration changes through your existing change-management process (Git history of the YAML, infrastructure-as-code review, etc.) and confirm the live state via `GET /admin/config` (admin permission required). Configuration changes also produce `CONFIG_CHANGE` events in the audit log when the relevant subsystem mutates settings at runtime.
 
 ### Change Logging
 
@@ -156,27 +132,17 @@ config:
 
 ### Security Defaults
 
-NornicDB ships with secure defaults:
+NornicDB ships with secure defaults applied at startup (`pkg/config.LoadDefaults` and `pkg/server`):
 
-```yaml
-# Secure defaults (as of v0.1.4)
-defaults:
-  address: "127.0.0.1"      # Localhost only
-  cors_enabled: false       # CORS disabled
-  rate_limiting: true       # Rate limiting enabled
-  encryption: false         # Enable for production
-  audit_logging: true       # Logging enabled
-```
+- Bind address: `127.0.0.1` (localhost only) — set `NORNICDB_ADDRESS=0.0.0.0` to expose externally.
+- CORS: disabled.
+- IP-based rate limiting: enabled (default 100 req/min, 3000 req/hour per IP, burst 10).
+- Storage encryption: opt-in (set `NORNICDB_ENCRYPTION_PROVIDER` and the relevant key material to enable; see [Encryption](encryption.md)).
+- Auth: opt-in (set `NORNICDB_AUTH=user/pass` and `NORNICDB_AUTH_JWT_SECRET`).
 
 ### Rate Limiting
 
-```yaml
-rate_limiting:
-  enabled: true
-  per_minute: 100
-  per_hour: 3000
-  burst: 10
-```
+Rate-limit defaults are set in code (`pkg/server`) and not currently exposed through public YAML. The defaults apply per IP: `100` requests/minute, `3000` requests/hour, `10` burst. To customise rate limiting in embedded deployments, set `Server.RateLimitEnabled`, `RateLimitPerMinute`, and `RateLimitPerHour` on the server config struct before starting the server.
 
 ## Backup & Recovery (A1.2, A1.3)
 
