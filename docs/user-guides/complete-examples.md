@@ -396,19 +396,21 @@ RETURN [comp IN nodes(path) | comp.name] AS dependencyChain
 Track what you're learning with spaced repetition.
 
 ```cypher
-// === Setup: decay profile for study facts ===
-// FLOOR 0.05 keeps a non-zero score on every fact (helps ranking) but
-// THRESHOLD 0.10 still suppresses the fact when its score is in
-// [0.05, 0.10) — the two levers are independent. Raise FLOOR to 0.10
+// === Setup: decay bundle + binding for study facts ===
+// scoreFloor 0.05 keeps a non-zero score on every fact (helps ranking) but
+// visibilityThreshold 0.10 still suppresses the fact when its score is in
+// [0.05, 0.10) — the two levers are independent. Raise scoreFloor to 0.10
 // if you want every study fact to stay visible forever.
-CREATE DECAY PROFILE study_fact_retention
-  HALF LIFE 5961600
-  DECAY FLOOR 0.05
-  VISIBILITY THRESHOLD 0.10;
+CREATE DECAY PROFILE study_fact_retention OPTIONS {
+  halfLifeSeconds: 5961600,
+  function: 'exponential',
+  scoreFloor: 0.05,
+  visibilityThreshold: 0.10
+};
 
-CREATE RETENTION BINDING study_fact_binding
-  FOR (n:StudyFact)
-  USING PROFILE study_fact_retention;
+CREATE DECAY PROFILE study_fact_binding
+FOR (n:StudyFact)
+APPLY { DECAY PROFILE 'study_fact_retention' };
 
 // === Create study session ===
 CREATE (session:StudySession {
