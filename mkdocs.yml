@@ -333,6 +333,7 @@ nav:
           - Neo4j-Compatible Streaming Driver Plan: plans/neo4j-compatible-streaming-driver-and-server-plan.md
           - GPU HNSW Construction Plan: plans/gpu-hnsw-construction-plan.md
           - Native Package Distribution Plan: plans/native-package-distribution-plan.md
+          - nornicdb-admin Import Plan: plans/nornicdb-admin-import-plan.md
           - UI Enhancements: plans/ui-enhancements.md
           - UI Grid: plans/ui-grid.md
       - Research:

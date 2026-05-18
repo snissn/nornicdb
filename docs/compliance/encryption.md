@@ -78,17 +78,15 @@ db, err := nornicdb.Open("/data", config)
 ### Server Configuration
 
 ```yaml
-# Enable TLS
-tls:
-  enabled: true
-  cert_file: /etc/nornicdb/server.crt
-  key_file: /etc/nornicdb/server.key
-  min_version: TLS1.3
-  
-  # Client certificate authentication (optional)
-  client_ca_file: /etc/nornicdb/ca.crt
-  client_auth: require  # none, request, require
+# Enable TLS for the HTTP listener
+server:
+  tls:
+    enabled: true
+    cert_file: /etc/nornicdb/server.crt
+    key_file: /etc/nornicdb/server.key
 ```
+
+For Bolt-side TLS, set `NORNICDB_BOLT_TLS_ENABLED=true` and configure the certificate files. For inter-cluster TLS see [Cluster Security](../operations/cluster-security.md). Client certificate authentication (`client_auth`) and explicit `min_version` selection are not configurable through the public YAML schema today; both default to standard library defaults.
 
 ### Generate Certificates
 
@@ -195,18 +193,11 @@ The overhead is acceptable for most use cases and provides complete protection.
 
 ### Checking Encryption Status
 
-```bash
-# Via API
-curl http://localhost:7474/api/status | jq '.encryption'
+NornicDB does not expose encryption status as a structured field on `/status`. To confirm encryption is active:
 
-# Output:
-{
-  "enabled": true,
-  "algorithm": "AES-256 (BadgerDB)",
-  "key_derivation": "PBKDF2-SHA256 (600k iterations)",
-  "scope": "full-database"
-}
-```
+- Check the server startup logs for the encryption-provider initialization line.
+- Inspect the wrapped DEK metadata file at `<data_dir>/db.kms_dek.json` (provider-backed modes).
+- Inspect the encryption audit log at `<data_dir>/encryption-audit.jsonl` (or the path set by `NORNICDB_ENCRYPTION_AUDIT_LOG_PATH`) for `KEY_GENERATED`, `KEY_DECRYPTED`, and `KEY_ROTATED` events.
 
 ## See Also
 

@@ -80,24 +80,29 @@ auth:
 
 ### Role-Based Access Control
 
-Define roles that enforce minimum-necessary access. Permissions control what each role can read, write, and administer:
+Define roles that enforce minimum-necessary access. NornicDB ships built-in `admin`, `editor`, and `viewer` roles, plus a runtime API for creating custom roles, assigning per-database access, and tuning per-(role, database) read/write privileges. Roles are managed at runtime, not in YAML:
 
-```yaml
-rbac:
-  enabled: true
-  default_role: none  # No access by default
-  roles:
-    - name: clinician
-      permissions: [read, write]
-      databases: [patient_records]
-    - name: admin
-      permissions: [read, write, manage_users, manage_databases]
-    - name: analyst
-      permissions: [read]
-      databases: [analytics]
+```bash
+# Create a "clinician" role
+curl -X POST http://localhost:7474/auth/roles \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "clinician"}'
+
+# Restrict the role to a specific database
+curl -X PUT http://localhost:7474/auth/access/databases \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"role": "clinician", "databases": ["patient_records"]}'
+
+# Grant read+write privileges within that database
+curl -X PUT http://localhost:7474/auth/access/privileges \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[{"role": "clinician", "database": "patient_records", "read": true, "write": true}]'
 ```
 
-Use per-database access control to restrict roles to specific databases, ensuring users only access the data they need.
+See [RBAC](rbac.md) and [Per-Database RBAC](../security/per-database-rbac.md) for the full surface, including the entitlements list and lockout-recovery procedures.
 
 ### Minimum Necessary Access
 
@@ -145,18 +150,16 @@ NornicDB logs all security-relevant events:
 
 ### Retention
 
-HIPAA requires audit records to be retained for at least 6 years:
+HIPAA requires audit records to be retained for at least 6 years. Configure under `compliance:`:
 
 ```yaml
-audit:
-  enabled: true
-  retention_days: 2555  # 7 years (exceeds HIPAA 6-year minimum)
-  alert_on_failures: true
-  integrity:
-    enabled: true
-    algorithm: SHA-256
-    chain: true  # Hash chain for tamper detection
+compliance:
+  audit_enabled: true
+  audit_log_path: "/var/log/nornicdb/audit.log"
+  audit_retention_days: 2555  # 7 years (exceeds HIPAA 6-year minimum)
 ```
+
+Hash-chained audit logs and integrity verification are properties of the audit subsystem itself (each entry includes a hash of the previous entry) and are not separately configurable.
 
 ---
 
@@ -164,17 +167,18 @@ audit:
 
 ### TLS Configuration
 
-All connections should use TLS 1.2 or higher:
+All connections should use TLS. Configure HTTP and Bolt listeners separately:
 
 ```yaml
-tls:
-  enabled: true
-  min_version: TLS1.2
-  preferred_version: TLS1.3
-  cipher_suites:
-    - TLS_AES_256_GCM_SHA384
-    - TLS_CHACHA20_POLY1305_SHA256
+server:
+  tls:
+    enabled: true
+    cert_file: /etc/nornicdb/server.crt
+    key_file: /etc/nornicdb/server.key
+  bolt_tls_enabled: true
 ```
+
+The minimum TLS version, preferred version, and cipher suites are not exposed through public YAML today; they default to standard library defaults (TLS 1.2 minimum, with strong-cipher selection).
 
 ### Certificate Setup
 
@@ -202,14 +206,7 @@ NornicDB protects data integrity through:
 
 ### Detection
 
-Configure security alerting to detect potential breaches:
-
-```yaml
-audit:
-  alert_on_failures: true
-  alert_on_bulk_access: true
-  bulk_access_threshold: 100  # Alert on large data reads
-```
+NornicDB does not expose declarative breach-detection thresholds (`alert_on_failures`, `alert_on_bulk_access`) through configuration. Instead, integrate the audit log JSONL stream with your existing SIEM or detection pipeline and define detection rules there. Audit events relevant to breach detection include `LOGIN_FAILED`, `ACCESS_DENIED`, `DATA_EXPORT`, and `SECURITY_ALERT` (see [Audit Logging](audit-logging.md)).
 
 Review audit logs regularly and integrate alerts with your organization's incident response workflow.
 

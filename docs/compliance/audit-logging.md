@@ -25,25 +25,17 @@ NornicDB provides immutable audit logging required by major regulatory framework
 
 ### Enable Audit Logging
 
+Audit settings live under `compliance:`:
+
 ```yaml
 # nornicdb.yaml
-audit:
-  enabled: true
-  log_path: /var/log/nornicdb/audit.log
-  
-  # Retention (SOC2 requires 7 years)
-  retention_days: 2555  # ~7 years
-  
-  # What to log
-  log_queries: true
-  log_auth: true
-  log_data_access: true
-  log_config_changes: true
-  
-  # Alerting
-  alert_on_failures: true
-  alert_threshold: 5  # Alert after 5 failed logins
+compliance:
+  audit_enabled: true
+  audit_log_path: "/var/log/nornicdb/audit.log"
+  audit_retention_days: 2555  # ~7 years (covers SOC2 7-year requirement)
 ```
+
+NornicDB does not expose per-event-class toggles (`log_queries`, `log_data_access`, etc.) or declarative alerting thresholds in configuration. The audit logger emits structured JSONL for every relevant event; route the file into your existing SIEM/detection pipeline if you need alerting on patterns like repeated failed logins.
 
 ### Code Example
 
@@ -220,14 +212,17 @@ logger.SetAlertCallback(func(event audit.Event) {
 
 ### Automatic Rotation
 
-```yaml
-audit:
-  rotation:
-    max_size: 100MB
-    max_age: 7d
-    max_backups: 90
-    compress: true
+The audit logger rotates automatically based on file size and elapsed time. Defaults: 100 MB rotation size, 24-hour rotation interval. These are configurable through the embedded Go API on `audit.Config`:
+
+```go
+config := audit.DefaultConfig()
+config.RotationSize = 100 * 1024 * 1024 // 100 MB
+config.RotationInterval = 24 * time.Hour
+config.RetentionDays = 2555
+config.SyncWrites = true
 ```
+
+There is no public YAML for rotation today; the file-size and interval values come from the embedded defaults unless your application code overrides them.
 
 ### Manual Rotation
 
