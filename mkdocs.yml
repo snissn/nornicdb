@@ -260,7 +260,7 @@ nav:
           - WAL Compaction: operations/wal-compaction.md
           - Durability: operations/durability.md
           - Storage Serialization: operations/storage-serialization.md
-          - MVCC Lifecycle Compaction Plan: operations/mvcc-lifecycle-compaction-plan.md
+          - MVCC Lifecycle and Compaction: operations/mvcc-lifecycle-compaction.md
       - Observability:
           - Monitoring: operations/monitoring.md
           - Metrics Reference: operations/metrics-reference.md

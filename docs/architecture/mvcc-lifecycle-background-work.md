@@ -166,4 +166,4 @@ Related documents:
 
 - [Historical Reads & MVCC Retention](../user-guides/historical-reads-mvcc-retention.md)
 - [MVCC Lifecycle Admin API](../user-guides/mvcc-lifecycle-admin-api.md)
-- [MVCC Lifecycle and Compaction Control Plan](../operations/mvcc-lifecycle-compaction-plan.md)
+- [MVCC Lifecycle and Compaction](../operations/mvcc-lifecycle-compaction.md)
