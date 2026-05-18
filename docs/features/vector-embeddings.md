@@ -262,7 +262,7 @@ Embeddings are indexed using an auto-selected strategy:
 ### Rebuild Index
 
 ```bash
-curl -X POST http://localhost:7474/admin/rebuild-index \
+curl -X POST http://localhost:7474/nornicdb/search/rebuild \
   -H "Authorization: Bearer $TOKEN"
 ```
 

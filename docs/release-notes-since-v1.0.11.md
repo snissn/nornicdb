@@ -395,12 +395,14 @@ Each role can now be restricted to a specific list of databases. This is stored 
 
 ```http
 # Grant "viewer" role access only to the "analytics" database
-PUT /admin/roles/viewer/databases
+PUT /auth/access/databases
 Content-Type: application/json
-["analytics"]
+{"role": "viewer", "databases": ["analytics"]}
 
-# Remove all restrictions (access all databases)
-DELETE /admin/roles/viewer/databases
+# Remove all restrictions (access all databases) — set databases to []
+PUT /auth/access/databases
+Content-Type: application/json
+{"role": "viewer", "databases": []}
 ```
 
 ### 3.2 Roles, Entitlements, and Privileges

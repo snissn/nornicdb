@@ -170,17 +170,22 @@ fmt.Printf("Data accesses: %d\n", report.DataAccesses)
 fmt.Printf("GDPR requests: %d\n", report.GDPRRequests)
 ```
 
-### CLI Reports
+### Searching Audit Logs
+
+NornicDB writes audit events as JSON Lines to the configured `log_path` (default `/var/log/nornicdb/audit.log`). Use standard tooling such as `jq`, `grep`, or your log-aggregation pipeline to query them:
 
 ```bash
-# Generate compliance report
-nornicdb audit report --from "2024-11-01" --to "2024-12-01"
+# Generate compliance report (last month)
+jq -c 'select(.timestamp >= "2024-11-01" and .timestamp < "2024-12-01")' \
+  /var/log/nornicdb/audit.log
 
-# Export for external analysis
-nornicdb audit export --format csv --output audit-november.csv
+# Export for external analysis (CSV)
+jq -r '[.timestamp, .event_type, .username, .ip_address, .success] | @csv' \
+  /var/log/nornicdb/audit.log > audit-november.csv
 
 # Search for specific events
-nornicdb audit search --user alice --type LOGIN_FAILED
+jq -c 'select(.username == "alice" and .event_type == "LOGIN_FAILED")' \
+  /var/log/nornicdb/audit.log
 ```
 
 ## Security Alerting
@@ -226,12 +231,12 @@ audit:
 
 ### Manual Rotation
 
-```bash
-# Rotate logs
-nornicdb audit rotate
+Audit log rotation is handled by the configured rotation policy (`max_size`, `max_age`, `max_backups`, `compress` under the `audit:` block). For ad-hoc archival, use standard log tooling:
 
-# Archive old logs
-nornicdb audit archive --before "2024-01-01" --output archive-2023.tar.gz
+```bash
+# Archive logs older than a date
+find /var/log/nornicdb -name 'audit.log.*' -newermt "2023-01-01" ! -newermt "2024-01-01" \
+  -print0 | tar -czvf archive-2023.tar.gz --null -T -
 ```
 
 ## Retention Management

@@ -266,19 +266,20 @@ RETURN e.username, e.ip_address, e.timestamp
 # System metrics
 curl http://localhost:7474/metrics -H "Authorization: Bearer $TOKEN"
 
-# Audit log summary
-nornicdb audit summary --period monthly
+# Audit log summary (last month)
+jq -s 'group_by(.event_type) | map({event_type: .[0].event_type, count: length})' \
+  /var/log/nornicdb/audit.log
 ```
 
 ### CC8.1 - Change Evidence
 
-```bash
-# Configuration history
-nornicdb config history --period yearly
+Configuration changes are recorded in the audit log via `event_type=CONFIG_CHANGE`. Pull configuration history with:
 
-# Change log
-nornicdb audit search --type CONFIG_CHANGE
+```bash
+jq -c 'select(.event_type == "CONFIG_CHANGE")' /var/log/nornicdb/audit.log
 ```
+
+The current effective configuration is exposed at `GET /admin/config` (admin permission required).
 
 ## Compliance Checklist
 

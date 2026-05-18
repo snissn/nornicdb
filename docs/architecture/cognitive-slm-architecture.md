@@ -899,21 +899,9 @@ NORNICDB_HEIMDALL_MODEL=qwen3-0.6b-instruct      # Reasoning SLM name
 NORNICDB_HEIMDALL_FALLBACK_MODEL=tinyllama-1.1b    # Fallback if primary OOM
 ```
 
-### 12.4 Model Hot-Swap
+### 12.4 Model Selection
 
-Models can be switched at runtime without restart:
-
-```go
-// POST /api/admin/models/load
-type LoadModelRequest struct {
-    ModelName string    `json:"model_name"`
-    Purpose   ModelType `json:"purpose"`
-    Force     bool      `json:"force"` // Unload current if needed
-}
-
-// GET /api/admin/models
-// Returns all available models and their status
-```
+Heimdall selects its model at startup from `NORNICDB_HEIMDALL_MODEL` (or YAML `heimdall.model`). Changing the active model requires restarting the server with the new value. Runtime hot-swap is not currently supported.
 
 ---
 

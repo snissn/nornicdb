@@ -108,8 +108,11 @@ htop
 
 1. **Check user role:**
    ```bash
-   # User needs appropriate permissions
-   nornicdb user update alice --role editor
+   # User needs appropriate permissions (admin token required)
+   curl -X PUT http://localhost:7474/auth/users/alice \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"roles": ["editor"]}'
    ```
 
 2. **Check endpoint permissions:**

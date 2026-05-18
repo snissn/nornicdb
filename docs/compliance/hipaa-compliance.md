@@ -215,14 +215,12 @@ Review audit logs regularly and integrate alerts with your organization's incide
 
 ### Response
 
-Use the audit log to investigate incidents:
+Use the audit log JSONL file (default `/var/log/nornicdb/audit.log`) to investigate incidents:
 
 ```bash
-# Generate a report of all access during an incident window
-nornicdb audit report \
-  --start "2026-03-01" \
-  --end "2026-03-15" \
-  --format json
+# Filter all access during an incident window
+jq -c 'select(.timestamp >= "2026-03-01" and .timestamp < "2026-03-15")' \
+  /var/log/nornicdb/audit.log
 ```
 
 ---
