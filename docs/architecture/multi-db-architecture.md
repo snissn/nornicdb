@@ -1,608 +1,199 @@
 # Multi-Database Architecture Reference
 
-This document records the design decisions behind NornicDB's multi-database surface, including the historical motivation for the features that ship today. The features listed below are **all implemented**: database aliases, per-database resource limits, and composite databases (with local + remote constituents). For day-to-day usage see [Multi-Database User Guide](../user-guides/multi-database.md).
+This document describes the design and shipping implementation of NornicDB's multi-database surface. For day-to-day usage see [Multi-Database User Guide](../user-guides/multi-database.md).
+
+The features listed in this document are **all implemented**:
+
+- Database aliases (`CREATE/DROP/SHOW ALIAS`).
+- Per-database resource limits (`ALTER DATABASE … SET LIMIT …`, `SHOW LIMITS`).
+- Composite databases with both **local** and **remote** constituents.
+- Schema merging across constituents (constraints + property/composite/fulltext/vector/range indexes).
+- Many-read / one-write distributed transaction semantics.
+- OIDC credential forwarding for remote constituents.
+
+Plain (non-composite) cross-database queries are **not** supported by design — composite databases are the supported route to query across multiple databases. Within a composite database, every query that touches a constituent must use a `USE <composite>.<alias>` Fabric subquery; plain `MATCH` on the composite root is rejected.
 
 ---
 
-## Table of Contents
+## Storage Layer
 
-1. [Composite Databases](#composite-databases)
-2. [Completed Features](#completed-features)
+### Key-prefix namespacing
+
+The base storage engine is shared across logical databases. Every key is prefixed with the database name (e.g. `nornic:node-uuid`) and a thin `NamespacedEngine` wrapper translates between the namespaced storage keys and the user-visible IDs.
+
+This means:
+
+- One BadgerDB process, many logical databases.
+- Complete isolation: no cross-database data leakage at the storage layer.
+- A single MVCC keyspace per logical database (so per-database lifecycle works independently).
+
+### Database catalog
+
+Database metadata lives in the `system` database under nodes labelled `_Database`, `_DatabaseAlias`, and `_DatabaseLimits`. The catalog is loaded into the `DatabaseManager` on startup and persisted on every mutation, so all server processes see the same view (relevant for HA standby and Raft deployments).
+
+---
+
+## Database Aliases
+
+`CREATE ALIAS <alias> FOR DATABASE <db>` creates an alternate name. Resolution happens at every routing entry point:
+
+- Bolt `HELLO`/`RUN` `database` extra
+- HTTP `/db/{name}/tx/commit`
+- Cypher `:USE <name>` and `USE <name>` clauses
+- GraphQL `database` field
+
+Each entry point resolves the alias to the canonical database name through `DatabaseManager.ResolveAlias` before the request reaches the executor or storage layer. Alias chains are explicitly disallowed — an alias can only point to a real database.
+
+### Reserved names
+
+Aliases cannot mask `system`, `nornic`, or any other reserved name, and an alias cannot collide with an existing database name. Conflict is detected at the catalog write before the alias is persisted.
+
+---
+
+## Per-Database Resource Limits
+
+Limits are stored as part of the database catalog (`pkg/multidb/limits.go`) and applied at runtime by enforcement middleware (`pkg/multidb/enforcement.go`).
+
+The full enforced set:
+
+| Limit | Type | Effect |
+|---|---|---|
+| `max_nodes` | int | Cap on the node count for the database. |
+| `max_edges` | int | Cap on the edge count for the database. |
+| `max_bytes` | int | Cap on the cumulative serialized byte size of nodes + edges; tracked incrementally for O(1) checks. |
+| `max_query_time` | duration string | Per-query execution timeout. |
+| `max_results` | int | Per-query result-row cap. |
+| `max_concurrent_queries` | int | Concurrency cap for the database. |
+| `max_connections` | int | Concurrent client connection cap. |
+| `max_queries_per_second` | int | Token-bucket rate limit for reads + writes. |
+| `max_writes_per_second` | int | Separate cap for write operations only. |
+
+When a limit is hit, the operation fails with a clear error including current usage, the configured cap, and (for `max_bytes`) the size of the entity being created.
 
 ---
 
 ## Composite Databases
 
-**Status:** ✅ Implemented (v1.2)
+Composite databases are NornicDB's sharding/federation surface. A composite is a virtual top-level database that routes Cypher subqueries to constituent physical databases. Every composite operation is expressed through `USE <composite>.<alias>` Fabric-style subqueries.
 
-### Overview
+### Architecture
 
-Composite Databases (also known as Neo4j Fabric) enable creating a virtual database that spans multiple physical databases. Unlike cross-database queries which require explicit database references in each query, composite databases provide a unified view where queries appear to operate on a single database, while transparently accessing data from multiple constituent databases.
-
-**This feature supersedes the need for explicit cross-database querying** by providing a cleaner, more intuitive abstraction layer.
-
-**See [Multi-Database User Guide](../user-guides/multi-database.md#composite-databases) for usage instructions.**
-
-### Key Concepts
-
-1. **Composite Database**: A virtual database that doesn't store data itself
-2. **Constituent Databases**: Physical databases that contain the actual data
-3. **Database Aliases**: References from composite database to constituent databases
-4. **Transparent Querying**: Queries against composite database automatically access all constituents
-
-### Use Cases
-
-- **Analytics Across Tenants**: Aggregate data from multiple tenant databases without explicit database references
-- **Unified Reporting**: Generate reports across multiple databases as if they were one
-- **Data Federation**: Query distributed data across multiple databases transparently
-- **Multi-Region Queries**: Access data from databases in different regions/locations
-- **Legacy Migration**: Gradually migrate data while maintaining unified access
-
-### Design Approach
-
-#### Composite Database Structure
-
-```go
-type CompositeDatabaseInfo struct {
-    Name            string              // Composite database name
-    Type            string              // "composite"
-    Constituents    []ConstituentRef    // List of constituent databases
-    CreatedAt       time.Time
-    UpdatedAt       time.Time
-}
-
-type ConstituentRef struct {
-    Alias           string  // Alias name within composite database
-    DatabaseName    string  // Actual database name (or alias)
-    Type            string  // "local" or "remote" (future)
-    AccessMode      string  // "read", "write", "read_write"
-}
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Client Query                                    │
+│       USE nornic                                                 │
+│       CALL { USE nornic.tr ... }                                 │
+│       CALL { USE nornic.txt ... }                                │
+└────────────┬────────────────────────────────────────────────────┘
+             │
+   ┌─────────▼─────────┐
+   │ Composite Engine  │  pkg/storage/composite_engine.go
+   │ (read facade)     │  Reads route to all constituents and merge
+   └─────────┬─────────┘
+             │ subquery USE <alias> dispatch
+   ┌─────────┼──────────────────────┐
+   │         │                      │
+┌──▼───┐  ┌──▼───┐               ┌──▼───────────┐
+│ tr   │  │ txt  │               │ rx (remote)  │
+│local │  │local │               │  HTTP /db    │
+└──────┘  └──────┘               └──────────────┘
 ```
 
-#### Query Execution Flow
+### Local vs remote constituents
 
-1. **Query Routing**: Identify which constituents are needed for the query
-2. **Parallel Execution**: Execute query against relevant constituents in parallel
-3. **Result Merging**: Combine results from all constituents
-4. **Transparent Return**: Return unified results as if from single database
+`CREATE COMPOSITE DATABASE` accepts either a local `ALIAS <alias> FOR DATABASE <db>` clause or a remote variant with `AT '<url>'`:
 
-### Implementation Strategy
-
-#### Phase 1: Composite Database Management
-
-**Files:** `pkg/multidb/composite.go` (new), `pkg/multidb/manager.go`
-
-1. **Composite Database Storage**:
-   ```go
-   // Store composite database metadata in system database
-   type CompositeDatabaseInfo struct {
-       Name         string
-       Type         string  // "composite"
-       Constituents []ConstituentRef
-       CreatedAt    time.Time
-       UpdatedAt    time.Time
-   }
-   
-   // Add to DatabaseInfo
-   type DatabaseInfo struct {
-       Name          string
-       Type          string  // "standard", "system", "composite"
-       Constituents  []ConstituentRef  // Only for composite type
-       // ... existing fields
-   }
-   ```
-
-2. **Management Commands**:
-   ```cypher
-   -- Create composite database
-   CREATE COMPOSITE DATABASE analytics
-     ALIAS tenant_a FOR DATABASE tenant_a
-     ALIAS tenant_b FOR DATABASE tenant_b
-     ALIAS tenant_c FOR DATABASE tenant_c
-   
-   -- Add constituent to existing composite
-   ALTER COMPOSITE DATABASE analytics
-     ADD ALIAS tenant_d FOR DATABASE tenant_d
-   
-   -- Remove constituent
-   ALTER COMPOSITE DATABASE analytics
-     DROP ALIAS tenant_c
-   
-   -- Drop composite database
-   DROP COMPOSITE DATABASE analytics
-   
-   -- Show composite databases
-   SHOW COMPOSITE DATABASES
-   SHOW CONSTITUENTS FOR COMPOSITE DATABASE analytics
-   ```
-
-#### Phase 2: Composite Database Executor
-
-**File:** `pkg/cypher/composite_executor.go` (new)
-
-1. **Composite Query Executor**:
-   ```go
-   type CompositeExecutor struct {
-       dbManager     *multidb.DatabaseManager
-       compositeInfo *CompositeDatabaseInfo
-       executors     sync.Map  // map[string]*StorageExecutor per constituent
-   }
-   
-   func (e *CompositeExecutor) Execute(
-       ctx context.Context,
-       query string,
-       params map[string]interface{},
-   ) (*ExecuteResult, error) {
-       // 1. Analyze query to determine which constituents are needed
-       constituents := e.analyzeQuery(query)
-       
-       // 2. Execute query against each constituent in parallel
-       results := e.executeParallel(ctx, constituents, query, params)
-       
-       // 3. Merge results based on query type
-       return e.mergeResults(results, query)
-   }
-   ```
-
-2. **Query Analysis**:
-   - **Label-based routing**: Route queries to constituents based on labels
-   - **Property-based routing**: Route based on property values (e.g., database_id)
-   - **Full scan**: Query all constituents if routing is ambiguous
-
-3. **Result Merging Strategies**:
-   - **UNION**: Combine all results (MATCH queries)
-   - **AGGREGATION**: Sum/Count across constituents (COUNT, SUM, etc.)
-   - **DISTINCT**: Remove duplicates across constituents
-   - **ORDER BY**: Sort merged results
-   - **LIMIT**: Apply limit after merging
-
-#### Phase 3: Query Routing & Optimization
-
-**File:** `pkg/cypher/composite_router.go` (new)
-
-1. **Routing Strategies**:
-   ```go
-   type RoutingStrategy interface {
-       RouteQuery(query *Query, constituents []ConstituentRef) []string
-   }
-   
-   // Label-based routing: route to constituents that have nodes with specific labels
-   type LabelRouting struct {
-       labelMap map[string][]string  // label -> constituent aliases
-   }
-   
-   // Property-based routing: route based on property values
-   type PropertyRouting struct {
-       property string
-       valueMap map[interface{}]string  // property value -> constituent alias
-   }
-   
-   // Full scan: query all constituents
-   type FullScanRouting struct{}
-   ```
-
-2. **Routing Configuration**:
-   ```cypher
-   -- Configure label-based routing
-   ALTER COMPOSITE DATABASE analytics
-     SET ROUTING LABEL Person TO tenant_a, tenant_b
-     SET ROUTING LABEL Order TO tenant_c
-   
-   -- Configure property-based routing
-   ALTER COMPOSITE DATABASE analytics
-     SET ROUTING PROPERTY database_id
-       WHERE database_id = 'db_a' TO db_a
-       WHERE database_id = 'db_b' TO db_b
-   ```
-
-#### Phase 4: Write Operations
-
-1. **Write Routing**:
-   - Route writes to appropriate constituent based on routing rules
-   - Support explicit constituent selection: `CREATE (n:Person) IN tenant_a`
-   - Default routing when ambiguous
-
-2. **Transaction Handling**:
-   - Single-constituent transactions: Normal ACID guarantees
-   - Multi-constituent transactions: Two-phase commit (future enhancement)
-
-#### Phase 5: Performance Optimization
-
-1. **Parallel Execution**:
-   ```go
-   func (e *CompositeExecutor) executeParallel(
-       ctx context.Context,
-       constituents []string,
-       query string,
-       params map[string]interface{},
-   ) map[string]*ExecuteResult {
-       var wg sync.WaitGroup
-       results := make(map[string]*ExecuteResult)
-       errors := make(map[string]error)
-       
-       for _, alias := range constituents {
-           wg.Add(1)
-           go func(alias string) {
-               defer wg.Done()
-               executor := e.getExecutor(alias)
-               result, err := executor.Execute(ctx, query, params)
-               if err != nil {
-                   errors[alias] = err
-               } else {
-                   results[alias] = result
-               }
-           }(alias)
-       }
-       
-       wg.Wait()
-       return results
-   }
-   ```
-
-2. **Caching**:
-   - Cache routing decisions
-   - Cache query results per constituent
-   - Invalidate on constituent updates
-
-3. **Query Optimization**:
-   - Push filters down to constituents
-   - Use indexes from each constituent
-   - Minimize data transfer
-
-### Example Implementation
-
-```go
-// pkg/multidb/composite.go
-
-type CompositeDatabaseManager struct {
-    dbManager *DatabaseManager
-    composites map[string]*CompositeDatabaseInfo
-    mu sync.RWMutex
-}
-
-func (m *CompositeDatabaseManager) CreateCompositeDatabase(
-    name string,
-    constituents []ConstituentRef,
-) error {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-    
-    // Validate name
-    if m.dbManager.Exists(name) {
-        return ErrDatabaseExists
-    }
-    
-    // Validate all constituents exist
-    for _, ref := range constituents {
-        if !m.dbManager.Exists(ref.DatabaseName) {
-            return fmt.Errorf("constituent database '%s' not found", ref.DatabaseName)
-        }
-    }
-    
-    // Create composite database info
-    info := &DatabaseInfo{
-        Name: name,
-        Type: "composite",
-        Constituents: constituents,
-        CreatedAt: time.Now(),
-        UpdatedAt: time.Now(),
-        Status: "online",
-    }
-    
-    // Store in system database
-    return m.dbManager.persistDatabaseInfo(info)
-}
-
-func (m *CompositeDatabaseManager) GetCompositeStorage(
-    name string,
-) (storage.Engine, error) {
-    m.mu.RLock()
-    info, exists := m.composites[name]
-    m.mu.RUnlock()
-    
-    if !exists {
-        return nil, ErrDatabaseNotFound
-    }
-    
-    // Return composite engine that routes to constituents
-    return NewCompositeEngine(m.dbManager, info), nil
-}
+```cypher
+CREATE COMPOSITE DATABASE nornic
+  ALIAS tr  FOR DATABASE nornic_tr
+  ALIAS txt FOR DATABASE nornic_txt
+    AT "https://shard-b.example/nornic-db"
+    OIDC CREDENTIAL FORWARDING
+    TYPE remote
+    ACCESS read_write
 ```
 
-```go
-// pkg/cypher/composite_executor.go
+Implementation files:
 
-type CompositeExecutor struct {
-    dbManager     *multidb.DatabaseManager
-    compositeInfo *multidb.CompositeDatabaseInfo
-    router        *CompositeRouter
-    executors     sync.Map  // map[string]*StorageExecutor
-}
+- `pkg/cypher/composite_commands.go` — DDL parser and validation.
+- `pkg/multidb/composite.go` — composite catalog and constituent registry.
+- `pkg/storage/composite_engine.go` — read facade that fans out across constituents and merges + dedupes results.
+- `pkg/cypher/executor_fabric.go` — Fabric subquery executor that routes `USE <composite>.<alias>` blocks.
 
-func (e *CompositeExecutor) Execute(
-    ctx context.Context,
-    query string,
-    params map[string]interface{},
-) (*ExecuteResult, error) {
-    // Parse query
-    ast, err := e.parseQuery(query)
-    if err != nil {
-        return nil, err
-    }
-    
-    // Determine which constituents to query
-    constituents := e.router.RouteQuery(ast, e.compositeInfo.Constituents)
-    
-    if len(constituents) == 0 {
-        return &ExecuteResult{Rows: []map[string]interface{}{}}, nil
-    }
-    
-    // Execute in parallel
-    results := e.executeParallel(ctx, constituents, query, params)
-    
-    // Merge results
-    return e.mergeResults(results, ast)
-}
+For remote constituents the HTTP `/db/{db}/tx/commit` endpoint is used as the wire protocol. Auth is forwarded via `OIDC CREDENTIAL FORWARDING` (the caller's `Authorization` header is propagated), or via `USER/PASSWORD` in the constituent definition.
 
-func (e *CompositeExecutor) mergeResults(
-    results map[string]*ExecuteResult,
-    ast *QueryAST,
-) (*ExecuteResult, error) {
-    // Determine merge strategy based on query type
-    if ast.HasAggregation {
-        return e.mergeAggregation(results, ast)
-    }
-    
-    // Union merge for regular queries
-    var allRows []map[string]interface{}
-    for _, result := range results {
-        allRows = append(allRows, result.Rows...)
-    }
-    
-    // Apply DISTINCT if needed
-    if ast.HasDistinct {
-        allRows = e.deduplicate(allRows)
-    }
-    
-    // Apply ORDER BY
-    if ast.OrderBy != nil {
-        e.sortRows(allRows, ast.OrderBy)
-    }
-    
-    // Apply LIMIT
-    if ast.Limit > 0 {
-        if int64(len(allRows)) > ast.Limit {
-            allRows = allRows[:ast.Limit]
-        }
-    }
-    
-    return &ExecuteResult{Rows: allRows}, nil
-}
-```
+### Distributed transactions
 
-### Testing Strategy
+Composite write transactions follow the **many-read / one-write rule per transaction**: a single explicit transaction can read from any number of constituents but may only write to one. Attempting writes on a second constituent within the same transaction returns `Neo.ClientError.Transaction.ForbiddenDueToTransactionType`.
 
-1. **Unit Tests**:
-   - Composite database creation/deletion
-   - Constituent management
-   - Query routing logic
-   - Result merging (union, aggregation, distinct)
-   - Write routing
+For local constituents, explicit transactions run as real per-constituent subtransactions with full commit/rollback durability. For remote constituents they bind to the remote server's `/db/{db}/tx` lifecycle (open, statement execution, commit/rollback) under the distributed-transaction coordinator.
 
-2. **Integration Tests**:
-   - Queries against composite database
-   - Multi-constituent queries
-   - Write operations
-   - Routing strategies
-   - Performance with multiple constituents
+### Composite-root semantics
 
-3. **E2E Tests**:
-   - Real-world analytics queries
-   - Large-scale data across constituents
-   - Concurrent access patterns
-   - Failure scenarios (constituent offline)
+Plain queries on the composite root are rejected by design:
 
-### Security Considerations
+- `MATCH (n) RETURN n` on the composite root ⇒ `Neo.ClientError.Statement.NotSupported`.
+- Schema introspection (`SHOW INDEXES`, `SHOW CONSTRAINTS`) on the composite root ⇒ same error, with a remediation message asking the caller to target a constituent via `USE <composite>.<alias>`.
 
-- **Access Control**: Composite database inherits permissions from constituents
-- **Audit Logging**: Log all composite database queries
-- **Constituent Access**: Users must have access to all constituents
-- **Write Restrictions**: Option to restrict composite databases to read-only
-- **Rate Limiting**: Apply rate limits across all constituents
+To list merged schema metadata across all constituents, the storage facade exposes `CompositeEngine.GetSchema()` which returns a deduplicated read-only view.
 
-### Performance Considerations
+### What does not transfer
 
-- **Parallel Execution**: Critical for performance with multiple constituents
-- **Result Size Limits**: Prevent memory exhaustion when merging large results
-- **Query Timeout**: Set reasonable timeouts for composite queries
-- **Routing Efficiency**: Minimize unnecessary constituent queries
-- **Caching**: Cache routing decisions and results
-- **Index Usage**: Leverage indexes from each constituent
+- **Cross-constituent relationships.** A relationship lives entirely within one constituent's storage. Joining across constituents is done in user code via `USE <alias>` subqueries plus a property-key join.
+- **Cross-constituent multi-write transactions.** Two-phase commit across constituents is not implemented; the many-read/one-write rule prevents the multi-write case from being silently lossy.
+- **Composite-level vector indexes.** Each constituent owns its own vector index. Cross-shard semantic search uses `CALL { USE <alias> ... }` fan-out and merges in the outer query.
+- **Plain cross-database queries.** Use composite databases instead.
 
-### Limitations (v1)
+### Routing decisions
 
-- **Local Only**: Only local databases as constituents (remote support future)
-- **No Cross-Constituent Relationships**: Cannot create relationships across constituents
-- **Simple Merging**: Basic union/aggregation merging (advanced joins future)
-- **No Distributed Transactions**: Multi-constituent writes are best-effort
+Routing across constituents is **expressed in user code** through the explicit `USE <composite>.<alias>` clauses. The Go API exposes `RoutingStrategy` types in `pkg/multidb/routing.go` (`LabelRouting`, `PropertyRouting`, `FullScanRouting`) that programmatic users can plug into a custom dispatcher; **there is no Cypher DDL** for declarative composite routing today (no `ALTER COMPOSITE DATABASE ... SET ROUTING ...` syntax). Sharding strategy lives in your application's `USE <alias>` choice.
 
-### Future Enhancements
-
-1. **Remote Constituents**: Support databases in other NornicDB instances
-2. **Advanced Routing**: More sophisticated routing strategies
-3. **Distributed Transactions**: Two-phase commit for multi-constituent writes
-4. **Cross-Constituent Relationships**: Virtual relationships across constituents
-5. **Query Optimization**: More advanced query planning and optimization
-
-### Estimated Effort
-
-- **Composite Database Management**: 3-4 days
-- **Composite Executor**: 5-7 days
-- **Query Routing**: 3-4 days
-- **Result Merging**: 3-4 days
-- **Write Operations**: 2-3 days
-- **Performance Optimization**: 2-3 days
-- **Testing**: 4-5 days
-- **Total**: ~22-30 days
-
-### Comparison with Cross-Database Queries
-
-| Feature | Cross-Database Queries | Composite Databases |
-|---------|------------------------|---------------------|
-| **Syntax** | Explicit `FROM DATABASE` clauses | Transparent, single database view |
-| **Complexity** | Verbose, requires database references | Clean, intuitive |
-| **Use Case** | Ad-hoc cross-database queries | Regular analytics/reporting |
-| **Performance** | Similar (both parallel execution) | Similar |
-| **Security** | Explicit access per query | Configured once per composite |
-| **Maintenance** | Query-level changes | Database-level configuration |
-
-**Recommendation**: Implement Composite Databases instead of explicit cross-database queries. Composite databases provide a cleaner abstraction and better user experience for the primary use cases (analytics, reporting).
+For a worked example of label-, hash-, and region-based sharding patterns over composite databases, see [Infinigraph Topology](../user-guides/infinigraph-topology.md).
 
 ---
 
-## Completed Features
+## Operational Notes
 
-### ✅ Database Aliases (v1.2)
+### Backup, restore, and resource isolation
 
-**Status:** Implemented  
-**See:** [Multi-Database User Guide - Database Aliases](../user-guides/multi-database.md#database-aliases)
+Each constituent of a composite database is an ordinary NornicDB database for backup, restore, MVCC lifecycle, and resource-limit purposes. The composite layer adds no separate persistent state beyond the catalog entries (composite name, constituent alias list, optional remote constituent URLs, optional encrypted remote credentials).
 
-Database aliases allow creating alternate names for databases, enabling easier database management and migration scenarios.
+### Encryption of remote constituent credentials
 
-**Features:**
-- CREATE/DROP/SHOW ALIAS commands
-- Alias resolution integrated into all routing points (Bolt, HTTP, Cypher)
-- Alias persistence in database metadata
-- Validation and conflict detection
+Remote constituents using `USER/PASSWORD` auth have the password encrypted before it lands in the database catalog. Key selection on the coordinator follows this order:
 
-### ✅ Per-Database Resource Limits (v1.2)
+1. `NORNICDB_REMOTE_CREDENTIALS_KEY` (recommended dedicated key).
+2. `NORNICDB_ENCRYPTION_PASSWORD` / `database.encryption_password` (fallback).
+3. `NORNICDB_AUTH_JWT_SECRET` / `auth.jwt_secret` (compatibility fallback; warning logged).
 
-**Status:** Implemented  
-**See:** [Multi-Database User Guide - Resource Limits](../user-guides/multi-database.md#per-database-resource-limits)
+OIDC credential forwarding does not require any of these; only `USER/PASSWORD` does.
 
-Per-database resource limits enable administrators to set resource limits per database, preventing any single database from consuming excessive resources.
+### Search behavior on composite roots
 
-**Features:**
-- Storage limits (max nodes, edges, bytes)
-- Query limits (max query time, results, concurrent queries)
-- Connection limits (max connections)
-- Rate limits (max queries/writes per second)
-- Limit enforcement at runtime
-- Limit configuration and persistence
+The HTTP search endpoints reject composite roots:
 
----
+- `POST /nornicdb/search` with `database=<composite>` → 400.
+- `POST /nornicdb/search/rebuild` with `database=<composite>` → 400.
+- `POST /nornicdb/similar` with `database=<composite>` → 400.
 
-## Implementation Priority
+Target a constituent database directly (e.g. `database=analytics.tenant_a`).
 
-### Completed ✅
+### Stats provenance
 
-1. **Database Aliases** - Implemented (v1.2)
-   - Fully functional with CREATE/DROP/SHOW ALIAS commands
-   - Alias resolution integrated into all routing points
-   - Persisted in database metadata
+`GET /db/{composite}` returns aggregated stats with provenance fields:
 
-2. **Per-Database Resource Limits** - Implemented (v1.2)
-   - Limit configuration and storage implemented
-   - Limits persisted in database metadata
-   - Enforcement implemented with comprehensive unit tests
+- `statsAggregation`: always `constituent_sum` for composite databases.
+- `statsPartial`: `true` when one or more constituent stats could not be collected.
+- `statsProvenance`: alias-sorted list of per-constituent stats.
 
-### Completed ✅
-
-3. **Composite Databases** - Implemented (v1.2)
-   - Provides unified view across multiple databases
-   - Supersedes need for explicit cross-database queries
-   - Better user experience for analytics/reporting use cases
-   - Foundation for future distributed database features
-   - See [Multi-Database User Guide](../user-guides/multi-database.md#composite-databases) for usage
-
-### Dependencies
-
-- **Composite Databases**: Requires Database Aliases (✅ available) for constituent references
-
----
-
-## Configuration Examples
-
-### Composite Databases
-
-```cypher
--- Create composite database for analytics
-CREATE COMPOSITE DATABASE analytics
-  ALIAS tenant_a FOR DATABASE tenant_a
-  ALIAS tenant_b FOR DATABASE tenant_b
-  ALIAS tenant_c FOR DATABASE tenant_c
-
--- Query composite database (transparent access to all constituents)
-USE DATABASE analytics
-MATCH (n:Person)
-RETURN count(n)  -- Counts across all tenant databases
-
--- Configure routing
-ALTER COMPOSITE DATABASE analytics
-  SET ROUTING LABEL Person TO tenant_a, tenant_b
-  SET ROUTING LABEL Order TO tenant_c
-
--- Add new constituent
-ALTER COMPOSITE DATABASE analytics
-  ADD ALIAS tenant_d FOR DATABASE tenant_d
-
--- Show composite database info
-SHOW COMPOSITE DATABASES
-SHOW CONSTITUENTS FOR COMPOSITE DATABASE analytics
-
--- Drop composite database
-DROP COMPOSITE DATABASE analytics
-```
-
-### Database Aliases (Implemented)
-
-```cypher
--- Create alias
-CREATE ALIAS main FOR DATABASE tenant_primary_2024
-CREATE ALIAS prod FOR DATABASE production_v2
-
--- Use alias
-:USE main
-MATCH (n) RETURN n
-
--- Drop alias
-DROP ALIAS main
-
--- Show aliases
-SHOW ALIASES
-SHOW ALIASES FOR DATABASE tenant_primary_2024
-```
-
-### Resource Limits (Implemented)
-
-```cypher
--- Set storage limits
-ALTER DATABASE tenant_a SET LIMIT max_nodes = 1000000
-ALTER DATABASE tenant_a SET LIMIT max_edges = 5000000
-ALTER DATABASE tenant_a SET LIMIT max_storage_bytes = 10737418240  -- 10GB
-
--- Set query limits
-ALTER DATABASE tenant_a SET LIMIT max_query_time = '60s'
-ALTER DATABASE tenant_a SET LIMIT max_results = 10000
-ALTER DATABASE tenant_a SET LIMIT max_concurrent_queries = 10
-
--- Set connection limits
-ALTER DATABASE tenant_a SET LIMIT max_connections = 50
-
--- Set rate limits
-ALTER DATABASE tenant_a SET LIMIT max_queries_per_second = 100
-ALTER DATABASE tenant_a SET LIMIT max_writes_per_second = 50
-
--- Show limits
-SHOW LIMITS FOR DATABASE tenant_a
-
--- Show usage
-SHOW USAGE FOR DATABASE tenant_a
-```
+This makes aggregate counts traceable to their constituent sources and stable across calls.
 
 ---
 
 ## See Also
 
-- [Multi-Database User Guide](../user-guides/multi-database.md) - Current multi-database features
-- [Multi-Database Implementation Spec](multi-db-implementation-spec.md) - Current implementation details
+- [Multi-Database User Guide](../user-guides/multi-database.md) — operator surface
+- [Multi-Database Implementation Spec](multi-db-implementation-spec.md) — feature inventory
+- [Composite DB Analysis](composite-db-analysis.md) — capability comparison
+- [Infinigraph Topology](../user-guides/infinigraph-topology.md) — sharded composite design pattern
+- [Clustering Roadmap](clustering-roadmap.md) — overview of distribution surfaces (replication + composite sharding)

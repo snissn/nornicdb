@@ -29,13 +29,15 @@ export NORNICDB_EMBEDDING_DIMENSIONS=1024
 YAML form:
 
 ```yaml
-memory:
-  embedding_enabled: true
-  embedding_provider: ollama
-  embedding_model: mxbai-embed-large
-  embedding_api_url: http://localhost:11434
-  embedding_dimensions: 1024
+embedding:
+  enabled: true
+  provider: ollama          # ollama | openai | local
+  model: mxbai-embed-large
+  url: http://localhost:11434
+  dimensions: 1024
 ```
+
+The OpenAI provider also reads `embedding.api_key` (or `NORNICDB_EMBEDDING_API_KEY`). The local provider resolves the model file inside `NORNICDB_MODELS_DIR`.
 
 Defaults shipped with NornicDB: `provider=local`, `model=bge-m3`, `dimensions=1024`.
 
