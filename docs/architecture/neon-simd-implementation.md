@@ -10,17 +10,14 @@ Replaced vek library dependency with native ARM64 NEON SIMD implementation in C+
 
 ### Files Created
 
-1. **`pkg/simd/neon_simd.cpp`** - C++ NEON SIMD implementation
+1. **`pkg/simd/neon_simd_arm64.cpp`** — C++ NEON SIMD implementation
    - Uses ARM NEON intrinsics (`arm_neon.h`)
    - Optimized for ARMv8-A architecture
    - Processes 4 float32 elements per iteration
 
-2. **`pkg/simd/neon_simd.h`** - C interface header
-   - Clean C interface for CGO bindings
+2. **`pkg/simd/neon_simd_arm64.h`** — C interface header for CGO bindings.
 
-3. **`pkg/simd/neon_simd.go`** - Go CGO bindings
-   - Wraps C++ functions with Go interface
-   - Build tag: `arm64 && cgo && !nosimd`
+3. **`pkg/simd/neon_simd.go`** — Go CGO bindings; build tag `arm64 && cgo && !nosimd`. ARM64 builds without CGO fall back to `simd_arm64.go` pure-Go paths.
 
 ### Functions Implemented
 
