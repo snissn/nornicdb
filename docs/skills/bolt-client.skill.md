@@ -80,7 +80,7 @@ This is the storage-correct outcome. NornicDB pins these guarantees:
 2. **Same wire shape on both commit paths** — implicit autocommit and explicit `BEGIN/COMMIT` produce identical `commit failed: ...` strings, so one classifier handles both.
 3. **MERGE-only retry rule** — the consumer should retry the whole group only when **every statement in the group contains `MERGE`**. A mixed group (CREATE/DELETE/SET-only alongside MERGE) re-run after partial success could double-apply effects; surface those instead.
 
-Reference for the full lifecycle: `docs/plans/consumer-pinned-error-contract-plan.md` §2.1, §2.4.
+The wire shapes are pinned by regression tests in `pkg/cypher/commit_failure_message_contract_test.go`, `pkg/storage/conflict_message_contract_test.go`, and `pkg/cypher/merge_idempotency_under_concurrent_test.go`.
 
 ## Sizing UNWIND/MERGE batches
 
@@ -180,4 +180,4 @@ Anything in this list changing is a coordinated breaking change with a CHANGELOG
 - [`cypher-queries.skill.md`](cypher-queries.skill.md) — hot-path Cypher cookbook.
 - [`vector-search.skill.md`](vector-search.skill.md) — vector and full-text indexes addressable through the same Bolt session.
 - [`rag-procedures.skill.md`](rag-procedures.skill.md) — `db.retrieve`, `db.rerank`, `db.infer` over Bolt.
-- [`plans/consumer-pinned-error-contract-plan.md`](../plans/consumer-pinned-error-contract-plan.md) — the maintainer-side contract pinning the wire shapes this skill names.
+- [`api-reference/bolt-protocol.md`](../api-reference/bolt-protocol.md) — Bolt/PackStream wire details for the surfaces this skill names.

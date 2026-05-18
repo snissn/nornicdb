@@ -765,5 +765,5 @@ After completing this test:
 - [Multi-Database User Guide](../user-guides/multi-database.md)
 - [Multi-Database Architecture](../architecture/multi-db-implementation-spec.md)
 - [Composite Databases Guide](../user-guides/multi-database.md#composite-databases)
-- [Future Features](../architecture/multi-db-future-features.md)
+- [Multi-Database Architecture](../architecture/multi-db-architecture.md)
 

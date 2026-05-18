@@ -241,7 +241,7 @@ nav:
           - Cognitive SLM Architecture: architecture/cognitive-slm-architecture.md
           - Composite DB Analysis: architecture/composite-db-analysis.md
           - Multi-DB Implementation Spec: architecture/multi-db-implementation-spec.md
-          - Multi-DB Future Features: architecture/multi-db-future-features.md
+          - Multi-DB Future Features: architecture/multi-db-architecture.md
           - Observability: architecture/observability.md
 
   - Operating:
@@ -330,16 +330,9 @@ nav:
           - Chat Modes: ai-agents/chat-modes.md
           - Agent Preamble: ai-agents/agent-preamble.md
       - Plans & RFCs:
-          - Consumer-Pinned Error Contract: plans/consumer-pinned-error-contract-plan.md
-          - Knowledge-Layer Persistence Plan: plans/knowledge-layer-persistence-plan.md
-          - Knowledge-Layer Persistence Implementation: plans/knowledge-layer-persistence-implementation.md
-          - Knowledge-Policy Observability Plan: plans/knowledge-policy-observability-plan.md
           - Neo4j-Compatible Streaming Driver Plan: plans/neo4j-compatible-streaming-driver-and-server-plan.md
           - GPU HNSW Construction Plan: plans/gpu-hnsw-construction-plan.md
-          - Property Key Dictionary Plan: plans/property-key-dictionary-plan.md
-          - Kalman Behavioral Signals: plans/kalman-behavioral-signals.md
-          - Kalman: plans/kalman.md
-          - Memory Gap: plans/memory-gap.md
+          - Native Package Distribution Plan: plans/native-package-distribution-plan.md
           - UI Enhancements: plans/ui-enhancements.md
           - UI Grid: plans/ui-grid.md
       - Research:

@@ -6,9 +6,7 @@ shared Prometheus registry. Global bag handle published via
 `observability.SetKnowledgePolicyMetrics`; the `pkg/storage/badger_decay_filter.go`
 read path resolves it lazily via `observability.GetKnowledgePolicyMetrics()`.
 
-See the implementation plan at
-`docs/plans/knowledge-policy-observability-plan.md` and the overarching
-observability ADR at `docs/architecture/observability.md`.
+See the overarching observability ADR at `docs/architecture/observability.md`.
 
 ## At-a-glance
 

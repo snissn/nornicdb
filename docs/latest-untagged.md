@@ -57,4 +57,4 @@ Root README cross-links the cookbook, the skills directory, and the migration sc
 
 ## Plan landed
 
-`docs/plans/consumer-pinned-error-contract-plan.md` — single-pass plan documenting the wire-contract pinning above. Default values reconciled against `LoadDefaults()` truth (the original draft had `AsyncWritesEnabled` and `PersistSearchIndexes` defaults inverted; both are now correct).
+The single-pass wire-contract pinning above was tracked through completion. Default values were reconciled against `LoadDefaults()` truth (the original draft had `AsyncWritesEnabled` and `PersistSearchIndexes` defaults inverted; both are now correct). Regression tests live in `pkg/cypher/commit_failure_message_contract_test.go`, `pkg/storage/conflict_message_contract_test.go`, and `pkg/config/defaults_consumer_contract_test.go`.

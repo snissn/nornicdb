@@ -137,9 +137,7 @@ canonical API, _not_ the OTel meter API. Reasoning:
   `knowledge_policy` catalog (MET-ext-01) owns decay / promotion /
   suppression / on-access-mutation / access-flush instrumentation; see
   [`docs/observability/knowledge-policy-metrics.md`](../observability/knowledge-policy-metrics.md)
-  for the per-instrument reference and
-  [`docs/plans/knowledge-policy-observability-plan.md`](../plans/knowledge-policy-observability-plan.md)
-  for the implementation plan.
+  for the per-instrument reference.
 - Counters end in `_total`. Histograms end in the unit they measure
   (`_seconds`, `_bytes`, `_rows`).
 - Allowed labels:

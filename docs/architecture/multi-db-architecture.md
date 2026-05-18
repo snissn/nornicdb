@@ -1,24 +1,19 @@
-# Multi-Database Future Features Plan
+# Multi-Database Architecture Reference
 
-**Status:** 📋 Planning  
-**Last Updated:** 2024-12-04
-
-This document outlines the implementation plan for advanced multi-database features. **Note:** Database Aliases and Per-Database Resource Limits are now **✅ IMPLEMENTED** - see [Multi-Database User Guide](../user-guides/multi-database.md) for usage.
+This document records the design decisions behind NornicDB's multi-database surface, including the historical motivation for the features that ship today. The features listed below are **all implemented**: database aliases, per-database resource limits, and composite databases (with local + remote constituents). For day-to-day usage see [Multi-Database User Guide](../user-guides/multi-database.md).
 
 ---
 
 ## Table of Contents
 
-1. [Composite Databases](#composite-databases) - Future Enhancement
-2. [Completed Features](#completed-features) - Implemented
+1. [Composite Databases](#composite-databases)
+2. [Completed Features](#completed-features)
 
 ---
 
 ## Composite Databases
 
-**Status:** Implemented (v1.2)  
-**Priority:** Medium  
-**Estimated Effort:** 20-30 days
+**Status:** ✅ Implemented (v1.2)
 
 ### Overview
 
