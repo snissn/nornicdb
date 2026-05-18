@@ -227,8 +227,8 @@ To update the spec:
 ## 📚 Related Documentation
 
 - **[API Reference](README.md)** - Complete API documentation
-- **[User Guides](../user-guides/)** - Usage examples
-- **[Getting Started](../getting-started/)** - Installation and setup
+- **[User Guides](../user-guides/README.md)** - Usage examples
+- **[Getting Started](../getting-started/README.md)** - Installation and setup
 
 ## 🐛 Reporting Issues
 
@@ -244,4 +244,4 @@ If you find any issues with the OpenAPI specification:
 ---
 
 **Ready to test?** → **[OpenAPI Spec](openapi.yaml)**  
-**Need help?** → **[User Guides](../user-guides/)**
+**Need help?** → **[User Guides](../user-guides/README.md)**

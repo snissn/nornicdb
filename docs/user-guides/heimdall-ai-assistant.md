@@ -544,7 +544,7 @@ The SLM interprets your request and outputs action commands. If actions don't ex
 Create custom plugins to add new capabilities:
 
 - [Writing Heimdall Plugins](./heimdall-plugins.md)
-- [Plugin Architecture](../architecture/cognitive-slm-proposal.md)
+- [Plugin Architecture](../architecture/cognitive-slm-architecture.md)
 
 ### Plugin Features
 

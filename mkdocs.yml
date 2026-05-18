@@ -234,16 +234,14 @@ nav:
           - Graph-RAG vs NornicDB: architecture/graph-rag-nornicdb-comparison.md
           - Replication: architecture/replication.md
           - Plugin System (Architecture): architecture/plugin-system.md
-          - Protocol Plugin Architecture: architecture/protocol-plugin-architecture.md
           - Qdrant Collection → Database Diagrams: architecture/qdrant-collection-to-database-diagrams.md
           - NEON SIMD Implementation: architecture/neon-simd-implementation.md
           - Norns Mythology: architecture/norns-mythology.md
           - Clustering Roadmap: architecture/clustering-roadmap.md
-          - Cognitive SLM Proposal: architecture/cognitive-slm-proposal.md
+          - Cognitive SLM Architecture: architecture/cognitive-slm-architecture.md
           - Composite DB Analysis: architecture/composite-db-analysis.md
           - Multi-DB Implementation Spec: architecture/multi-db-implementation-spec.md
           - Multi-DB Future Features: architecture/multi-db-future-features.md
-          - Vision Pipeline Proposal: architecture/vision-pipeline-proposal.md
           - Observability: architecture/adr/0001-observability.md
 
   - Operating:

@@ -1,12 +1,8 @@
-# RFC: Heimdall SLM Quality Control for Auto-TLP
+# Heimdall SLM Quality Control for Auto-TLP
 
-**Status:** Proposal  
-**Author:** NornicDB Team  
-**Created:** December 2024  
+**Use the Heimdall SLM to validate Auto-TLP relationship suggestions before they are materialized.**
 
-## Summary
-
-Add an optional LLM-based quality control layer to Auto-TLP (Automatic Topological Link prediction) that validates relationship suggestions before they're created. This "Heimdall" layer uses a small, local instruction-tuned model to review TLP's algorithmic suggestions and can optionally suggest additional relationships.
+This layer is implemented in `pkg/inference` (`HeimdallQC`) and is wired through the feature flags below. It is opt-in. When enabled, each batch of TLP-generated candidates is reviewed by the configured Heimdall SLM and only approved suggestions are turned into edges. With augmentation enabled, the SLM may also propose additional edges that TLP missed.
 
 ## Motivation
 
@@ -248,45 +244,8 @@ func setupHeimdallQC(generator heimdall.Generator) {
 - Size limits prevent slow large-context calls
 - Async processing possible for background indexing
 
-## Alternatives Considered
+## Related
 
-### 1. Pre-trained classifier
-- **Pro**: Faster than LLM
-- **Con**: Requires training data, less flexible
-- **Decision**: LLM is more adaptable to diverse data
-
-### 2. Rule-based filtering
-- **Pro**: Zero latency
-- **Con**: Can't understand semantics
-- **Decision**: TLP already does this; LLM adds semantic layer
-
-### 3. Post-hoc cleanup
-- **Pro**: Doesn't slow down creation
-- **Con**: Edges exist until cleaned; user sees noise
-- **Decision**: Better to validate before creation
-
-## Open Questions
-
-1. **Batch size tuning**: Is 5 the right default? Should it auto-tune based on model?
-
-2. **Augmentation scope**: Should augmented edges have lower initial confidence?
-
-3. **Model recommendations**: Which small models work best? (Qwen 1.5B? Phi-3? Gemma 2B?)
-
-4. **Async mode**: Should there be an option to review edges asynchronously?
-
-## Feedback Requested
-
-- Does this solve a real problem for your use case?
-- Are the feature flags granular enough?
-- What small models have you had success with?
-- Should there be a "strict mode" that blocks on LLM errors?
-- Other edge types Heimdall should suggest?
-
----
-
-**Implementation PR:** [Link to PR when ready]
-
-**Related Issues:**
-- #XXX Auto-TLP implementation
-- #XXX Edge decay system
+- [Auto-TLP](auto-tlp.md) — overview of automatic relationship inference
+- [Feature Flags](feature-flags.md) — `NORNICDB_AUTO_TLP_LLM_QC_ENABLED`, `NORNICDB_AUTO_TLP_LLM_AUGMENT_ENABLED`
+- [Heimdall AI Assistant](../user-guides/heimdall-ai-assistant.md) — configuring the Heimdall SLM

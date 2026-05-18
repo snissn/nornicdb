@@ -1,9 +1,6 @@
-# Cognitive SLM Integration Proposal for NornicDB
+# Cognitive SLM Architecture (Heimdall)
 
-**Status:** PROPOSAL  
-**Version:** 1.0.0  
-**Date:** December 2024  
-**Author:** AI Architecture Review
+This document describes the cognitive-graph architecture that NornicDB ships as **Heimdall**: an embedded Small Language Model integrated with the graph engine for self-monitoring, self-healing, and intelligent memory curation. The original proposal that motivated this design has been implemented; the integration points described here map to live code under `pkg/heimdall/` and `pkg/inference/`. For operator setup and configuration, see [Heimdall AI Assistant](../user-guides/heimdall-ai-assistant.md).
 
 ---
 

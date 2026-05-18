@@ -656,6 +656,12 @@ defer cleanup()
 
 **Error handling**: Fail-open (approve all on error, log, continue)
 
+**Performance Notes**:
+- Adds ~100-500ms latency per suggestion (SLM call)
+- Decisions are cached for 1 hour by default
+- Suggestions below 0.5 TLP confidence are auto-rejected (no SLM call)
+- Max 4 concurrent SLM calls (rate limited)
+
 ---
 
 ### Heimdall LLM Augment (Auto-TLP Augmentation)
@@ -748,68 +754,6 @@ if config.IsEdgeDecayEnabled() {
 // Direct access to decay engine
 engine.GetDecayEngine().ApplyDecay(graph)
 ```
-
----
-
-### Heimdall LLM QC (Auto-TLP Validation)
-
-**Purpose**: Use the Heimdall SLM to validate Auto-TLP edge suggestions before creation. Each proposed relationship is sent to the SLM for approval, improving edge quality.
-
-**Environment Variable**: `NORNICDB_AUTO_TLP_LLM_QC_ENABLED`
-
-**Default**: ❌ Disabled (requires Heimdall SLM to be configured)
-
-```bash
-# Enable LLM quality control for Auto-TLP
-export NORNICDB_AUTO_TLP_LLM_QC_ENABLED=true
-```
-
-**Go API**:
-```go
-import (
-    "github.com/orneryd/nornicdb/pkg/config"
-    "github.com/orneryd/nornicdb/pkg/inference"
-)
-
-if config.IsAutoTLPLLMQCEnabled() {
-    // Heimdall QC is validating edge suggestions
-}
-
-// Setup Heimdall QC
-qc := inference.NewHeimdallQC(func(ctx context.Context, prompt string) (string, error) {
-    return ollamaClient.Complete(ctx, prompt)
-}, nil)
-
-engine.SetHeimdallQC(qc)
-
-// Now OnStore/OnAccess suggestions are validated by Heimdall
-suggestions, _ := engine.OnStore(ctx, nodeID, embedding)
-// Only approved suggestions are returned
-```
-
-**What Heimdall Receives**:
-- Source node: ID, labels, properties
-- Target node: ID, labels, properties  
-- Proposed relationship type and TLP confidence
-- Inference method (similarity, co-access, temporal, transitive)
-- Existing relationships between nodes
-- Shared neighbors count
-
-**What Heimdall Returns** (JSON):
-```json
-{
-  "approved": true,
-  "confidence": 0.85,
-  "relation_type": "SIMILAR_TO",
-  "reasoning": "Both nodes discuss machine learning topics"
-}
-```
-
-**Performance Notes**:
-- Adds ~100-500ms latency per suggestion (SLM call)
-- Decisions are cached for 1 hour by default
-- Suggestions below 0.5 TLP confidence are auto-rejected (no SLM call)
-- Max 4 concurrent SLM calls (rate limited)
 
 ---
 

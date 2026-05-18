@@ -1114,7 +1114,7 @@ If you see ordering issues:
 
 ## See Also
 
-- [Heimdall Architecture](../architecture/cognitive-slm-proposal.md)
+- [Heimdall Architecture](../architecture/cognitive-slm-architecture.md)
 - [Bifrost UI Guide](./heimdall-ai-assistant.md)
 - [Example Plugin: Watcher](https://github.com/orneryd/nornicdb/blob/main/plugins/heimdall/plugin.go)
 
