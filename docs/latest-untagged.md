@@ -22,15 +22,15 @@ Each pinned source-of-truth line gained a one-line `// Wire contract:` comment p
 
 ## Documentation — agent-ready skills
 
-New `docs/skills/` directory containing self-contained, agent-ready skill files for every consumer-facing surface:
+New [`docs/skills/`](skills/README.md) directory containing self-contained, agent-ready skill files for every consumer-facing surface:
 
-- `cypher-queries.skill.md` — hot-path Cypher cookbook (point lookup, batch retrieval, pagination, search, traversal, batched UNWIND/MERGE writes, cleanup, multi-tenant isolation).
-- `bolt-client.skill.md` — Bolt connection defaults, retry classification, MERGE under concurrent writers, batch sizing.
-- `grpc.skill.md` — Qdrant-compatible gRPC + `NornicSearch.SearchText`. RPC catalog, collection→database mapping, point→node mapping, limits, auth.
-- `qdrant-migration.skill.md` — Qdrant → NornicDB end-to-end through the gRPC compat layer.
-- `neo4j-migration.skill.md` — Neo4j → NornicDB over Bolt, with phase order and exact UNWIND/MERGE shapes pinned to the cookbook.
-- `knowledge-policies.skill.md`, `decay-tuning.skill.md`, `promotion-policies.skill.md` — full DDL surface for decay/promotion, with disambiguated bundle-vs-binding language.
-- `managed-embeddings.skill.md`, `vector-search.skill.md`, `rag-procedures.skill.md` — search and RAG surfaces.
+- [`cypher-queries.skill.md`](skills/cypher-queries.skill.md) — hot-path Cypher cookbook (point lookup, batch retrieval, pagination, search, traversal, batched UNWIND/MERGE writes, cleanup, multi-tenant isolation).
+- [`bolt-client.skill.md`](skills/bolt-client.skill.md) — Bolt connection defaults, retry classification, MERGE under concurrent writers, batch sizing.
+- [`grpc.skill.md`](skills/grpc.skill.md) — Qdrant-compatible gRPC + `NornicSearch.SearchText`. RPC catalog, collection→database mapping, point→node mapping, limits, auth.
+- [`qdrant-migration.skill.md`](skills/qdrant-migration.skill.md) — Qdrant → NornicDB end-to-end through the gRPC compat layer.
+- [`neo4j-migration.skill.md`](skills/neo4j-migration.skill.md) — Neo4j → NornicDB over Bolt, with phase order and exact UNWIND/MERGE shapes pinned to the cookbook.
+- [`knowledge-policies.skill.md`](skills/knowledge-policies.skill.md), [`decay-tuning.skill.md`](skills/decay-tuning.skill.md), [`promotion-policies.skill.md`](skills/promotion-policies.skill.md) — full DDL surface for decay/promotion, with disambiguated bundle-vs-binding language.
+- [`managed-embeddings.skill.md`](skills/managed-embeddings.skill.md), [`vector-search.skill.md`](skills/vector-search.skill.md), [`rag-procedures.skill.md`](skills/rag-procedures.skill.md) — search and RAG surfaces.
 
 Knowledge-policy user guides (`docs/user-guides/knowledge-layer-policies.md`, `decay-profiles.md`, `promotion-policies.md`) rewritten in the same precise vocabulary: bundles are inert parameter packages, bindings carry the `FOR` target, decay is pure time math evaluated on read, `ON ACCESS` belongs to promotion only, `LAST_ACCESSED` decay only reads access metadata.
 

@@ -9,10 +9,11 @@ If you know your goal, start in **"Find by task"**. If you are debugging, start 
 - New user: [Getting Started](getting-started/README.md)
 - Migrating from Neo4j: [Neo4j Migration](neo4j-migration/README.md)
 - Building apps and queries: [User Guides](user-guides/README.md)
+- Driving NornicDB from an agent: [Agent Skills](skills/README.md)
 - Looking for endpoint/function specs: [API Reference](api-reference/README.md)
 - Running in production: [Operations](operations/README.md)
 - Security/compliance review: [Security](security/README.md), [Compliance](compliance/README.md)
-- Performance optimization: [Performance](performance/README.md)
+- Performance optimization: [Performance](performance/README.md), [Hot-Path Cypher Cookbook](performance/hot-path-query-cookbook.md)
 
 ## Find by Task
 
@@ -63,6 +64,7 @@ If you know your goal, start in **"Find by task"**. If you are debugging, start 
 
 - [Getting Started](getting-started/README.md)
 - [User Guides](user-guides/README.md)
+- [Agent Skills](skills/README.md)
 - [API Reference](api-reference/README.md)
 - [Features](features/README.md)
 - [Operations](operations/README.md)
@@ -74,16 +76,15 @@ If you know your goal, start in **"Find by task"**. If you are debugging, start 
 - [AI Agents](ai-agents/README.md)
 - [Neo4j Migration](neo4j-migration/README.md)
 - [Packaging](packaging/README.md)
-- [Plans](plans/)
 
 ## Canonical Source Policy
 
 To avoid drift and duplicated guidance:
 
-- API behavior is canonical in `docs/api-reference/`.
-- Operational runbooks are canonical in `docs/operations/`.
-- Security controls are canonical in `docs/security/`.
-- Compliance interpretation is canonical in `docs/compliance/`.
-- How-to walkthroughs are canonical in `docs/user-guides/`.
+- API behavior is canonical in [API Reference](api-reference/README.md).
+- Operational runbooks are canonical in [Operations](operations/README.md).
+- Security controls are canonical in [Security](security/README.md).
+- Compliance interpretation is canonical in [Compliance](compliance/README.md).
+- How-to walkthroughs are canonical in [User Guides](user-guides/README.md).
 
 Section READMEs should summarize and link to canonical pages instead of duplicating full procedures.

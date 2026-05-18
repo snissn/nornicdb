@@ -1,21 +1,28 @@
 # Embedding Search (Index)
 
-This document is a short entry point to NornicDB’s embedding/vector search documentation.
+This page is the entry point to NornicDB's embedding and vector-search documentation.
 
-Start here:
+## Start here
 
-- `docs/architecture/embedding-search.md` (overview + key concepts)
-- `docs/architecture/embedding-search-architecture.md` (data model + execution paths)
-- `docs/architecture/embedding-search-flow-diagrams.md` (Mermaid diagrams)
-- `docs/architecture/embedding-search-examples.md` (end-to-end examples)
+- [Embedding Search Overview](embedding-search.md) — overview + key concepts.
+- [Embedding & Search Architecture](embedding-search-architecture.md) — data model + execution paths.
+- [Embedding & Search Flow Diagrams](embedding-search-flow-diagrams.md) — Mermaid diagrams.
+- [Embedding & Search Examples](embedding-search-examples.md) — end-to-end examples.
 
-User-facing guides:
+## User-facing guides
 
-- `docs/features/vector-embeddings.md` (embedding generation)
-- `docs/user-guides/vector-search.md` (hybrid search / RRF usage)
-- `docs/user-guides/qdrant-grpc.md` (Qdrant compatibility layer)
+- [Vector Embeddings](../features/vector-embeddings.md) — embedding generation.
+- [Vector Search](../user-guides/vector-search.md) — hybrid search and RRF usage.
+- [Qdrant gRPC](../user-guides/qdrant-grpc.md) — Qdrant compatibility layer.
 
-Implementation references:
+## Agent-ready skills
 
-- `pkg/search/search.go` (unified search service + vector pipeline selection)
-- `pkg/qdrantgrpc/points_service.go` (Qdrant Points API mapping)
+- [Managed Embeddings](../skills/managed-embeddings.skill.md) — `WITH EMBEDDING`, `db.index.vector.embed`, provider config.
+- [Vector & Full-Text Search](../skills/vector-search.skill.md) — `CREATE/DROP VECTOR INDEX`, `db.index.vector.queryNodes`.
+- [RAG Procedures](../skills/rag-procedures.skill.md) — `db.retrieve`, `db.rerank`, `db.infer`.
+- [gRPC (Qdrant + NornicSearch)](../skills/grpc.skill.md) — gRPC surface for vector ingestion and hybrid search.
+
+## Implementation references
+
+- [`pkg/search/search.go`](https://github.com/orneryd/nornicdb/blob/main/pkg/search/search.go) — unified search service + vector pipeline selection.
+- [`pkg/qdrantgrpc/points_service.go`](https://github.com/orneryd/nornicdb/blob/main/pkg/qdrantgrpc/points_service.go) — Qdrant Points API mapping.

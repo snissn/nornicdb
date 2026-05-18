@@ -247,8 +247,8 @@ This is useful when you want “Qdrant-shaped” inference queries without custo
 
 See:
 
-- `pkg/qdrantgrpc/README.md` for implementation details and examples
-- `pkg/qdrantgrpc/COMPAT.md` for the supported RPC matrix
+- [`pkg/qdrantgrpc/README.md`](https://github.com/orneryd/nornicdb/blob/main/pkg/qdrantgrpc/README.md) for implementation details and examples
+- [`pkg/qdrantgrpc/COMPAT.md`](https://github.com/orneryd/nornicdb/blob/main/pkg/qdrantgrpc/COMPAT.md) for the supported RPC matrix
 
 ---
 

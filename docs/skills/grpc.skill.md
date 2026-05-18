@@ -208,5 +208,5 @@ When `Auth.Enabled=false`, the gRPC endpoint is open — local-development defau
 - [`qdrant-migration.skill.md`](qdrant-migration.skill.md) — end-to-end Qdrant → NornicDB migration.
 - [`neo4j-migration.skill.md`](neo4j-migration.skill.md) — Neo4j → NornicDB via Bolt.
 - [`bolt-client.skill.md`](bolt-client.skill.md) — the Bolt surface and retry classifier.
-- `docs/user-guides/qdrant-grpc.md` — long-form documentation including the full proto compatibility matrix.
-- `docs/user-guides/nornic-search-grpc.md` — additive `NornicSearch` proto setup.
+- [`user-guides/qdrant-grpc.md`](../user-guides/qdrant-grpc.md) — long-form documentation including the full proto compatibility matrix.
+- [`user-guides/nornic-search-grpc.md`](../user-guides/nornic-search-grpc.md) — additive `NornicSearch` proto setup.

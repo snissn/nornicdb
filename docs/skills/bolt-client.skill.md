@@ -180,4 +180,4 @@ Anything in this list changing is a coordinated breaking change with a CHANGELOG
 - [`cypher-queries.skill.md`](cypher-queries.skill.md) — hot-path Cypher cookbook.
 - [`vector-search.skill.md`](vector-search.skill.md) — vector and full-text indexes addressable through the same Bolt session.
 - [`rag-procedures.skill.md`](rag-procedures.skill.md) — `db.retrieve`, `db.rerank`, `db.infer` over Bolt.
-- `docs/plans/consumer-pinned-error-contract-plan.md` — the maintainer-side contract pinning the wire shapes this skill names.
+- [`plans/consumer-pinned-error-contract-plan.md`](../plans/consumer-pinned-error-contract-plan.md) — the maintainer-side contract pinning the wire shapes this skill names.
