@@ -45,7 +45,7 @@ docker-compose up -d nornicdb
 #### Step 1: Export with Old Version
 ```bash
 # Using the OLD NornicDB version, run:
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{
     "statements": [{
@@ -53,7 +53,7 @@ curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
     }]
   }' > nodes_backup.json
 
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{
     "statements": [{

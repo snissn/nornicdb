@@ -51,7 +51,7 @@ CREATE (a)-[:KNOWS {since: relData.since}]->(b)
 
 ```bash
 # Import nodes from JSON
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{
     "statements": [{
@@ -92,7 +92,7 @@ RETURN
 
 ```bash
 # Export query results
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{
     "statements": [{

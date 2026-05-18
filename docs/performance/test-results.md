@@ -379,7 +379,7 @@ curl http://localhost:7474/health
 ### Create Nodes
 
 ```bash
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"CREATE (n:Test {name: \"test\"}) RETURN n"}]}'
 ```
@@ -387,7 +387,7 @@ curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
 ### Query Nodes
 
 ```bash
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"MATCH (n) RETURN count(n)"}]}'
 ```

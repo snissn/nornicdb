@@ -134,7 +134,7 @@ curl -f http://localhost:7474/health
 nc -z localhost 7687
 
 # Test query
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"RETURN 1 as test"}]}'
 ```

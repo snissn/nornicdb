@@ -48,7 +48,7 @@ docker ps
 curl http://localhost:7474/health
 
 # Test with a Neo4j-compatible Cypher HTTP request
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"CREATE (n:Person {name: \"Alice\"}) RETURN n"}]}'
 ```
@@ -65,17 +65,17 @@ NornicDB's Cypher-over-HTTP flow follows the Neo4j transaction endpoint shape.
 
 ```bash
 # Create a node
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"CREATE (n:Person {name: \"Alice\", age: 30}) RETURN n"}]}'
 
 # Query nodes
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"MATCH (n:Person) RETURN n.name, n.age"}]}'
 
 # Create a relationship in one request
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"MERGE (a:Person {name: \"Alice\"}) MERGE (b:Person {name: \"Bob\"}) MERGE (a)-[:KNOWS]->(b) RETURN a, b"}]}'
 ```
@@ -166,7 +166,7 @@ docker run --rm \
 
 ```bash
 # Run basic functionality tests
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"RETURN 1 as test"}]}'
 
@@ -174,7 +174,7 @@ curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
 nc -z localhost 7687 && echo "Bolt port open" || echo "Bolt port closed"
 
 # Performance test
-time curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+time curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"MATCH (n) RETURN count(n)"}]}'
 ```

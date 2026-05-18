@@ -36,7 +36,7 @@ Use this page when you know a symptom, but not the right document yet.
     - [Cypher Queries](user-guides/cypher-queries.md)
     - [Cypher Functions Reference](api-reference/cypher-functions/README.md)
 - HTTP endpoint mismatch
-    - [OpenAPI Reference](api-reference/openapi.md)
+    - [OpenAPI Reference](api-reference/OPENAPI.md)
 - Neo4j compatibility question
     - [Feature Parity](neo4j-migration/feature-parity.md)
     - [Cypher Compatibility](neo4j-migration/cypher-compatibility.md)

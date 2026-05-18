@@ -325,11 +325,11 @@ Response:
 
 ```bash
 # Authorization header
-curl http://localhost:7474/db/nornicdb/tx/commit \
+curl http://localhost:7474/db/nornic/tx/commit \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..."
 
 # Or API key header
-curl http://localhost:7474/db/nornicdb/tx/commit \
+curl http://localhost:7474/db/nornic/tx/commit \
   -H "X-API-Key: ndb_sk_abc123..."
 ```
 

@@ -34,7 +34,7 @@ NornicDB provides **snapshot isolation** via MVCC:
 The simplest way to run a query is the auto-commit endpoint. Each request is its own transaction:
 
 ```bash
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{
     "statements": [{
@@ -47,7 +47,7 @@ curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
 Multiple statements in a single request execute atomically — they all commit together or all roll back:
 
 ```bash
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{
     "statements": [

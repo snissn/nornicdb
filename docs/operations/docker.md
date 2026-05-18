@@ -403,7 +403,7 @@ docker update --memory 8g nornicdb
 docker stats nornicdb
 
 # Check query performance with a Neo4j-compatible HTTP request
-curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"EXPLAIN MATCH (n) RETURN count(n)"}]}'
 ```
