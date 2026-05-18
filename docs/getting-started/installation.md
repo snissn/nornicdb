@@ -4,7 +4,7 @@ Get up and running with NornicDB in 5 minutes.
 
 ## Prerequisites
 
-- Go 1.21 or later
+- Go 1.26 or later (see `go.mod`)
 - Docker (optional, for containerized deployment)
 - 2GB RAM minimum (4GB recommended)
 
@@ -40,10 +40,10 @@ See **[CLI Commands Guide](../operations/cli-commands.md)** for complete documen
 ### Option 2: Docker
 
 ```bash
-# Pull the image (ARM64/Apple Silicon)
-docker pull timothyswt/nornicdb-arm64-metal:v1.0.0
+# Pull the image (ARM64/Apple Silicon, with bundled BGE-M3 embedding model)
+docker pull timothyswt/nornicdb-arm64-metal-bge:latest
 
-# Or use latest
+# Or use the minimal "bring your own model" image
 docker pull timothyswt/nornicdb-arm64-metal:latest
 
 # Run the container
@@ -52,16 +52,13 @@ docker run -d \
   -p 7474:7474 \
   -p 7687:7687 \
   -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-metal:v1.0.0
+  timothyswt/nornicdb-arm64-metal-bge:latest
 
 # Verify it's running
 curl http://localhost:7474/health
 ```
 
-**Available Tags:**
-
-- `timothyswt/nornicdb-arm64-metal:v1.0.0` - Current stable release
-- `timothyswt/nornicdb-arm64-metal:latest` - Latest build
+**Available variants:** see the [Docker Image Quick Reference](image-quick-reference.md) for the full image matrix (Apple Silicon Metal, NVIDIA CUDA, AMD/Intel CPU, Vulkan, headless, BYOM, BGE-bundled).
 
 ### Option 3: Go Package
 
@@ -129,8 +126,8 @@ log.Printf("Total facts: %v\n", result.Rows[0][0])
 ### 3. Vector Search
 
 ```go
-// Search with embeddings
-results, err := db.Search(ctx, "artificial intelligence", 10)
+// Search with embeddings (4-arg signature: ctx, query, labels filter, limit)
+results, err := db.Search(ctx, "artificial intelligence", nil, 10)
 if err != nil {
     log.Fatal(err)
 }
@@ -140,6 +137,8 @@ for _, result := range results {
         result.Title, result.Score)
 }
 ```
+
+Pass `nil` (or an empty `[]string`) for the labels argument to search across every label; pass `[]string{"Document", "Memory"}` to restrict the candidate set.
 
 ## Configuration
 
@@ -253,7 +252,7 @@ If you want Qdrant clients to upsert/update/delete vectors directly, also set:
 export NORNICDB_EMBEDDING_ENABLED=false
 ```
 
-User guide: `docs/user-guides/qdrant-grpc.md`
+See the [Qdrant gRPC user guide](../user-guides/qdrant-grpc.md) for full API coverage and SDK examples.
 
 ## Knowledge-Layer Scoring
 
@@ -292,8 +291,8 @@ CREATE DECAY PROFILE fact_retention_binding
 FOR (n:KnowledgeFact)
 APPLY {
   DECAY PROFILE 'knowledge_fact_retention'
-  PROPERTY n.tenantId NO DECAY
-  PROPERTY n.summary HALFLIFE 2592000
+  n.tenantId NO DECAY
+  n.summary DECAY HALF LIFE 2592000
 };
 ```
 

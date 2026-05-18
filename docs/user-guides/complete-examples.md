@@ -19,52 +19,63 @@
 ### Scenario
 An AI coding assistant needs to remember user preferences, project decisions, and context across sessions.
 
-### Step 1: Define Decay Profiles
+### Step 1: Define Decay Bundles
+
+A bundle is a named parameter set with no target — it never affects any entity until a binding references it. See [`Knowledge-Layer Policies`](knowledge-layer-policies.md) for the full object-kind reference.
 
 ```cypher
 // Short-lived context — fades in about a week, then disappears entirely.
-//   DECAY FLOOR 0.0           score-value clamp; here it does nothing
+//   scoreFloor: 0.0           score-value clamp; here it does nothing
 //                             because the curve is the binding constraint
-//   VISIBILITY THRESHOLD 0.10 entity is suppressed once finalScore < 0.10
+//   visibilityThreshold: 0.10 entity is suppressed once finalScore < 0.10
 // Result: episode is visible until ~3.32 half-lives, then deindexed.
-CREATE DECAY PROFILE episode_retention
-  HALF LIFE 604800
-  DECAY FLOOR 0.0
-  VISIBILITY THRESHOLD 0.10;
+CREATE DECAY PROFILE episode_retention OPTIONS {
+  halfLifeSeconds: 604800,
+  function: 'exponential',
+  scoreFloor: 0.0,
+  visibilityThreshold: 0.10
+};
 
 // Stable knowledge — fades, but score never drops below 0.05.
-//   DECAY FLOOR 0.05          score never reports below 0.05
-//   VISIBILITY THRESHOLD 0.10 still suppressed when score in [0.05, 0.10)
+//   scoreFloor: 0.05          score never reports below 0.05
+//   visibilityThreshold: 0.10 still suppressed when score in [0.05, 0.10)
 // Note 0.05 < 0.10 → the floor here keeps the score from collapsing to
 // zero (useful for ranking + tombstone semantics) but does NOT keep the
 // fact visible. Raise the floor to 0.10 if you want unconditional
 // visibility; the floor and threshold are independent levers.
-CREATE DECAY PROFILE fact_retention
-  HALF LIFE 5961600
-  DECAY FLOOR 0.05
-  VISIBILITY THRESHOLD 0.10;
+CREATE DECAY PROFILE fact_retention OPTIONS {
+  halfLifeSeconds: 5961600,
+  function: 'exponential',
+  scoreFloor: 0.05,
+  visibilityThreshold: 0.10
+};
 
 // Persistent skills — no decay (curve is constant 1.0, threshold n/a).
-CREATE DECAY PROFILE skill_retention
-  NO DECAY;
+CREATE DECAY PROFILE skill_retention OPTIONS {
+  function: 'none'
+};
 ```
 
-### Step 2: Bind Profiles to Labels
+### Step 2: Bind Bundles to Labels
+
+A binding has the `FOR (...)` clause that targets entities and an `APPLY { ... }` block that references a bundle by name (and may override per-property).
 
 ```cypher
-CREATE RETENTION BINDING episode_binding
-  FOR (n:MemoryEpisode)
-  USING PROFILE episode_retention;
+CREATE DECAY PROFILE episode_binding
+FOR (n:MemoryEpisode)
+APPLY { DECAY PROFILE 'episode_retention' };
 
-CREATE RETENTION BINDING fact_binding
-  FOR (n:KnowledgeFact)
-  USING PROFILE fact_retention
-  PROPERTY n.tenantId NO DECAY
-  PROPERTY n.summary HALF LIFE 2592000;
+CREATE DECAY PROFILE fact_binding
+FOR (n:KnowledgeFact)
+APPLY {
+  DECAY PROFILE 'fact_retention'
+  n.tenantId NO DECAY
+  n.summary DECAY HALF LIFE 2592000
+};
 
-CREATE RETENTION BINDING skill_binding
-  FOR (n:Skill)
-  USING PROFILE skill_retention;
+CREATE DECAY PROFILE skill_binding
+FOR (n:Skill)
+APPLY { DECAY PROFILE 'skill_retention' };
 ```
 
 ### Step 3: Create Nodes
