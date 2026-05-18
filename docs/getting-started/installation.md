@@ -29,13 +29,15 @@ go build -o nornicdb ./cmd/nornicdb
 
 **Available Commands:**
 
-- `nornicdb serve` - Start the database server
-- `nornicdb shell` - Interactive Cypher query shell
-- `nornicdb decay` - Memory decay management (recalculate, archive, stats)
-- `nornicdb init` - Initialize a new database
-- `nornicdb import` - Import data from Neo4j export
+- `nornicdb version` - Print build version.
+- `nornicdb serve` - Start the database server.
+- `nornicdb shell` - Interactive Cypher query shell.
+- `nornicdb init` - Initialize a new data directory.
+- `nornicdb decay recalculate` - Recompute decay scores.
+- `nornicdb decay suppress` - Re-evaluate suppression status.
+- `nornicdb decay stats` - Print decay statistics.
 
-See **[CLI Commands Guide](../operations/cli-commands.md)** for complete documentation.
+See **[CLI Commands Guide](../operations/cli-commands.md)** for complete documentation. For migration from Neo4j, use the runnable scripts in [`scripts/migration/neo4j/`](https://github.com/orneryd/nornicdb/tree/main/scripts/migration/neo4j) instead of a CLI subcommand.
 
 ### Option 2: Docker
 

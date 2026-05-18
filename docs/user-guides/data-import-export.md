@@ -55,7 +55,7 @@ curl -X POST http://localhost:7474/db/nornic/tx/commit \
   -H "Content-Type: application/json" \
   -d '{
     "statements": [{
-      "statement": "UNWIND $nodes AS n CREATE (:Person) SET p = n",
+      "statement": "UNWIND $nodes AS n CREATE (p:Person) SET p = n",
       "parameters": {
         "nodes": [
           {"name": "Alice", "age": 30},
@@ -158,19 +158,12 @@ Same process in reverse - the formats are identical.
 ### Creating Backups
 
 ```bash
-# Stop writes, create snapshot
-docker exec nornicdb nornicdb backup /data/backup/
-
-# Or via HTTP API
-curl -X POST http://localhost:7474/admin/backup
+# Trigger a snapshot via the authenticated admin HTTP endpoint
+curl -X POST http://localhost:7474/admin/backup \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-### Restoring Backups
-
-```bash
-# Restore from backup
-docker exec nornicdb nornicdb restore /data/backup/snapshot-20240101/
-```
+For volume-level backups (raw `tar` of `/data`) see the [Backup & Restore operations guide](../operations/backup-restore.md).
 
 ---
 

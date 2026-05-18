@@ -267,14 +267,14 @@ Vector embeddings for semantic search (stored in `NamedEmbeddings` or `ChunkEmbe
 **Note:** While vectors are `[]float32` internally, they are **not** stored as regular properties. Use `NamedEmbeddings` or `ChunkEmbeddings` struct fields instead.
 
 **Example (via Cypher):**
+
+When managed embeddings are enabled, NornicDB generates embeddings for new nodes automatically — you do not call any embedding mutator from Cypher. Embeddings are queried with the standard vector index procedure:
+
 ```cypher
-// Create node with named embedding
-CALL db.index.vector.createNodeEmbedding(
-  'doc-1',
-  'Document',
-  'content',
-  'This is the document content...'
-)
+// Query the configured node vector index by text or by a precomputed vector
+CALL db.index.vector.queryNodes('embeddings', 10, 'document content text')
+YIELD node, score
+RETURN node.title, score
 ```
 
 **Example (via Go API):**
@@ -575,8 +575,8 @@ Enforce types at the schema level for data integrity:
 
 ```cypher
 // Create constraints
-CREATE CONSTRAINT person_age_integer FOR (p:Person) REQUIRE p.age IS INTEGER
-CREATE CONSTRAINT person_email_string FOR (p:Person) REQUIRE p.email IS STRING
+CREATE CONSTRAINT person_age_integer FOR (p:Person) REQUIRE p.age IS :: INTEGER
+CREATE CONSTRAINT person_email_string FOR (p:Person) REQUIRE p.email IS :: STRING
 ```
 
 ---

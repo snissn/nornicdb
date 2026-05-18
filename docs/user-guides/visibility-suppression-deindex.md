@@ -58,15 +58,14 @@ Suppression is **not** deletion:
 The `reveal()` Cypher function bypasses visibility suppression for a specific entity:
 
 ```cypher
--- See a specific suppressed node
+-- See a specific suppressed node (use reveal() in the predicate to bypass suppression)
 MATCH (n:Document {id: $id})
-CALL reveal(n)
+WHERE reveal(n)
 RETURN n, decayScore(n)
 
 -- List all suppressed documents
 MATCH (n:Document)
-CALL reveal(n)
-WHERE n.suppressed = true
+WHERE reveal(n) AND n.suppressed = true
 RETURN n.id, decayScore(n), n.suppressed_at
 ORDER BY decayScore(n)
 ```
@@ -137,7 +136,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 ```bash
 # Suppress nodes below threshold
-nornicdb suppress --data-dir ./data --threshold 0.10
+nornicdb decay suppress --data-dir ./data --threshold 0.10
 
 # View decay statistics
 nornicdb decay stats --data-dir ./data

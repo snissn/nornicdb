@@ -364,14 +364,16 @@ MERGE (me)-[:AFFECTS]->(fv);
 ### WAL txlog queries (ledger view)
 
 ```cypher
-CALL db.txlog.entries(1000, 1200) YIELD sequence, operation, tx_id, timestamp, data
-RETURN sequence, operation, tx_id, timestamp, data
-ORDER BY sequence;
+CALL db.txlog.entries() YIELD txId, db, kind, seq, timestamp, payload
+RETURN seq, kind, txId, timestamp, payload
+ORDER BY seq;
 
-CALL db.txlog.byTxId('tx-123', 200) YIELD sequence, operation, tx_id, timestamp, data
-RETURN sequence, operation, tx_id, timestamp, data
-ORDER BY sequence;
+CALL db.txlog.byTxId('tx-123') YIELD txId, db, kind, seq, timestamp, payload
+RETURN seq, kind, txId, timestamp, payload
+ORDER BY seq;
 ```
+
+`db.txlog.entries` accepts up to 4 optional positional args for filtering; pass none to scan recent entries. `db.txlog.byTxId` takes the transaction ID as a single string argument. The yield columns are fixed: `txId, db, kind, seq, timestamp, payload`.
 
 ---
 
@@ -392,19 +394,21 @@ You can use the receipt to fetch the associated WAL entries via `db.txlog.byTxId
 
 ## Step 7 — As‑of reads (temporal queries)
 
-Use the temporal helper procedure:
+Use the temporal helper procedure. Positional args: `label, keyProp, keyValue, validFromProp, validToProp, asOf` (plus two optional MVCC selectors `systemTime` and `systemSequence`).
 
 ```cypher
 CALL db.temporal.asOf(
-  'FactVersion',
-  'fact_key',
-  'product-123|price',
-  'valid_from',
-  'valid_to',
-  datetime('2024-02-15T00:00:00Z')
+  'FactVersion',                        -- label
+  'fact_key',                           -- keyProp
+  'product-123|price',                  -- keyValue
+  'valid_from',                         -- validFromProp
+  'valid_to',                           -- validToProp
+  datetime('2024-02-15T00:00:00Z')      -- asOf
 ) YIELD node
 RETURN node;
 ```
+
+See [Historical Reads & MVCC Retention](historical-reads-mvcc-retention.md) for the full set of as-of read patterns including the MVCC snapshot selectors.
 
 ---
 

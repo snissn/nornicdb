@@ -825,10 +825,13 @@ The `SubsystemContext` provides a `Heimdall` invoker for this purpose.
 // HeimdallInvoker interface methods:
 type HeimdallInvoker interface {
     // Directly invoke a registered action
-    InvokeAction(action string, params map[string]interface{}) (*ActionResult, error)
+    InvokeAction(ctx context.Context, action string, params map[string]interface{}) (*ActionResult, error)
 
-    // Send a natural language prompt to the SLM
-    SendPrompt(prompt string) (*ActionResult, error)
+    // Send a natural language prompt to the SLM (action-routing context)
+    SendPrompt(ctx context.Context, prompt string) (*ActionResult, error)
+
+    // Send a prompt directly to the LLM without action routing
+    SendRawPrompt(ctx context.Context, prompt string) (*ActionResult, error)
 
     // Async versions (fire-and-forget, results via Bifrost)
     InvokeActionAsync(action string, params map[string]interface{})

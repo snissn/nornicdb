@@ -118,7 +118,7 @@ curl -X POST http://localhost:7474/nornicdb/search \
   -d '{
     "query": "machine learning algorithms",
     "limit": 10,
-    "min_similarity": 0.5
+    "labels": ["Document"]
   }'
 ```
 
@@ -140,18 +140,17 @@ Results include RRF metadata so you can see how each ranking strategy contribute
 }
 ```
 
-### Search Options
+### HTTP Search Request Fields
 
-| Parameter        | Default | Description                                     |
-| ---------------- | ------- | ----------------------------------------------- |
-| `query`          | —       | The search text (required)                      |
-| `limit`          | 50      | Maximum number of results                       |
-| `min_similarity` | 0.5     | Minimum vector similarity threshold             |
-| `types`          | all     | Filter results to specific node labels          |
-| `rrf_k`          | 60      | RRF constant (higher = more weight to lower ranks) |
-| `vector_weight`  | 1.0     | Weight for vector search results                |
-| `bm25_weight`    | 1.0     | Weight for BM25 results                         |
-| `min_rrf_score`  | 0.01    | Minimum RRF score to include in results         |
+| Field      | Default | Description                                            |
+| ---------- | ------- | ------------------------------------------------------ |
+| `query`    | —       | The search text (required)                             |
+| `limit`    | 10      | Maximum number of results                              |
+| `labels`   | all     | Restrict results to nodes with any of these labels     |
+| `filters`  | none    | Property filters as `{"key": ["value1", "value2"]}`    |
+| `database` | default | Logical database name to search                        |
+
+RRF tuning constants (`k`, vector/BM25 weights) are applied internally by the search service and are not exposed as HTTP request fields. For programmatic control over fusion weights or k, use the embedded Go API or the MCP `discover` tool. Internal RRF defaults are `k = 60` with adaptive vector/BM25 weights driven by query length (see the table above).
 
 ### Cypher Procedure
 

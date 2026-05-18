@@ -417,21 +417,28 @@ After running all DDL statements:
 SHOW DECAY PROFILES
 ```
 
-Expected: 5 bundles and 8 bindings.
+Expected: 5 decay bundles and 8 decay bindings (one row each, distinguished by the `kind` column).
+
+```cypher
+SHOW PROMOTION PROFILES
+```
+
+Expected: 6 promotion profiles.
 
 ```cypher
 SHOW PROMOTION POLICIES
 ```
 
-Expected: 6 promotion profiles and 3 promotion policies.
+Expected: 3 promotion policies.
 
 ### CLI Maintenance
 
 ```bash
-nornicdb decay recalculate --data-dir ./data
-nornicdb suppress --data-dir ./data --threshold 0.10
+nornicdb decay suppress --data-dir ./data --threshold 0.10
 nornicdb decay stats --data-dir ./data
 ```
+
+Decay scores themselves are computed on the fly on every read, so there is no separate recalculation step. The `decay suppress` subcommand re-evaluates the visibility flag against the current scores; `decay stats` prints the score distribution.
 
 ---
 

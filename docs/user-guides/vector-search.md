@@ -101,8 +101,8 @@ YIELD node, score
 ### Go API
 
 ```go
-// Search for similar content
-results, err := db.Search(ctx, "AI and learning algorithms", 10)
+// Search for similar content (labels=nil searches all labels)
+results, err := db.Search(ctx, "AI and learning algorithms", nil, 10)
 for _, result := range results {
     fmt.Printf("Found: %s (score: %.3f)\n", result.Title, result.Score)
 }
@@ -272,7 +272,7 @@ db.ExecuteCypher(ctx, `CREATE (n:KnowledgeFact {
 }) RETURN n`, nil)
 
 // Search
-results, _ := db.Search(ctx, "AI and learning algorithms", 10)
+results, _ := db.Search(ctx, "AI and learning algorithms", nil, 10)
 ```
 
 ### Batch Embedding
@@ -372,10 +372,8 @@ RETURN node
 ```
 
 ```go
-// Via Go API
-vectorResults, _ := db.Search(ctx, "machine learning", 10)
-fullTextResults, _ := db.SearchFullText(ctx, "machine learning", 10)
-combined := mergeResults(vectorResults, fullTextResults)
+// Via Go API: HybridSearch fuses vector + BM25 internally (RRF)
+results, _ := db.HybridSearch(ctx, "machine learning", nil /* queryEmbedding optional */, nil /* labels */, 10)
 ```
 
 ---
@@ -439,10 +437,16 @@ Use this profile when memory-scaled ANN operation is more important than lowest-
 
 ### Similarity Thresholds
 
+`db.Search` itself does not take a threshold argument — apply a score cutoff in the caller (or use the REST/Cypher path with `WHERE score >= ...`):
+
 ```go
-db.Search(ctx, query, 10, 0.9) // Very similar only
-db.Search(ctx, query, 10, 0.7) // Moderately similar
-db.Search(ctx, query, 10, 0.0) // All results
+results, _ := db.Search(ctx, query, nil, 10)
+filtered := results[:0]
+for _, r := range results {
+    if r.Score >= 0.7 {
+        filtered = append(filtered, r)
+    }
+}
 ```
 
 ### Tips
@@ -460,7 +464,7 @@ db.Search(ctx, query, 10, 0.0) // All results
 
 ```go
 // 1. Search for context
-results, _ := db.Search(ctx, userQuery, 5)
+results, _ := db.Search(ctx, userQuery, nil, 5)
 
 // 2. Build context
 context := ""
@@ -475,7 +479,7 @@ response := llm.Generate(userQuery, context)
 ### Semantic K-Means Clustering
 
 ```go
-results, _ := db.Search(ctx, seed, 100)
+results, _ := db.Search(ctx, seed, nil, 100)
 clusters := groupBySimilarity(results, 0.8)
 ```
 
