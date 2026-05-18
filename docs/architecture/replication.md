@@ -176,15 +176,15 @@ type Storage interface {
 |------|----------|---------|
 | 7474 | HTTP | REST API, Admin, Health checks |
 | 7687 | Bolt | Neo4j-compatible client queries |
-| 7688 | Cluster | Replication, Raft consensus |
+| 7000 | Cluster | Replication, Raft consensus (default; configurable via `NORNICDB_CLUSTER_BIND_ADDR`) |
 
 ### Wire Format
 
-The cluster protocol uses length-prefixed JSON over TCP:
+The cluster protocol uses length-prefixed `gob`-encoded payloads over TCP. Encoder/decoder live in `pkg/replication/codec.go`.
 
 ```
 ┌─────────────┬─────────────────────────────────────┐
-│ Length (4B) │          JSON Payload               │
+│ Length (4B) │           gob Payload               │
 │ Big Endian  │                                     │
 └─────────────┴─────────────────────────────────────┘
 ```
@@ -362,7 +362,7 @@ When async replication causes conflicts:
 |----------|---------|-------------|
 | `NORNICDB_CLUSTER_MODE` | `standalone` | `standalone`, `ha_standby`, `raft`, `multi_region` |
 | `NORNICDB_CLUSTER_NODE_ID` | auto | Unique node identifier |
-| `NORNICDB_CLUSTER_BIND_ADDR` | `0.0.0.0:7688` | Cluster port binding |
+| `NORNICDB_CLUSTER_BIND_ADDR` | `0.0.0.0:7000` | Cluster port binding |
 | `NORNICDB_CLUSTER_ADVERTISE_ADDR` | same as bind | Address advertised to peers |
 
 See [Clustering Guide](../user-guides/clustering.md) for complete configuration reference.

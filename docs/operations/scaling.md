@@ -65,7 +65,7 @@ Hot standby is configured via environment variables (the replication subsystem r
 ```bash
 export NORNICDB_CLUSTER_MODE=ha_standby
 export NORNICDB_CLUSTER_HA_ROLE=primary
-export NORNICDB_CLUSTER_BIND_ADDR=0.0.0.0:7688
+export NORNICDB_CLUSTER_BIND_ADDR=0.0.0.0:7000
 ```
 
 On the standby:
@@ -73,7 +73,7 @@ On the standby:
 ```bash
 export NORNICDB_CLUSTER_MODE=ha_standby
 export NORNICDB_CLUSTER_HA_ROLE=standby
-export NORNICDB_CLUSTER_HA_PEER_ADDR=primary.nornicdb.local:7688
+export NORNICDB_CLUSTER_HA_PEER_ADDR=primary.nornicdb.local:7000
 ```
 
 See [Clustering Guide](../user-guides/clustering.md) for the full set of cluster environment variables, and [Environment Variables Reference](environment-variables.md) for the canonical inventory (search for `NORNICDB_CLUSTER_HA_*`).
@@ -113,9 +113,9 @@ For automatic failover, configure via environment variables. On the bootstrap no
 ```bash
 export NORNICDB_CLUSTER_MODE=raft
 export NORNICDB_CLUSTER_NODE_ID=node-1
-export NORNICDB_CLUSTER_BIND_ADDR=0.0.0.0:7688
+export NORNICDB_CLUSTER_BIND_ADDR=0.0.0.0:7000
 export NORNICDB_CLUSTER_RAFT_BOOTSTRAP=true
-export NORNICDB_CLUSTER_RAFT_PEERS="node-2:node-2.nornicdb.local:7688,node-3:node-3.nornicdb.local:7688"
+export NORNICDB_CLUSTER_RAFT_PEERS="node-2:node-2.nornicdb.local:7000,node-3:node-3.nornicdb.local:7000"
 ```
 
 On peer nodes set the same `NORNICDB_CLUSTER_RAFT_PEERS` list (rotating their own entry out) and `NORNICDB_CLUSTER_RAFT_BOOTSTRAP=false`. See [Clustering Guide → Raft](../user-guides/clustering.md) for full setup.
@@ -151,7 +151,7 @@ spec:
         ports:
         - containerPort: 7474
         - containerPort: 7687
-        - containerPort: 7688  # Raft port
+        - containerPort: 7000  # Raft port
         volumeMounts:
         - name: data
           mountPath: /data

@@ -118,7 +118,7 @@ Features:
 	// Replication / HA (pkg/replication). These map to NORNICDB_CLUSTER_* env vars.
 	serveCmd.Flags().String("cluster-mode", getEnvStr("NORNICDB_CLUSTER_MODE", ""), "Cluster mode: standalone|ha_standby|raft|multi_region (empty disables clustering)")
 	serveCmd.Flags().String("cluster-node-id", getEnvStr("NORNICDB_CLUSTER_NODE_ID", ""), "Cluster node ID (empty auto-generates)")
-	serveCmd.Flags().String("cluster-bind-addr", getEnvStr("NORNICDB_CLUSTER_BIND_ADDR", ""), "Cluster bind address for replication protocol (e.g., 127.0.0.1:7688)")
+	serveCmd.Flags().String("cluster-bind-addr", getEnvStr("NORNICDB_CLUSTER_BIND_ADDR", ""), "Cluster bind address for replication protocol (e.g., 127.0.0.1:7000)")
 	serveCmd.Flags().String("cluster-advertise-addr", getEnvStr("NORNICDB_CLUSTER_ADVERTISE_ADDR", ""), "Cluster advertise address (defaults to bind addr)")
 	serveCmd.Flags().String("cluster-data-dir", getEnvStr("NORNICDB_CLUSTER_DATA_DIR", ""), "Cluster state directory (defaults to <data-dir>/replication)")
 
@@ -128,7 +128,7 @@ Features:
 
 	// Raft
 	serveCmd.Flags().Bool("cluster-raft-bootstrap", getEnvBool("NORNICDB_CLUSTER_RAFT_BOOTSTRAP", false), "Raft bootstrap (true for first node in a new cluster)")
-	serveCmd.Flags().String("cluster-raft-peers", getEnvStr("NORNICDB_CLUSTER_RAFT_PEERS", ""), "Raft peers (format: node2:host2:7688,node3:host3:7688)")
+	serveCmd.Flags().String("cluster-raft-peers", getEnvStr("NORNICDB_CLUSTER_RAFT_PEERS", ""), "Raft peers (format: node2:host2:7000,node3:host3:7000)")
 	rootCmd.AddCommand(serveCmd)
 
 	// Init command
