@@ -64,8 +64,15 @@ For current releases, `storage_serializer` controls the primary storage format f
 **Important:** stop the NornicDB server before migrating. This is an offline, in‑place conversion.
 
 ### 1) Backup first
+
 ```bash
-nornicdb backup --output=backup-$(date +%Y%m%d).tar.gz
+# While the server is running, trigger an admin backup over HTTP
+curl -sf -X POST http://localhost:7474/admin/backup \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{\"output\":\"/backups/backup-$(date +%Y%m%d).json\"}"
+
+# Or after stopping the server, copy the data directory
+tar czf backup-$(date +%Y%m%d).tar.gz ./data
 ```
 
 ### 2) Dry‑run (recommended)

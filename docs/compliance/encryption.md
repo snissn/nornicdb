@@ -116,14 +116,12 @@ openssl req -x509 -nodes -days 365 -newkey rsa:4096 \
 **You cannot convert between encrypted/unencrypted in place.**
 
 To enable encryption on existing data:
-1. Export your data (`nornicdb export`)
-2. Create new encrypted database
-3. Import data (`nornicdb import`)
 
-To disable encryption:
-1. Export data from encrypted database
-2. Create new unencrypted database
-3. Import data
+1. Trigger a JSON backup of the live database via `POST /admin/backup` (see [Backup & Restore](../operations/backup-restore.md)).
+2. Stop the server, point at a fresh data directory, and start the server with the desired encryption settings (see [CMEK Setup](../encryption/cmek-setup.md)).
+3. Restore the backup file via the embedded Go API (`db.Restore`) or by replaying the backup against the fresh database.
+
+To disable encryption, follow the same process in reverse: back up from the encrypted database, start a new instance without encryption configured, and restore.
 
 ### Error Handling
 

@@ -61,20 +61,7 @@ fmt.Printf("Disk saved: %s\n", stats.DiskSavings)
 
 ## Online Backup
 
-### Create Backup
-
-```bash
-# Backup to file
-nornicdb backup --output backup-$(date +%Y%m%d).tar.gz
-
-# Backup with compression
-nornicdb backup --output backup.tar.gz --compress gzip
-
-# Backup specific data
-nornicdb backup --output backup.tar.gz --include-wal
-```
-
-**Note:** All backups automatically include user accounts stored in the system database. When you restore from backup, all user accounts are restored along with the database data.
+NornicDB exposes a backup endpoint over HTTP. There is no `nornicdb backup` CLI subcommand; use the admin API or, for embedded deployments, the Go API. Backups always include user accounts stored in the system database.
 
 ### API Backup
 
@@ -84,24 +71,28 @@ curl -X POST http://localhost:7474/admin/backup \
   -d '{"output": "/backups/backup-2024-12-01.tar.gz"}'
 ```
 
-## Restore
+The endpoint requires `admin` permission.
 
-### Restore from JSON Backup
+### Go API Backup
 
 ```go
-// Restore from JSON backup file
-err := db.Restore(ctx, "backup-20241201.json")
+err := db.Backup(ctx, "backup-20241201.json")
 if err != nil {
     log.Fatal(err)
 }
 ```
 
-### API Restore
+## Restore
 
-```bash
-curl -X POST http://localhost:7474/admin/restore \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"input": "/backups/backup-2024-12-01.json"}'
+Restore is performed via the embedded Go API. There is no `/admin/restore` HTTP endpoint and no `nornicdb restore` CLI subcommand. To restore a remote instance, copy the data directory or use `docker cp`/Kubernetes volume restore patterns shown below.
+
+### Go API Restore
+
+```go
+err := db.Restore(ctx, "backup-20241201.json")
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### Verify Restore
@@ -181,11 +172,15 @@ spec:
 
 ## Automated Backups
 
+Schedule backups by calling the `/admin/backup` endpoint or by snapshotting the data directory while the server is shut down (or via a Docker volume snapshot).
+
 ### Cron Job
 
 ```bash
 # /etc/cron.d/nornicdb-backup
-0 2 * * * root /usr/local/bin/nornicdb backup --output /backups/nornicdb-$(date +\%Y\%m\%d).tar.gz
+0 2 * * * root curl -sf -X POST http://localhost:7474/admin/backup \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{\"output\":\"/backups/nornicdb-$(date +\%Y\%m\%d).json\"}"
 ```
 
 ### Kubernetes CronJob
@@ -203,21 +198,24 @@ spec:
         spec:
           containers:
             - name: backup
-              image: timothyswt/nornicdb-arm64-metal:latest
+              image: curlimages/curl:latest
               command:
-                - /app/nornicdb
-                - backup
-                - --output=/backups/backup-$(date +%Y%m%d).tar.gz
+                - sh
+                - -c
+                - >-
+                  curl -sf -X POST http://nornicdb:7474/admin/backup
+                  -H "Authorization: Bearer $TOKEN"
+                  -d "{\"output\":\"/backups/backup-$(date +%Y%m%d).json\"}"
+              env:
+                - name: TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: nornicdb-admin-token
+                      key: token
               volumeMounts:
-                - name: data
-                  mountPath: /data
-                  readOnly: true
                 - name: backups
                   mountPath: /backups
           volumes:
-            - name: data
-              persistentVolumeClaim:
-                claimName: nornicdb-pvc
             - name: backups
               persistentVolumeClaim:
                 claimName: nornicdb-backups-pvc
@@ -230,58 +228,37 @@ spec:
 
 ```bash
 # Keep last 7 daily backups
-find /backups -name "nornicdb-*.tar.gz" -mtime +7 -delete
+find /backups -name "nornicdb-*.json" -mtime +7 -delete
 
 # Keep last 4 weekly backups
-find /backups/weekly -name "*.tar.gz" -mtime +28 -delete
-```
-
-### Retention Script
-
-```bash
-#!/bin/bash
-# backup-rotate.sh
-
-BACKUP_DIR=/backups
-DAILY_KEEP=7
-WEEKLY_KEEP=4
-MONTHLY_KEEP=12
-
-# Create backup
-nornicdb backup --output $BACKUP_DIR/daily/nornicdb-$(date +%Y%m%d).tar.gz
-
-# Rotate daily
-find $BACKUP_DIR/daily -name "*.tar.gz" -mtime +$DAILY_KEEP -delete
-
-# Weekly (Sunday)
-if [ $(date +%u) -eq 7 ]; then
-  cp $BACKUP_DIR/daily/nornicdb-$(date +%Y%m%d).tar.gz $BACKUP_DIR/weekly/
-fi
-
-# Monthly (1st of month)
-if [ $(date +%d) -eq 01 ]; then
-  cp $BACKUP_DIR/daily/nornicdb-$(date +%Y%m%d).tar.gz $BACKUP_DIR/monthly/
-fi
+find /backups/weekly -name "*.json" -mtime +28 -delete
 ```
 
 ## Cloud Backup
 
+Use the `/admin/backup` endpoint to write a JSON backup to a local path, then upload that file with the relevant cloud CLI.
+
 ### AWS S3
 
 ```bash
-# Backup to S3
-nornicdb backup --output - | aws s3 cp - s3://mybucket/nornicdb/backup-$(date +%Y%m%d).tar.gz
+# Trigger backup
+curl -sf -X POST http://localhost:7474/admin/backup \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{\"output\":\"/backups/backup-$(date +%Y%m%d).json\"}"
 
-# Restore from S3
-aws s3 cp s3://mybucket/nornicdb/backup-20241201.tar.gz - | nornicdb restore --input -
+# Upload
+aws s3 cp /backups/backup-$(date +%Y%m%d).json \
+  s3://mybucket/nornicdb/backup-$(date +%Y%m%d).json
 ```
 
 ### Google Cloud Storage
 
 ```bash
-# Backup to GCS
-nornicdb backup --output - | gsutil cp - gs://mybucket/nornicdb/backup-$(date +%Y%m%d).tar.gz
+gsutil cp /backups/backup-$(date +%Y%m%d).json \
+  gs://mybucket/nornicdb/backup-$(date +%Y%m%d).json
 ```
+
+For restoring on a remote instance, copy the JSON file to the target host and call `db.Restore` from your application code, or replace the data directory while the server is stopped.
 
 ## Disaster Recovery
 

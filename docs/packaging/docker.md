@@ -276,22 +276,24 @@ docker start nornicdb
 
 ### Migration
 
-```bash
-# Export from old container
-docker exec nornicdb nornicdb export --format cypher > backup.cypher
+For migrations between containers, use the runnable scripts in [`scripts/migration/neo4j/`](https://github.com/orneryd/nornicdb/tree/main/scripts/migration/neo4j) or copy the data directory between volumes:
 
-# Import to new container
-docker exec -i new-nornicdb nornicdb import < backup.cypher
+```bash
+# Stop both containers, then copy the data volume
+docker run --rm \
+  -v nornicdb-data:/from:ro \
+  -v new-nornicdb-data:/to \
+  alpine sh -c "cp -a /from/. /to/"
 ```
 
 ## Health Checks
 
 ```bash
 # HTTP health
-curl http://localhost:7474/status
+curl http://localhost:7474/health
 
 # Bolt connection test
-docker exec nornicdb nornicdb health
+docker exec nornicdb sh -c 'nc -z localhost 7687 && echo OK'
 
 # Container health
 docker inspect --format='{{.State.Health.Status}}' nornicdb

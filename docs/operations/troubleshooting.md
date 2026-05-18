@@ -310,19 +310,16 @@ On startup, NornicDB will:
 
 **Solutions:**
 
-1. **Verify data:**
-   ```bash
-   nornicdb verify --check-all
-   ```
+1. **Restart with auto-recovery:**
+   NornicDB sets `NORNICDB_AUTO_RECOVER_ON_CORRUPTION=true` by default; on an unclean shutdown the server replays WAL/snapshots and renames the corrupted directory to `<dataDir>.corrupted-<timestamp>`. See [Feature Flags](../features/feature-flags.md#auto-recover-on-corruption) for details.
 
 2. **Restore from backup:**
-   ```bash
-   nornicdb restore --input backup.tar.gz
-   ```
+   Stop the server, replace the data directory with a backup, and start the server. Or, for embedded deployments, call `db.Restore(ctx, path)` from your application code.
 
-3. **Rebuild indexes:**
+3. **Rebuild search indexes:**
    ```bash
-   nornicdb admin rebuild-indexes
+   curl -X POST http://localhost:7474/nornicdb/search/rebuild \
+     -H "Authorization: Bearer $TOKEN"
    ```
 
 ## Embedding Issues

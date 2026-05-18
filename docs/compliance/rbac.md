@@ -335,10 +335,13 @@ curl http://localhost:7474/db/nornic/tx/commit \
 
 ### API Keys
 
-For service-to-service communication:
+For service-to-service communication, generate an API token via the admin endpoint (requires the `admin` permission):
 
 ```bash
-nornicdb apikey create --name "backend-service" --role editor
+curl -X POST http://localhost:7474/auth/api-token \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "backend-service", "role": "editor"}'
 ```
 
 ---

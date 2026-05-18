@@ -180,35 +180,26 @@ rate_limiting:
 
 ## Backup & Recovery (A1.2, A1.3)
 
+See [Backup & Restore](../operations/backup-restore.md) for the canonical procedure. Backups are produced through the `/admin/backup` HTTP endpoint or by snapshotting the data directory while the server is stopped. There is no `nornicdb backup`/`nornicdb restore` CLI subcommand; restoration is performed via the embedded Go API (`db.Restore`) or by copying the backup file into the data directory at startup.
+
 ### Backup Procedures
 
 ```bash
-# Create backup
-nornicdb backup --output backup-$(date +%Y%m%d).tar.gz
-
-# Verify backup
-nornicdb backup verify --input backup-20241201.tar.gz
+# Trigger an admin backup over HTTP
+curl -sf -X POST http://localhost:7474/admin/backup \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{\"output\":\"/backups/backup-$(date +%Y%m%d).json\"}"
 ```
 
 ### Recovery Procedures
 
-```bash
-# Restore from backup
-nornicdb restore --input backup-20241201.tar.gz
+For embedded deployments, call `db.Restore(ctx, path)` from your application code. For server deployments, stop the server, replace the data directory with the desired state (or copy in the JSON backup file), and start the server.
 
-# Point-in-time recovery
-nornicdb restore --input backup-20241201.tar.gz --to "2024-12-01T10:00:00Z"
-```
+Point-in-time recovery is not exposed as a single command; combine WAL retention (see [WAL Compaction](../operations/wal-compaction.md)) with MVCC historical reads (see [Historical Reads & MVCC Retention](../user-guides/historical-reads-mvcc-retention.md)).
 
 ### Recovery Testing
 
-```bash
-# Test recovery (dry run)
-nornicdb restore --input backup-20241201.tar.gz --dry-run
-
-# Verify data integrity
-nornicdb verify --check-all
-```
+Use a non-production environment to validate restores. The MVCC lifecycle admin API (`GET /admin/databases/{db}/mvcc`) reports lifecycle state after a restore so operators can confirm the target's MVCC head metadata is healthy before promoting the instance.
 
 ## Encryption (CC6.6, CC6.7)
 

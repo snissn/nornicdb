@@ -33,7 +33,6 @@ go build -o nornicdb ./cmd/nornicdb
 - `nornicdb serve` - Start the database server.
 - `nornicdb shell` - Interactive Cypher query shell.
 - `nornicdb init` - Initialize a new data directory.
-- `nornicdb decay recalculate` - Recompute decay scores.
 - `nornicdb decay suppress` - Re-evaluate suppression status.
 - `nornicdb decay stats` - Print decay statistics.
 
