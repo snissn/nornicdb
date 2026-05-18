@@ -98,16 +98,18 @@ enabled by default to preserve existing behavior; retention is **opt-in**.
 You can query WAL entries directly via Cypher:
 
 ```cypher
-// Read entries by sequence range
-CALL db.txlog.entries(1000, 1200) YIELD sequence, operation, tx_id, timestamp, data
-RETURN sequence, operation, tx_id, timestamp, data
-ORDER BY sequence;
+// Scan recent entries (no args = recent window)
+CALL db.txlog.entries() YIELD txId, db, kind, seq, timestamp, payload
+RETURN seq, kind, txId, timestamp, payload
+ORDER BY seq;
 
 // Read entries for a specific transaction
-CALL db.txlog.byTxId('tx-123', 200) YIELD sequence, operation, tx_id, timestamp, data
-RETURN sequence, operation, tx_id, timestamp, data
-ORDER BY sequence;
+CALL db.txlog.byTxId('tx-123') YIELD txId, db, kind, seq, timestamp, payload
+RETURN seq, kind, txId, timestamp, payload
+ORDER BY seq;
 ```
+
+`db.txlog.entries` accepts up to 4 optional positional args (filter parameters); pass none for a recent-window scan. `db.txlog.byTxId` takes a single transaction ID. The yield columns are fixed: `txId, db, kind, seq, timestamp, payload`.
 
 ---
 

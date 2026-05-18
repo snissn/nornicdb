@@ -50,7 +50,7 @@ nornicdb serve \
 
 ```
 ┌─────────────┐     ┌─────────────┐
-│   Primary   │────▶│   Replica   │
+│   Primary   │────▶│   Standby   │
 │   (Write)   │     │   (Read)    │
 └─────────────┘     └─────────────┘
         │                  │
@@ -60,23 +60,23 @@ nornicdb serve \
 
 ### Configuration
 
-```yaml
-# Primary server
-replication:
-  role: primary
-  replicas:
-    - host: replica-1.nornicdb.local
-      port: 7687
-    - host: replica-2.nornicdb.local
-      port: 7687
+Hot standby is configured via environment variables (the replication subsystem reads `NORNICDB_CLUSTER_*`). On the primary:
 
-# Replica server
-replication:
-  role: replica
-  primary:
-    host: primary.nornicdb.local
-    port: 7687
+```bash
+export NORNICDB_CLUSTER_MODE=ha_standby
+export NORNICDB_CLUSTER_HA_ROLE=primary
+export NORNICDB_CLUSTER_BIND_ADDR=0.0.0.0:7688
 ```
+
+On the standby:
+
+```bash
+export NORNICDB_CLUSTER_MODE=ha_standby
+export NORNICDB_CLUSTER_HA_ROLE=standby
+export NORNICDB_CLUSTER_HA_PEER_ADDR=primary.nornicdb.local:7688
+```
+
+See [Clustering Guide](../user-guides/clustering.md) for the full set of cluster environment variables, and [Environment Variables Reference](environment-variables.md) for the canonical inventory (search for `NORNICDB_CLUSTER_HA_*`).
 
 ### Load Balancing
 
@@ -108,23 +108,17 @@ server {
 
 ### Raft Consensus
 
-For automatic failover:
+For automatic failover, configure via environment variables. On the bootstrap node:
 
-```yaml
-cluster:
-  enabled: true
-  mode: raft
-  nodes:
-    - id: node-1
-      host: node-1.nornicdb.local
-      port: 7687
-    - id: node-2
-      host: node-2.nornicdb.local
-      port: 7687
-    - id: node-3
-      host: node-3.nornicdb.local
-      port: 7687
+```bash
+export NORNICDB_CLUSTER_MODE=raft
+export NORNICDB_CLUSTER_NODE_ID=node-1
+export NORNICDB_CLUSTER_BIND_ADDR=0.0.0.0:7688
+export NORNICDB_CLUSTER_RAFT_BOOTSTRAP=true
+export NORNICDB_CLUSTER_RAFT_PEERS="node-2:node-2.nornicdb.local:7688,node-3:node-3.nornicdb.local:7688"
 ```
+
+On peer nodes set the same `NORNICDB_CLUSTER_RAFT_PEERS` list (rotating their own entry out) and `NORNICDB_CLUSTER_RAFT_BOOTSTRAP=false`. See [Clustering Guide → Raft](../user-guides/clustering.md) for full setup.
 
 ### Kubernetes StatefulSet
 
@@ -173,29 +167,27 @@ spec:
 
 ## Caching
 
-### Query Cache
+### Query Plan Cache
 
-```yaml
-cache:
-  query:
-    enabled: true
-    size: 5000
-    ttl: 5m
-  
-  embedding:
-    enabled: true
-    size: 10000
+```bash
+nornicdb serve --query-cache-size=5000 --query-cache-ttl=10m
 ```
 
-### External Cache (Redis)
+The query plan cache is in-process. It is sized in entries (`--query-cache-size`, default `1000`; `0` disables) with a TTL (`--query-cache-ttl`, default `5m`).
 
-```yaml
-cache:
-  external:
-    enabled: true
-    type: redis
-    address: redis:6379
+### Embedding Cache
+
+```bash
+nornicdb serve --embedding-cache=10000
 ```
+
+In-process LRU embedding cache for query auto-embedding. Default `10000` entries (~40MB at 1024-dim). Set `0` to disable. See [Feature Flags → Embedding Cache](../features/feature-flags.md#embedding-cache).
+
+### Search Result Cache
+
+Search results are cached automatically by the hybrid search service (LRU 1000 entries, 5-minute TTL, invalidated on writes). No configuration knob is exposed today; see [Hybrid Search → Caching](../user-guides/hybrid-search.md#caching).
+
+NornicDB has no external cache integration (no Redis adapter ships). All caching is in-process.
 
 ## Performance Tuning
 
@@ -206,15 +198,6 @@ nornicdb serve \
   --parallel=true \
   --parallel-workers=0 \  # Auto-detect CPUs
   --parallel-batch-size=1000
-```
-
-### Connection Pooling
-
-```yaml
-pool:
-  enabled: true
-  max_connections: 100
-  idle_timeout: 5m
 ```
 
 ### Object Pooling
@@ -249,12 +232,12 @@ groups:
           summary: "High request rate - consider scaling"
       
       - alert: ReplicationLag
-        expr: nornicdb_replication_lag_seconds > 10
+        expr: nornicdb_replication_lag_entries > 1000
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "Replication lag detected"
+          summary: "Replication lag (WAL entries behind primary) detected"
 ```
 
 ## Capacity Planning
@@ -281,5 +264,5 @@ curl http://localhost:7474/metrics | grep nornicdb_storage_bytes
 - **[Monitoring](monitoring.md)** - Performance monitoring
 - **[Clustering](../user-guides/clustering.md)** - HA clustering guide
 - **[Cluster Security](cluster-security.md)** - Authentication for clusters
-- **[Clustering Roadmap](../architecture/clustering-roadmap.md)** - Future sharding plans
+- **[Clustering Roadmap](../architecture/clustering-roadmap.md)** - Sharding via composite databases
 
