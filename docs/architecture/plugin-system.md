@@ -1,335 +1,61 @@
-# NornicDB Plugin Architecture
-
-**Status:** Design  
-**Version:** 0.1  
-**Date:** December 1, 2025
-
-## Overview
-
-NornicDB supports extensible Cypher functions through a plugin system. This allows:
-
-- **Community extensions** without forking
-- **Selective loading** of only needed functions
-- **Custom functions** for specific use cases
-- **Clean separation** of core vs extended functionality
-
-## Why Plugins vs Built-in?
-
-| Approach          | Pros                                 | Cons                                    |
-| ----------------- | ------------------------------------ | --------------------------------------- |
-| **All Built-in**  | Simple deployment                    | Bloat, maintenance burden, slow startup |
-| **Plugin System** | Modular, community-driven, lean core | Slightly more complex setup             |
-
-**Decision:** Plugin system - keeps core fast and focused while enabling extensibility.
-
-## Plugin Types
-
-### 1. Cypher Function Plugins
-
-Add custom functions callable in Cypher queries:
-
-```go
-// Example: Text analysis plugin
-type Plugin interface {
-    Name() string
-    Version() string
-    Functions() []FunctionDef
-}
-
-type TextAnalysisPlugin struct{}
-
-func (p *TextAnalysisPlugin) Functions() []FunctionDef {
-    return []FunctionDef{
-        {
-            Name:        "text.sentiment",
-            Description: "Analyze sentiment of text",
-            Args:        []ArgDef{{Name: "text", Type: "STRING"}},
-            Returns:     "FLOAT",
-            Handler:     p.sentiment,
-        },
-        {
-            Name:        "text.summarize",
-            Description: "Summarize text content",
-            Args:        []ArgDef{{Name: "text", Type: "STRING"}, {Name: "maxLength", Type: "INTEGER"}},
-            Returns:     "STRING",
-            Handler:     p.summarize,
-        },
-    }
-}
-```
-
-**Usage in Cypher:**
-
-```cypher
-MATCH (n:Document)
-RETURN n.title, text.sentiment(n.content) AS sentiment
-ORDER BY sentiment DESC
-```
+# Plugin System Architecture
 
-### 2. Procedure Plugins
-
-Add custom CALL procedures:
+NornicDB ships a unified plugin loader that auto-detects and routes plugins to the right subsystem at startup. Two plugin types are supported:
 
-```go
-type ProcedurePlugin interface {
-    Plugin
-    Procedures() []ProcedureDef
-}
-
-type GraphAlgoPlugin struct{}
-
-func (p *GraphAlgoPlugin) Procedures() []ProcedureDef {
-    return []ProcedureDef{
-        {
-            Name:        "algo.pageRank",
-            Description: "Calculate PageRank for nodes",
-            Args:        []ArgDef{{Name: "iterations", Type: "INTEGER"}},
-            Yields:      []YieldDef{{Name: "nodeId", Type: "STRING"}, {Name: "score", Type: "FLOAT"}},
-            Handler:     p.pageRank,
-        },
-    }
-}
-```
-
-**Usage:**
-
-```cypher
-CALL algo.pageRank(20) YIELD nodeId, score
-RETURN nodeId, score ORDER BY score DESC LIMIT 10
-```
-
-### 3. Aggregation Function Plugins
+| Type | Interface | Subsystem | Example |
+|---|---|---|---|
+| **Function** | `apoc.Plugin` (in `apoc/`) | Cypher executor — registers functions callable from queries | APOC (`apoc.coll.sum`, `apoc.text.join`, `apoc.algo.pageRank`, ~960 functions) |
+| **Heimdall** | `heimdall.HeimdallPlugin` (in `pkg/heimdall/`) | SLM subsystem — registers actions invokable by the AI assistant | Watcher plugin (`heimdall_watcher_query`, `heimdall_watcher_status`, …) |
 
-Custom aggregate functions:
+Plugins are dynamic Go shared objects (`.so` files on Linux/macOS) loaded at startup from configured directories. Each plugin's `Type()` method tells the loader which subsystem to route it to, so neither type requires manual registration in the host binary.
 
-```go
-type AggregationPlugin interface {
-    Plugin
-    Aggregations() []AggregationDef
-}
+## Loader
 
-// Example: percentile, median, mode
-```
+The loader lives in `pkg/nornicdb/plugins.go` for function plugins and `pkg/heimdall/plugin.go` for Heimdall plugins. Both follow the same pattern:
 
-## Plugin Loading
+1. Scan the plugin directory for `*.so` files.
+2. `plugin.Open()` each file and look up the exported `Plugin` symbol.
+3. Call `Type()` on the symbol.
+4. Route to the function-plugin path or the Heimdall-plugin path.
 
-### Configuration
+Function plugins register their functions with the Cypher executor through the APOC adapter; Heimdall plugins register their actions with the `SubsystemManager` and start their lifecycle hooks.
 
-```yaml
-# nornicdb.yaml
-plugins:
-  enabled: true
-  directory: /etc/nornicdb/plugins
-  autoload:
-    - text-analysis
-    - graph-algorithms
-```
+## Configuration
 
-### Environment Variables
+| Variable | Purpose |
+|---|---|
+| `NORNICDB_PLUGINS_DIR` | Directory scanned for function plugins. Default: `apoc/built-plugins`. |
+| `NORNICDB_PLUGINS_ENABLED` | Master switch for the loader. |
+| `NORNICDB_HEIMDALL_PLUGINS_DIR` | Directory scanned for Heimdall plugins. |
+| `NORNICDB_HEIMDALL_ENABLED` | Heimdall plugins only start when this is `true` (the loader skips them otherwise to avoid background goroutines). |
 
-```bash
-NORNICDB_PLUGINS_ENABLED=true
-NORNICDB_PLUGINS_DIR=/etc/nornicdb/plugins
-NORNICDB_PLUGINS_LOAD=text-analysis,graph-algorithms
-```
+There is no separate Cypher procedure for plugin lifecycle (`dbms.plugins.list/load/unload` is **not** implemented). Plugins are loaded once at startup; restart the server to add or remove plugins.
 
-### Runtime Loading
+## Where the consumer-facing docs live
 
-```cypher
--- List available plugins
-CALL dbms.plugins.list() YIELD name, version, functions, procedures
+This architecture file is intentionally small. For day-to-day usage:
 
--- Load a plugin
-CALL dbms.plugins.load('text-analysis')
+- [Plugin System (User Guide)](../user-guides/plugin-system.md) — APOC plugin usage in Cypher.
+- [Plugin System (Feature Reference)](../features/plugin-system.md) — full operator-facing plugin reference, including build/install steps and the auto-detecting loader.
+- [APOC Functions](../features/apoc-functions.md) — function catalog by category.
+- [Heimdall Plugins](../user-guides/heimdall-plugins.md) — writing Heimdall plugins (action handlers, lifecycle hooks, autonomous invocation).
 
--- Unload a plugin
-CALL dbms.plugins.unload('text-analysis')
-```
+## Platform support
 
-## Plugin Interface (Go)
+Go plugins are supported on Linux (amd64, arm64), macOS (arm64, amd64), and **not supported on Windows** (Go's `plugin` package is Linux/macOS only). For Windows deployments, plugins must be compiled into the main binary as built-ins.
 
-```go
-package plugin
+## Security posture
 
-// Plugin is the base interface all plugins must implement
-type Plugin interface {
-    // Name returns the plugin identifier (e.g., "text-analysis")
-    Name() string
-
-    // Version returns semantic version (e.g., "1.0.0")
-    Version() string
-
-    // Description returns human-readable description
-    Description() string
-
-    // Initialize is called when the plugin is loaded
-    Initialize(ctx PluginContext) error
-
-    // Shutdown is called when the plugin is unloaded
-    Shutdown() error
-}
-
-// FunctionPlugin provides custom Cypher functions
-type FunctionPlugin interface {
-    Plugin
-    Functions() []FunctionDefinition
-}
-
-// ProcedurePlugin provides custom CALL procedures
-type ProcedurePlugin interface {
-    Plugin
-    Procedures() []ProcedureDefinition
-}
-
-// PluginContext provides access to NornicDB internals
-type PluginContext interface {
-    // Storage access (read-only by default)
-    Storage() StorageReader
-
-    // Logger for plugin output
-    Logger() *log.Logger
-
-    // Config access
-    Config(key string) interface{}
-}
-```
-
-## Planned Core Plugins
-
-### 1. `apoc-core` - Essential APOC Functions
-
-Most-used APOC functions:
-
-```
-apoc.coll.sum, apoc.coll.avg, apoc.coll.min, apoc.coll.max
-apoc.text.join, apoc.text.split, apoc.text.replace
-apoc.date.format, apoc.date.parse
-apoc.convert.toJson, apoc.convert.fromJson
-apoc.map.merge, apoc.map.fromPairs
-```
-
-### 2. `graph-algorithms` - Graph Analytics
-
-```
-algo.pageRank
-algo.betweenness
-algo.closeness
-algo.communityDetection
-algo.shortestPath.dijkstra
-algo.allShortestPaths
-```
-
-### 3. `text-analysis` - NLP Functions
-
-```
-text.sentiment
-text.keywords
-text.summarize
-text.similarity
-text.language
-```
-
-### 4. `temporal` - Advanced Date/Time
-
-```
-temporal.between
-temporal.duration.between
-temporal.truncate
-temporal.add
-```
-
-## Security Considerations
-
-1. **Sandboxing**: Plugins run in restricted context
-2. **Permissions**: Admin-only plugin management
-3. **Audit**: Plugin load/unload events logged
-4. **Signatures**: Optional plugin signature verification
-
-## Implementation Phases
-
-### Phase 1: Foundation (v0.2.0)
-
-- [ ] Plugin interface definition
-- [ ] Plugin loader/unloader
-- [ ] Basic function registration
-- [ ] `dbms.plugins.*` procedures
-
-### Phase 2: Core Plugins (v0.3.0)
-
-- [ ] `apoc-core` plugin with 20 most-used functions
-- [ ] `graph-algorithms` plugin
-- [ ] Plugin distribution mechanism
-
-### Phase 3: Community (v0.4.0)
-
-- [ ] Plugin registry/marketplace
-- [ ] Plugin development SDK
-- [ ] Documentation and examples
-
-## Example: Creating a Plugin
-
-```go
-// myplugin/plugin.go
-package main
-
-import "github.com/orneryd/nornicdb/pkg/plugin"
-
-type MyPlugin struct{}
-
-func (p *MyPlugin) Name() string        { return "my-plugin" }
-func (p *MyPlugin) Version() string     { return "1.0.0" }
-func (p *MyPlugin) Description() string { return "My custom functions" }
-
-func (p *MyPlugin) Initialize(ctx plugin.PluginContext) error {
-    ctx.Logger().Println("MyPlugin initialized")
-    return nil
-}
-
-func (p *MyPlugin) Shutdown() error { return nil }
-
-func (p *MyPlugin) Functions() []plugin.FunctionDefinition {
-    return []plugin.FunctionDefinition{
-        {
-            Name:    "my.hello",
-            Args:    []plugin.Arg{{Name: "name", Type: "STRING"}},
-            Returns: "STRING",
-            Handler: func(args []interface{}) (interface{}, error) {
-                name := args[0].(string)
-                return "Hello, " + name + "!", nil
-            },
-        },
-    }
-}
-
-// Plugin export
-var NornicDBPlugin plugin.Plugin = &MyPlugin{}
-```
-
-**Build:**
-
-```bash
-go build -buildmode=plugin -o myplugin.so myplugin/plugin.go
-```
-
-**Load:**
-
-```bash
-cp myplugin.so /etc/nornicdb/plugins/
-```
-
-**Use:**
-
-```cypher
-RETURN my.hello('World') AS greeting
-// Returns: "Hello, World!"
-```
+- Plugins run in the same process and with the same OS permissions as `nornicdb serve`. They are not sandboxed.
+- Only load plugins from trusted sources.
+- Plugin code has full system access (storage engine, network, filesystem).
+- Use Docker volume mounts and explicit `NORNICDB_PLUGINS_DIR` paths for isolation.
+- Heimdall plugins additionally see the active session's `PrincipalRoles`, `DatabaseAccessMode`, and `ResolvedAccess` so they can enforce per-database RBAC inside their own action handlers — see [Heimdall Plugins](../user-guides/heimdall-plugins.md#actioncontext) for the contract.
 
 ## Related Documentation
 
-- [Functions Index](../api-reference/cypher-functions/README.md) - Built-in functions
-- [APOC Compatibility](../features/apoc-functions.md) - APOC function status
-- [Contributing](../contributing.md) - How to contribute plugins
-
----
-
-_This is a design document. Implementation is planned for v0.2.0._
+- [Plugin System (Feature Reference)](../features/plugin-system.md)
+- [Plugin System (User Guide)](../user-guides/plugin-system.md)
+- [APOC Functions](../features/apoc-functions.md)
+- [Heimdall Plugins](../user-guides/heimdall-plugins.md)
+- [Cognitive SLM Architecture](cognitive-slm-architecture.md) — Heimdall subsystem context

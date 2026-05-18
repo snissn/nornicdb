@@ -44,13 +44,12 @@ NornicDB uses **key-prefix namespacing** within a single storage backend:
 
 ### Implemented Features
 
-- ✅ **Database Aliases** - CREATE/DROP/SHOW ALIAS commands, alias resolution
-- ✅ **Per-Database Resource Limits** - Limit configuration and storage (enforcement in progress)
+- ✅ **Database Aliases** — CREATE/DROP/SHOW ALIAS commands, alias resolution
+- ✅ **Per-Database Resource Limits** — `ALTER DATABASE ... SET LIMIT max_nodes/max_edges/max_bytes/max_query_time/max_results/max_concurrent_queries/max_connections/max_queries_per_second/max_writes_per_second`, enforced at runtime
+- ✅ **Composite Databases (Sharding)** — `CREATE COMPOSITE DATABASE` with local and remote constituents, `USE <composite>.<alias>` Fabric-style routing, many-read/one-write transactional semantics, OIDC credential forwarding for remote constituents
+- ✅ **Schema merging** for composite databases — constraints and indexes (property, composite, fulltext, vector, range) merged into a unified read-only metadata view
 
-### Limitations (v1)
-
-- ❌ Cross-database queries (not supported)
-- ❌ Composite databases (future enhancement)
+Plain (non-composite) cross-database queries are not supported by design; composite databases are the supported route to query across multiple databases.
 
 ---
 
