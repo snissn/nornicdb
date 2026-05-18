@@ -8,22 +8,22 @@ read path resolves it lazily via `observability.GetKnowledgePolicyMetrics()`.
 
 See the implementation plan at
 `docs/plans/knowledge-policy-observability-plan.md` and the overarching
-observability ADR at `docs/architecture/adr/0001-observability.md`.
+observability ADR at `docs/architecture/observability.md`.
 
 ## At-a-glance
 
-| Metric | Type | Labels | Best for |
-|---|---|---|---|
-| `scored_total` | Counter | `entity_kind`, `result`, `[database]` | Decay workload + visible/suppressed ratio |
-| `decay_score` | Histogram | `entity_kind`, `[database]` | Score distribution (sampled 1/32) |
-| `suppressions_total` | Counter | `entity_kind`, `reason`, `[database]` | Why suppressions happen |
-| `access_flush_batch_rows` | Histogram | — | Flush batch pressure |
-| `access_flush_duration_seconds` | Histogram | — | Flush cost |
-| `access_flush_buffer_fullness` | Gauge | — | Backpressure tripwire |
-| `on_access_mutations_total` | Counter | `result`, `[database]` | Policy-mutation workload |
-| `deindex_enqueued_total` | Counter | `entity_kind`, `[database]` | Secondary-index churn |
-| `read_filter_dropped_total` | Counter | `entity_kind`, `[database]` | Read-path visibility drops |
-| `reconcile_total` | Counter | `trigger`, `[database]` | Schema/policy churn |
+| Metric                          | Type      | Labels                                | Best for                                  |
+| ------------------------------- | --------- | ------------------------------------- | ----------------------------------------- |
+| `scored_total`                  | Counter   | `entity_kind`, `result`, `[database]` | Decay workload + visible/suppressed ratio |
+| `decay_score`                   | Histogram | `entity_kind`, `[database]`           | Score distribution (sampled 1/32)         |
+| `suppressions_total`            | Counter   | `entity_kind`, `reason`, `[database]` | Why suppressions happen                   |
+| `access_flush_batch_rows`       | Histogram | —                                     | Flush batch pressure                      |
+| `access_flush_duration_seconds` | Histogram | —                                     | Flush cost                                |
+| `access_flush_buffer_fullness`  | Gauge     | —                                     | Backpressure tripwire                     |
+| `on_access_mutations_total`     | Counter   | `result`, `[database]`                | Policy-mutation workload                  |
+| `deindex_enqueued_total`        | Counter   | `entity_kind`, `[database]`           | Secondary-index churn                     |
+| `read_filter_dropped_total`     | Counter   | `entity_kind`, `[database]`           | Read-path visibility drops                |
+| `reconcile_total`               | Counter   | `trigger`, `[database]`               | Schema/policy churn                       |
 
 The `database` label is present only when
 `cfg.Observability.Metrics.TenantLabelsEnabled` is true (Phase 5 K8s autodetect flips this). Flush-level families (`access_flush_*`) are intentionally not tenant-scoped because the flusher is cross-namespace.
@@ -215,7 +215,7 @@ Counter. Labels: `trigger`, optional `database`.
   values in 0..1).
 - `sum by (trigger) (rate(nornicdb_knowledge_policy_reconcile_total[5m]))`.
 - `sum by (entity_kind, reason)
-    (rate(nornicdb_knowledge_policy_suppressions_total[5m]))`.
+  (rate(nornicdb_knowledge_policy_suppressions_total[5m]))`.
 
 ## Operational runbook
 

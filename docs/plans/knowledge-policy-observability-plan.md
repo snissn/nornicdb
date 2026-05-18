@@ -2,11 +2,11 @@
 
 Status: drafted
 Owner: observability + knowledge-policy working group
-Related: `docs/architecture/adr/0001-observability.md`, `docs/plans/knowledge-layer-persistence-plan.md`
+Related: `docs/architecture/observability.md`, `docs/plans/knowledge-layer-persistence-plan.md`
 
 ## Motivation
 
-The knowledge-policy subsystem (decay, promotion, visibility suppression, on-access mutations) is fully instrumented *internally* — every evaluation produces a `ScoringResolution` and every flush drains an accumulator with per-entity access counts — but none of that state is exported. Operators have no way to answer questions like:
+The knowledge-policy subsystem (decay, promotion, visibility suppression, on-access mutations) is fully instrumented _internally_ — every evaluation produces a `ScoringResolution` and every flush drains an accumulator with per-entity access counts — but none of that state is exported. Operators have no way to answer questions like:
 
 - How much of the working set is currently suppressed, and why (threshold vs. score-floor vs. on-access)?
 - Are access-flush batches healthy, or is the buffer filling faster than the timer can drain it?
@@ -25,18 +25,18 @@ The OTEL layer is well-established: `pkg/observability.Provider` plugs in a Trac
 
 ### Instrument Catalog
 
-| Name | OTel type | Labels | Fires when | Interpretation |
-|---|---|---|---|---|
-| `nornicdb_knowledge_policy_scored_total` | Int64Counter | `entity_kind{node,edge,property}`, `result{visible,suppressed,no_decay}` | End of `Scorer.score()` before return, plus early-return paths | Total scoring evaluations; `suppressed / visible` ratio = working-set attrition |
-| `nornicdb_knowledge_policy_decay_score` | Float64Histogram (buckets 0.0, 0.1, …, 1.0), **sampled 1/32** | `entity_kind` | Same site as scored_total | Post-decay score distribution; bimodal = healthy, flat = misconfigured half-life |
-| `nornicdb_knowledge_policy_suppressions_total` | Int64Counter | `entity_kind`, `reason{below_threshold,score_floor,on_access,explicit_flag,rule_cap}` | Scorer suppression path, read-path filter flag path, on-access suppression | Why suppressions happen — critical for tuning |
-| `nornicdb_knowledge_policy_access_flush_batch_rows` | Float64Histogram (RowCountBuckets) | — | `AccessFlusher.flush()` after `DrainAll()` | Batch pressure; p99 ≈ maxBufferSize indicates backpressure |
-| `nornicdb_knowledge_policy_access_flush_duration_seconds` | Float64Histogram (LatencyBucketsSeconds) | — | Wrap flush body; record on return | Flush cost; correlates with storage write p99 |
-| `nornicdb_knowledge_policy_access_flush_buffer_fullness` | GaugeFunc | — | Passive scrape reads `len(accumulator.buffer) / maxBufferSize` | Tripwire for flush-interval tuning |
-| `nornicdb_knowledge_policy_on_access_mutations_total` | Int64Counter | `result{applied,skipped_no_policy,error}` | `applyOnAccessMutations` + `evaluatePropertySuppression` | On-access policy workload |
-| `nornicdb_knowledge_policy_deindex_enqueued_total` | Int64Counter | `entity_kind{node,edge}` | `EnqueueDeindexIfSuppressed` caller after `becameSuppressed=true` | Downstream search-index cost generator |
-| `nornicdb_knowledge_policy_read_filter_dropped_total` | Int64Counter | `entity_kind{node,edge}` | `filterNodeByDecay` / `filterEdgeByDecay` return-true path | Read-path suppression rate |
-| `nornicdb_knowledge_policy_reconcile_total` | Int64Counter | `trigger{schema_change,startup,manual}` | `ReconcileDecaySuppressionWithChanges` callers | Schema-driven churn |
+| Name                                                      | OTel type                                                     | Labels                                                                                | Fires when                                                                 | Interpretation                                                                   |
+| --------------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `nornicdb_knowledge_policy_scored_total`                  | Int64Counter                                                  | `entity_kind{node,edge,property}`, `result{visible,suppressed,no_decay}`              | End of `Scorer.score()` before return, plus early-return paths             | Total scoring evaluations; `suppressed / visible` ratio = working-set attrition  |
+| `nornicdb_knowledge_policy_decay_score`                   | Float64Histogram (buckets 0.0, 0.1, …, 1.0), **sampled 1/32** | `entity_kind`                                                                         | Same site as scored_total                                                  | Post-decay score distribution; bimodal = healthy, flat = misconfigured half-life |
+| `nornicdb_knowledge_policy_suppressions_total`            | Int64Counter                                                  | `entity_kind`, `reason{below_threshold,score_floor,on_access,explicit_flag,rule_cap}` | Scorer suppression path, read-path filter flag path, on-access suppression | Why suppressions happen — critical for tuning                                    |
+| `nornicdb_knowledge_policy_access_flush_batch_rows`       | Float64Histogram (RowCountBuckets)                            | —                                                                                     | `AccessFlusher.flush()` after `DrainAll()`                                 | Batch pressure; p99 ≈ maxBufferSize indicates backpressure                       |
+| `nornicdb_knowledge_policy_access_flush_duration_seconds` | Float64Histogram (LatencyBucketsSeconds)                      | —                                                                                     | Wrap flush body; record on return                                          | Flush cost; correlates with storage write p99                                    |
+| `nornicdb_knowledge_policy_access_flush_buffer_fullness`  | GaugeFunc                                                     | —                                                                                     | Passive scrape reads `len(accumulator.buffer) / maxBufferSize`             | Tripwire for flush-interval tuning                                               |
+| `nornicdb_knowledge_policy_on_access_mutations_total`     | Int64Counter                                                  | `result{applied,skipped_no_policy,error}`                                             | `applyOnAccessMutations` + `evaluatePropertySuppression`                   | On-access policy workload                                                        |
+| `nornicdb_knowledge_policy_deindex_enqueued_total`        | Int64Counter                                                  | `entity_kind{node,edge}`                                                              | `EnqueueDeindexIfSuppressed` caller after `becameSuppressed=true`          | Downstream search-index cost generator                                           |
+| `nornicdb_knowledge_policy_read_filter_dropped_total`     | Int64Counter                                                  | `entity_kind{node,edge}`                                                              | `filterNodeByDecay` / `filterEdgeByDecay` return-true path                 | Read-path suppression rate                                                       |
+| `nornicdb_knowledge_policy_reconcile_total`               | Int64Counter                                                  | `trigger{schema_change,startup,manual}`                                               | `ReconcileDecaySuppressionWithChanges` callers                             | Schema-driven churn                                                              |
 
 All labels are closed enums and bounded. No user-defined label or property-key axis; see "Cardinality discipline" below.
 
@@ -62,6 +62,7 @@ Spans only at coarse-grained boundaries — scoring is too hot.
 Tenant-label scoping respects `cfg.Observability.Metrics.TenantLabelsEnabled` exactly like the existing catalogs — pass `tenantLabelsEnabled` into `NewKnowledgePolicyMetrics` and omit the `database` labelname when false.
 
 **Explicit exclusions:**
+
 - Graph-schema `label` (e.g., `Product`, `User`) — unbounded from user DDL. NOT a metric label. Route to exemplar trace attributes.
 - Property keys — same reasoning.
 
@@ -92,7 +93,7 @@ Edits in this order:
 ## Documentation
 
 - `docs/observability/knowledge-policy-metrics.md` (new) — instrument reference: name, type, labels, fires-when, interpretation, recommended alert thresholds.
-- `docs/architecture/adr/0001-observability.md` — append `knowledge_policy` to the subsystem list; cross-link new metrics doc.
+- `docs/architecture/observability.md` — append `knowledge_policy` to the subsystem list; cross-link new metrics doc.
 - `docs/plans/knowledge-layer-persistence-plan.md` — new "Observability" section linking the metrics doc and calling out runbook thresholds (e.g., "`buffer_fullness` > 0.9 sustained → raise `AccessFlushBufferSize` or lower `DecayInterval`").
 
 ## Rollout Considerations

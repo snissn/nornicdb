@@ -31,7 +31,7 @@ The `:9090` telemetry listener is the preferred scrape target. The `:7474/metric
 - When OTLP push is enabled, the OTEL pipeline exports the same measurements rather than a second, separately-maintained metric tree.
 - Tenant-scoped labels can be disabled with `observability.metrics.tenant_labels_enabled` when database labels would be too sensitive or too high-cardinality for a deployment.
 
-For the architecture-level contract, see [Observability](../architecture/adr/0001-observability.md). For the generated catalog, see [metrics-reference.md](metrics-reference.md).
+For the architecture-level contract, see [Observability](../architecture/observability.md). For the generated catalog, see [metrics-reference.md](metrics-reference.md).
 
 ## Health Check
 
@@ -471,6 +471,6 @@ exit 0
 - **[Troubleshooting](troubleshooting.md)** - Common issues
 - **[Metrics Reference](metrics-reference.md)** - Auto-generated metric catalog
 - **[Knowledge Policy Metrics](../observability/knowledge-policy-metrics.md)** - Detailed knowledge-policy metric reference
-- **[Observability](../architecture/adr/0001-observability.md)** - Telemetry architecture and contract
+- **[Observability](../architecture/observability.md)** - Telemetry architecture and contract
 - **[pprof Quick Guide](../performance/pprof-quick-guide.md)** - Interactive profiling workflow
 - **[Audit Logging](../compliance/audit-logging.md)** - Security monitoring

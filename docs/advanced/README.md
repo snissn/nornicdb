@@ -6,8 +6,6 @@
 
 ### K-Means Clustering
 - **[K-Means Algorithm](k-means-clustering/kmeans-algorithm.md)** - K-Means clustering basics
-- **[Real-Time K-Means](k-means-clustering/realtime-kmeans.md)** - Live cluster updates
-- **[GPU Implementation](k-means-clustering/gpu-implementation.md)** - GPU-accelerated K-Means
 - **[Metal Optimizations](k-means-clustering/metal-optimizations.md)** - Apple Silicon optimizations
 
 ### Embeddings

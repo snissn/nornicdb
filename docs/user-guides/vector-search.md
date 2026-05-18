@@ -555,7 +555,7 @@ curl http://localhost:8080/health
 
 ## Related Docs
 
-- [GPU K-Means](../advanced/k-means-clustering/gpu-implementation.md) - GPU clustering
+- [K-Means Clustering](../advanced/k-means-clustering/README.md) - GPU/CPU IVF candidate generator
 - [Functions Index](../api-reference/cypher-functions/README.md) - Vector similarity functions
 - [Search Implementation](../performance/searching.md) - Hybrid search internals
 

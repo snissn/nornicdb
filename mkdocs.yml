@@ -242,7 +242,7 @@ nav:
           - Composite DB Analysis: architecture/composite-db-analysis.md
           - Multi-DB Implementation Spec: architecture/multi-db-implementation-spec.md
           - Multi-DB Future Features: architecture/multi-db-future-features.md
-          - Observability: architecture/adr/0001-observability.md
+          - Observability: architecture/observability.md
 
   - Operating:
       - operations/README.md
@@ -322,9 +322,7 @@ nav:
           - Search Evaluation: advanced/search-evaluation.md
           - K-Means Clustering: advanced/k-means-clustering/README.md
           - K-Means Algorithm: advanced/k-means-clustering/kmeans-algorithm.md
-          - K-Means GPU Implementation: advanced/k-means-clustering/gpu-implementation.md
           - K-Means Metal Optimizations: advanced/k-means-clustering/metal-optimizations.md
-          - Realtime K-Means: advanced/k-means-clustering/realtime-kmeans.md
           - Embeddings: advanced/embeddings/README.md
           - Local GGUF Embeddings: advanced/embeddings/local-gguf.md
       - AI Agents:
