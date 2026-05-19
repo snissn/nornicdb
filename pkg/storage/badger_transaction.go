@@ -1645,19 +1645,16 @@ func (tx *BadgerTransaction) Commit() error {
 		return fmt.Errorf("flushing buffered writes: %w", err)
 	}
 
-	// Persist any staged monotonic ID-counter updates. One Badger Set
-	// per kind, vs. one per allocation when this was done inline.
-	if err := tx.engine.idDict.flushTxnCounters(tx.badgerTx); err != nil {
-		tx.closeLocked(TxStatusRolledBack, true, nil)
-		return fmt.Errorf("flushing id counters: %w", err)
-	}
-
-	// Persist any staged property-key dictionary counters. One Badger
-	// Set per dirty namespace per commit.
-	if err := tx.engine.propKeyDict.flushTxnCounters(tx.badgerTx); err != nil {
-		tx.closeLocked(TxStatusRolledBack, true, nil)
-		return fmt.Errorf("flushing property key counters: %w", err)
-	}
+	// Stage the monotonic ID-counter and property-key counter
+	// high-water marks for OUT-OF-TXN persistence. Writing them inside
+	// tx.badgerTx would put every node-creating commit on the same
+	// Badger key (idCounterNodeKey / per-namespace propkey counters),
+	// causing concurrent commits to race on Badger's optimistic
+	// conflict check and surface "Transaction Conflict" instead of the
+	// genuine commit-time UNIQUE shape. The values are persisted below
+	// via persistCounters / persistTxnCounters in fresh transactions.
+	idCounterNodeMax, idCounterEdgeMax := tx.engine.idDict.flushTxnCounters(tx.badgerTx)
+	propKeyCounters := tx.engine.propKeyDict.flushTxnCounters(tx.badgerTx)
 
 	if err := tx.refreshTemporalCurrentPointers(temporalTargets); err != nil {
 		tx.closeLocked(TxStatusRolledBack, true, nil)
@@ -1669,6 +1666,17 @@ func (tx *BadgerTransaction) Commit() error {
 		tx.closeLocked(TxStatusRolledBack, false, nil)
 		return normalizeTransactionCommitError(err)
 	}
+
+	// Persist the namespace's MVCC sequence and the staged ID/propkey
+	// counters in separate Badger transactions so those high-frequency
+	// shared keys do not participate in the user transaction's
+	// conflict-detection set. Concurrent commits in the same namespace
+	// must not race on these writes — see allocateMVCCVersion's doc.
+	if tx.namespace != "" && !tx.CommitVersion.IsZero() {
+		tx.engine.persistMVCCSequence(tx.namespace)
+	}
+	tx.engine.idDict.persistCounters(tx.engine.db, idCounterNodeMax, idCounterEdgeMax)
+	tx.engine.propKeyDict.persistTxnCounters(tx.engine.db, propKeyCounters)
 
 	// Apply cache/count updates and fire callbacks after commit.
 	// This keeps cached stats O(1) and ensures external systems (e.g. search indexes)

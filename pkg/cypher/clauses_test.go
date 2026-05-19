@@ -2074,8 +2074,11 @@ func TestAllShortestPathsMultiple(t *testing.T) {
 	startNode, _ := store.GetNode("a")
 	endNode, _ := store.GetNode("d")
 
-	// allShortestPaths(start, end, relTypes, direction, maxHops)
-	paths := e.allShortestPaths(startNode, endNode, nil, "both", 10)
+	// allShortestPaths(ctx, start, end, relTypes, direction, maxHops)
+	paths, err := e.allShortestPaths(context.Background(), startNode, endNode, nil, "both", 10)
+	if err != nil {
+		t.Fatalf("allShortestPaths: %v", err)
+	}
 	if len(paths) < 2 {
 		t.Errorf("Expected at least 2 shortest paths in diamond graph, got %d", len(paths))
 	}

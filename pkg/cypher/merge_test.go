@@ -159,6 +159,46 @@ func TestCloneWithStorageSharesNodeLookupCacheAndLock(t *testing.T) {
 	}
 }
 
+// TestCloneWithStorageIsolatesNodeLookupCacheForTxClones guards the fix for a
+// concurrent-MERGE bug where two writers MERGE-ing the same (label, prop, value)
+// would race through the executor's nodeLookupCache: the first writer wrote its
+// uncommitted node into the shared cache, the peer read that node ID via
+// store.GetNode(...) inside its own tx.badgerTx, and Badger SSI then rejected
+// the loser with a generic "Transaction Conflict" instead of the consumer-pinned
+// commit-time UNIQUE shape. See docs/plans/consumer-pinned-error-contract-plan.md
+// §2.1. Transactional clones must therefore get their own cache + mutex.
+func TestCloneWithStorageIsolatesNodeLookupCacheForTxClones(t *testing.T) {
+	parent := NewStorageExecutor(storage.NewMemoryEngine())
+	parent.ensureNodeLookupCache()
+
+	tx, err := parent.storage.(*storage.MemoryEngine).BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	txWrapper := &transactionStorageWrapper{
+		tx:             tx,
+		underlying:     parent.storage,
+		mutatedNodeIDs: make(map[string]struct{}),
+	}
+	clone := parent.cloneWithStorage(txWrapper)
+
+	if parent.nodeLookupCacheMu == clone.nodeLookupCacheMu {
+		t.Fatal("transactional clone must NOT share the lookup-cache mutex with parent")
+	}
+	if &parent.nodeLookupCache == &clone.nodeLookupCache {
+		t.Fatal("transactional clone must NOT share the lookup-cache map with parent")
+	}
+
+	parent.cacheMergeNode([]string{"Person"}, map[string]interface{}{"id": "abc"}, &storage.Node{
+		ID:         "parent-node",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"id": "abc"},
+	})
+	if got := clone.findMergeNodeInCache(nil, []string{"Person"}, map[string]interface{}{"id": "abc"}); got != nil {
+		t.Fatalf("transactional clone leaked parent's pre-commit cache entry: %+v", got)
+	}
+}
+
 // ========================================
 // MERGE with ON CREATE/ON MATCH Tests
 // ========================================

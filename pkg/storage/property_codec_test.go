@@ -69,7 +69,8 @@ func TestEncodeTokenizedProperties_AllocatesIDs(t *testing.T) {
 		require.Equal(t, "Alice", out["name"])
 		require.Equal(t, int64(7), out["newKey"])
 
-		return eng.propKeyDict.flushTxnCounters(txn)
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
 	}))
 }
 
@@ -238,7 +239,8 @@ func TestDecodeTokenizedProperties_TruncatedValue(t *testing.T) {
 	require.NoError(t, eng.withUpdate(func(txn *badger.Txn) error {
 		_, err := eng.propKeyDict.resolveOrAllocateInTxn(txn, "ns", "k")
 		require.NoError(t, err)
-		return eng.propKeyDict.flushTxnCounters(txn)
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
 	}))
 
 	body := appendUvarint(nil, 1) // count=1
@@ -413,7 +415,8 @@ func encodeEdgeCompactV2Direct(t *testing.T, eng *BadgerEngine, edge *Edge, star
 		if err != nil {
 			return err
 		}
-		return eng.propKeyDict.flushTxnCounters(txn)
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
 	})
 	return data, err
 }
@@ -455,7 +458,8 @@ func TestEncodedBodySize_ReductionForRepeatedKeys(t *testing.T) {
 			v2Total += len(v2Body)
 			v1Total += len(v1Body)
 		}
-		return eng.propKeyDict.flushTxnCounters(txn)
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
 	}))
 
 	t.Logf("V1 total: %d bytes, V2 total: %d bytes (%.1f%% of V1)",

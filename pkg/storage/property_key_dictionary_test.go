@@ -27,7 +27,8 @@ func TestPropertyKeyDict_ResolveAndLookup(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return dict.flushTxnCounters(txn)
+		_ = dict.flushTxnCounters(txn)
+		return nil
 	}))
 
 	require.Equal(t, uint64(1), idA, "first allocation should be id 1")
@@ -70,7 +71,8 @@ func TestPropertyKeyDict_NamespaceIsolation(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return dict.flushTxnCounters(txn)
+		_ = dict.flushTxnCounters(txn)
+		return nil
 	}))
 
 	// Both start fresh per namespace, so both see ID 1.
@@ -110,6 +112,7 @@ func TestPropertyKeyDict_HydrateFromBadger(t *testing.T) {
 	require.NoError(t, err)
 
 	var allocated []uint64
+	var counters propKeyTxnDrain
 	require.NoError(t, first.withUpdate(func(txn *badger.Txn) error {
 		for _, name := range []string{"productID", "productName", "sku"} {
 			id, err := first.propKeyDict.resolveOrAllocateInTxn(txn, "shop", name)
@@ -118,8 +121,10 @@ func TestPropertyKeyDict_HydrateFromBadger(t *testing.T) {
 			}
 			allocated = append(allocated, id)
 		}
-		return first.propKeyDict.flushTxnCounters(txn)
+		counters = first.propKeyDict.flushTxnCounters(txn)
+		return nil
 	}))
+	first.propKeyDict.persistTxnCounters(first.db, counters)
 	require.NoError(t, first.Close())
 
 	// Reopen — V0 store with no bodies, so the upgrade gate doesn't
@@ -141,7 +146,8 @@ func TestPropertyKeyDict_HydrateFromBadger(t *testing.T) {
 			return err
 		}
 		require.Equal(t, allocated[len(allocated)-1]+1, id)
-		return second.propKeyDict.flushTxnCounters(txn)
+		_ = second.propKeyDict.flushTxnCounters(txn)
+		return nil
 	}))
 }
 
@@ -154,13 +160,16 @@ func TestPropertyKeyDict_HydrateRecoversFromMissingCounter(t *testing.T) {
 	first, err := NewBadgerEngineWithOptions(BadgerOptions{DataDir: dir})
 	require.NoError(t, err)
 
+	var counters propKeyTxnDrain
 	require.NoError(t, first.withUpdate(func(txn *badger.Txn) error {
 		_, err := first.propKeyDict.resolveOrAllocateInTxn(txn, "ns", "a")
 		require.NoError(t, err)
 		_, err = first.propKeyDict.resolveOrAllocateInTxn(txn, "ns", "b")
 		require.NoError(t, err)
-		return first.propKeyDict.flushTxnCounters(txn)
+		counters = first.propKeyDict.flushTxnCounters(txn)
+		return nil
 	}))
+	first.propKeyDict.persistTxnCounters(first.db, counters)
 
 	// Manually delete the counter key to simulate a partial write.
 	require.NoError(t, first.db.Update(func(txn *badger.Txn) error {
@@ -173,8 +182,8 @@ func TestPropertyKeyDict_HydrateRecoversFromMissingCounter(t *testing.T) {
 	t.Cleanup(func() { second.Close() })
 
 	// nextID must be at least 2 — derived from the forward map's max id.
-	counters := second.PropKeyDictCounters()
-	require.GreaterOrEqual(t, counters["ns"], uint64(2))
+	hydratedCounters := second.PropKeyDictCounters()
+	require.GreaterOrEqual(t, hydratedCounters["ns"], uint64(2))
 
 	// The next allocation still produces a fresh ID (not one that
 	// collides with "a" or "b").
@@ -184,7 +193,8 @@ func TestPropertyKeyDict_HydrateRecoversFromMissingCounter(t *testing.T) {
 			return err
 		}
 		require.GreaterOrEqual(t, id, uint64(3))
-		return second.propKeyDict.flushTxnCounters(txn)
+		_ = second.propKeyDict.flushTxnCounters(txn)
+		return nil
 	}))
 }
 
@@ -196,6 +206,7 @@ func TestPropertyKeyDict_CounterFlushesOncePerNamespace(t *testing.T) {
 	eng := newTestEngine(t)
 	dict := eng.propKeyDict
 
+	var batchedCounters propKeyTxnDrain
 	require.NoError(t, eng.withUpdate(func(txn *badger.Txn) error {
 		for i := 0; i < 50; i++ {
 			_, err := dict.resolveOrAllocateInTxn(txn, "nsA", "k"+string(rune('a'+i%26)))
@@ -205,8 +216,10 @@ func TestPropertyKeyDict_CounterFlushesOncePerNamespace(t *testing.T) {
 			_, err := dict.resolveOrAllocateInTxn(txn, "nsB", "k"+string(rune('a'+i%26)))
 			require.NoError(t, err)
 		}
-		return dict.flushTxnCounters(txn)
+		batchedCounters = dict.flushTxnCounters(txn)
+		return nil
 	}))
+	dict.persistTxnCounters(eng.db, batchedCounters)
 
 	// Exactly two counter keys should exist.
 	require.NoError(t, eng.db.View(func(txn *badger.Txn) error {
@@ -229,7 +242,10 @@ func TestPropertyKeyDict_CounterFlushesOncePerNamespace(t *testing.T) {
 func TestPropertyKeyDict_FlushOnEmptyTxnIsNoop(t *testing.T) {
 	eng := newTestEngine(t)
 	require.NoError(t, eng.withUpdate(func(txn *badger.Txn) error {
-		return eng.propKeyDict.flushTxnCounters(txn)
+		got := eng.propKeyDict.flushTxnCounters(txn)
+		require.Nil(t, got.counters, "empty-txn drain must return nil counter map")
+		require.Nil(t, got.pending, "empty-txn drain must return nil pending entries")
+		return nil
 	}))
 }
 
@@ -250,7 +266,8 @@ func TestPropertyKeyDict_DiscardTxnCounters(t *testing.T) {
 	// A fresh txn that flushes immediately should not write a counter
 	// for "ns" — the staged state from the discarded txn is gone.
 	require.NoError(t, eng.withUpdate(func(txn *badger.Txn) error {
-		return dict.flushTxnCounters(txn)
+		_ = dict.flushTxnCounters(txn)
+		return nil
 	}))
 
 	// Counter key for "ns" must not have been written.
@@ -282,7 +299,8 @@ func TestPropertyKeyDict_ConcurrentAllocate(t *testing.T) {
 					return err
 				}
 				ids[i] = id
-				return dict.flushTxnCounters(txn)
+				_ = dict.flushTxnCounters(txn)
+				return nil
 			})
 			require.NoError(t, err)
 		}(i)
@@ -445,11 +463,14 @@ func TestPropertyKeyDict_HydrateSkipsMalformedKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	// One real entry so reopen exercises the loop body.
+	var counters propKeyTxnDrain
 	require.NoError(t, first.withUpdate(func(txn *badger.Txn) error {
 		_, err := first.propKeyDict.resolveOrAllocateInTxn(txn, "ns", "real")
 		require.NoError(t, err)
-		return first.propKeyDict.flushTxnCounters(txn)
+		counters = first.propKeyDict.flushTxnCounters(txn)
+		return nil
 	}))
+	first.propKeyDict.persistTxnCounters(first.db, counters)
 
 	// Inject malformed keys under both prefixes.
 	require.NoError(t, first.db.Update(func(txn *badger.Txn) error {

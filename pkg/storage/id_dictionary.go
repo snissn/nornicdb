@@ -166,11 +166,17 @@ func (d *idDictionary) recordTxnCounterUse(txn *badger.Txn, kind byte, num uint6
 	d.txnMu.Unlock()
 }
 
-// flushTxnCounters writes the single counter update(s) for this txn
-// (at most one per kind) and detaches the state. Caller MUST invoke
-// this from the commit path BEFORE badgerTx.Commit(). Safe to call on
-// a txn that never allocated — does nothing.
-func (d *idDictionary) flushTxnCounters(txn *badger.Txn) error {
+// flushTxnCounters detaches the staged counter state for this txn and
+// returns the high-water (node, edge) pair the caller should persist
+// AFTER the user transaction commits. The persistence write must NOT go
+// through the user txn: every node-creating commit would otherwise touch
+// the same counter key and Badger's optimistic concurrency would surface
+// a "Transaction Conflict" on concurrent writers, hiding genuine
+// constraint violations from the per-namespace commit-time UNIQUE check
+// (see docs/plans/consumer-pinned-error-contract-plan.md §2.1).
+//
+// Returns (0, 0) if the txn allocated no fresh numIDs.
+func (d *idDictionary) flushTxnCounters(txn *badger.Txn) (uint64, uint64) {
 	d.txnMu.Lock()
 	st, ok := d.txnCounters[txn]
 	if ok {
@@ -178,23 +184,38 @@ func (d *idDictionary) flushTxnCounters(txn *badger.Txn) error {
 	}
 	d.txnMu.Unlock()
 	if !ok || st == nil {
+		return 0, 0
+	}
+	return st.nodeMax, st.edgeMax
+}
+
+// persistCounters writes the node and edge counter high-water marks in a
+// fresh badger transaction so they do not participate in the user
+// transaction's conflict-detection set. Best effort: the in-memory
+// nextNode/nextEdge atomics are authoritative for the engine's lifetime;
+// a crash between commit and persistence loses at most the unflushed
+// window of allocated numIDs, reconciled at next engine open.
+func (d *idDictionary) persistCounters(db *badger.DB, nodeMax, edgeMax uint64) {
+	if db == nil || (nodeMax == 0 && edgeMax == 0) {
+		return
+	}
+	_ = db.Update(func(txn *badger.Txn) error {
+		if nodeMax > 0 {
+			var buf [8]byte
+			binary.BigEndian.PutUint64(buf[:], nodeMax)
+			if err := txn.Set(idCounterNodeKey, append([]byte(nil), buf[:]...)); err != nil {
+				return err
+			}
+		}
+		if edgeMax > 0 {
+			var buf [8]byte
+			binary.BigEndian.PutUint64(buf[:], edgeMax)
+			if err := txn.Set(idCounterEdgeKey, append([]byte(nil), buf[:]...)); err != nil {
+				return err
+			}
+		}
 		return nil
-	}
-	if st.nodeMax > 0 {
-		var buf [8]byte
-		binary.BigEndian.PutUint64(buf[:], st.nodeMax)
-		if err := txn.Set(idCounterNodeKey, append([]byte(nil), buf[:]...)); err != nil {
-			return err
-		}
-	}
-	if st.edgeMax > 0 {
-		var buf [8]byte
-		binary.BigEndian.PutUint64(buf[:], st.edgeMax)
-		if err := txn.Set(idCounterEdgeKey, append([]byte(nil), buf[:]...)); err != nil {
-			return err
-		}
-	}
-	return nil
+	})
 }
 
 // discardTxnCounters drops any staged counter state for a txn that is

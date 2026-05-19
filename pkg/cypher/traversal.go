@@ -15,6 +15,16 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+// VarLengthUnboundedMaxHops is the depth cap applied when a variable-length
+// relationship pattern is written without an explicit upper bound — for
+// example `[*]`, `[*..]`, or `[*N..]`. The previous defaults (10 and 100) were
+// surprising in practice: BFS traversals silently returned no rows on graphs
+// whose actual diameter exceeded the cap. This sentinel is large enough that
+// it acts effectively unbounded for any realistic graph (BFS terminates when
+// the frontier is exhausted) while still keeping the field a plain int so all
+// downstream `>=` comparisons stay correct.
+const VarLengthUnboundedMaxHops = 1 << 24 // ~16.7M
+
 // PathResult represents a path through the graph
 type PathResult struct {
 	Nodes         []*storage.Node
@@ -38,6 +48,13 @@ type TraversalContext struct {
 	resultCount      int                              // Count of results found so far
 	temporalViewport TemporalViewport
 	temporalChecker  temporalCurrentNodeChecker
+	// cancelCtx is consulted periodically inside findPaths so callers can
+	// abandon long traversals on client disconnect / server shutdown. It is
+	// allowed to be nil for legacy call sites that pass through Background.
+	cancelCtx context.Context
+	// findPathsCalls counts entries into the recursive search; used to amortise
+	// the ctx.Err() probe (one check per N calls).
+	findPathsCalls int
 }
 
 func buildRelTypeSet(relTypes []string) map[string]struct{} {
@@ -104,8 +121,9 @@ func (e *StorageExecutor) parseRelationshipPattern(pattern string) *Relationship
 			hasRange := strings.Contains(spec, "..")
 			switch {
 			case spec == "":
+				// `[*]` — fully unbounded.
 				result.MinHops = 1
-				result.MaxHops = 10
+				result.MaxHops = VarLengthUnboundedMaxHops
 			case hasRange:
 				parts := strings.SplitN(spec, "..", 2)
 				result.MinHops = 1
@@ -115,7 +133,8 @@ func (e *StorageExecutor) parseRelationshipPattern(pattern string) *Relationship
 				if parts[1] != "" {
 					result.MaxHops, _ = strconv.Atoi(parts[1])
 				} else {
-					result.MaxHops = 100
+					// `[*N..]` — open-ended upper bound.
+					result.MaxHops = VarLengthUnboundedMaxHops
 				}
 			default:
 				result.MinHops, _ = strconv.Atoi(spec)
@@ -278,7 +297,7 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(ctx context.Cont
 		} else {
 			viewport, _ := TemporalViewportFromContext(ctx)
 			checker, _ := e.getStorage(ctx).(temporalCurrentNodeChecker)
-			paths = e.traverseGraphSequential(matches, optimizedStartNodes, viewport, checker)
+			paths = e.traverseGraphSequential(ctx, matches, optimizedStartNodes, viewport, checker)
 		}
 		// Still need to apply WHERE clause filter (in case there are other conditions)
 		if whereClause != "" {
@@ -1398,14 +1417,14 @@ func (e *StorageExecutor) traverseGraph(ctx context.Context, match *TraversalMat
 	// Keep traversal single-threaded when early LIMIT short-circuiting is active so
 	// we can stop globally once enough paths are found.
 	if config.Enabled && len(startNodes) >= config.MinBatchSize && match.TraversalLimit <= 0 {
-		return e.traverseGraphParallel(match, startNodes, config, viewport, checker)
+		return e.traverseGraphParallel(ctx, match, startNodes, config, viewport, checker)
 	}
 
-	return e.traverseGraphSequential(match, startNodes, viewport, checker)
+	return e.traverseGraphSequential(ctx, match, startNodes, viewport, checker)
 }
 
 // traverseGraphSequential performs sequential traversal from start nodes
-func (e *StorageExecutor) traverseGraphSequential(match *TraversalMatch, startNodes []*storage.Node, viewport TemporalViewport, checker temporalCurrentNodeChecker) []PathResult {
+func (e *StorageExecutor) traverseGraphSequential(ctx context.Context, match *TraversalMatch, startNodes []*storage.Node, viewport TemporalViewport, checker temporalCurrentNodeChecker) []PathResult {
 	var results []PathResult
 	remaining := -1
 	if match.TraversalLimit > 0 {
@@ -1420,7 +1439,7 @@ func (e *StorageExecutor) traverseGraphSequential(match *TraversalMatch, startNo
 		if remaining > 0 {
 			ctxLimit = remaining
 		}
-		ctx := &TraversalContext{
+		traversalCtx := &TraversalContext{
 			startNode:        startNode,
 			relTypes:         match.Relationship.Types,
 			relTypeSet:       buildRelTypeSet(match.Relationship.Types),
@@ -1432,12 +1451,16 @@ func (e *StorageExecutor) traverseGraphSequential(match *TraversalMatch, startNo
 			limit:            ctxLimit,
 			temporalViewport: viewport,
 			temporalChecker:  checker,
+			cancelCtx:        ctx,
 		}
 
-		paths := e.findPaths(ctx, startNode, []*storage.Node{startNode}, []*storage.Edge{}, 0, &match.EndNode)
+		paths := e.findPaths(traversalCtx, startNode, []*storage.Node{startNode}, []*storage.Edge{}, 0, &match.EndNode)
 		results = append(results, paths...)
 		if remaining > 0 {
 			remaining -= len(paths)
+		}
+		if ctx != nil && ctx.Err() != nil {
+			break
 		}
 	}
 
@@ -1446,7 +1469,7 @@ func (e *StorageExecutor) traverseGraphSequential(match *TraversalMatch, startNo
 
 // traverseGraphParallel performs parallel traversal from multiple start nodes
 // Each goroutine gets its own TraversalContext to avoid data races
-func (e *StorageExecutor) traverseGraphParallel(match *TraversalMatch, startNodes []*storage.Node, config ParallelConfig, viewport TemporalViewport, checker temporalCurrentNodeChecker) []PathResult {
+func (e *StorageExecutor) traverseGraphParallel(ctx context.Context, match *TraversalMatch, startNodes []*storage.Node, config ParallelConfig, viewport TemporalViewport, checker temporalCurrentNodeChecker) []PathResult {
 	numWorkers := config.MaxWorkers
 	if numWorkers > len(startNodes) {
 		numWorkers = len(startNodes)
@@ -1478,8 +1501,11 @@ func (e *StorageExecutor) traverseGraphParallel(match *TraversalMatch, startNode
 
 			var workerPaths []PathResult
 			for _, startNode := range workerNodes {
-				// Each goroutine gets its own context (no shared state)
-				ctx := &TraversalContext{
+				if ctx != nil && ctx.Err() != nil {
+					break
+				}
+				// Each goroutine gets its own traversal state (no shared state)
+				traversalCtx := &TraversalContext{
 					startNode:        startNode,
 					relTypes:         match.Relationship.Types,
 					relTypeSet:       buildRelTypeSet(match.Relationship.Types),
@@ -1490,9 +1516,10 @@ func (e *StorageExecutor) traverseGraphParallel(match *TraversalMatch, startNode
 					nodeCache:        make(map[storage.NodeID]*storage.Node),
 					temporalViewport: viewport,
 					temporalChecker:  checker,
+					cancelCtx:        ctx,
 				}
 
-				paths := e.findPaths(ctx, startNode, []*storage.Node{startNode}, []*storage.Edge{}, 0, &match.EndNode)
+				paths := e.findPaths(traversalCtx, startNode, []*storage.Node{startNode}, []*storage.Edge{}, 0, &match.EndNode)
 				workerPaths = append(workerPaths, paths...)
 			}
 
@@ -1631,6 +1658,7 @@ func (e *StorageExecutor) traverseFromNode(traversalCtx context.Context, startNo
 		nodeCache:        make(map[storage.NodeID]*storage.Node),
 		temporalViewport: TemporalViewport{},
 		temporalChecker:  nil,
+		cancelCtx:        traversalCtx,
 	}
 	if viewport, ok := TemporalViewportFromContext(traversalCtx); ok {
 		ctx.temporalViewport = viewport
@@ -1652,6 +1680,18 @@ func (e *StorageExecutor) findPaths(
 	endPattern *nodePatternInfo,
 ) []PathResult {
 	var results []PathResult
+
+	// Cancellation probe — amortised across recursive entries to keep the
+	// per-call cost negligible. When ctx.cancelCtx is canceled we unwind the
+	// recursion immediately by returning whatever we've gathered so far.
+	if ctx.cancelCtx != nil {
+		ctx.findPathsCalls++
+		if ctx.findPathsCalls&bfsCancelCheckMask == 0 {
+			if ctx.cancelCtx.Err() != nil {
+				return results
+			}
+		}
+	}
 
 	// OPTIMIZATION: Early termination if limit reached
 	if ctx.limit > 0 && ctx.resultCount >= ctx.limit {
@@ -1851,10 +1891,12 @@ func (e *StorageExecutor) buildPathContext(path PathResult, match *TraversalMatc
 	return ctx
 }
 
-// shortestPath finds the shortest path between two nodes
-func (e *StorageExecutor) shortestPath(startNode, endNode *storage.Node, relTypes []string, direction string, maxHops int) *PathResult {
+// shortestPath finds the shortest path between two nodes.
+// ctx is checked periodically inside the BFS so the caller can cancel a
+// long-running traversal (client disconnect, server shutdown).
+func (e *StorageExecutor) shortestPath(ctx context.Context, startNode, endNode *storage.Node, relTypes []string, direction string, maxHops int) (*PathResult, error) {
 	if startNode == nil || endNode == nil {
-		return nil
+		return nil, nil
 	}
 
 	relTypeSet := buildRelTypeSet(relTypes)
@@ -1877,6 +1919,11 @@ func (e *StorageExecutor) shortestPath(startNode, endNode *storage.Node, relType
 	visited := map[storage.NodeID]bool{startNode.ID: true}
 
 	for head := 0; head < len(queue); head++ {
+		if head&bfsCancelCheckMask == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		current := queue[head]
 
 		if current.path.Length >= maxHops {
@@ -1943,7 +1990,7 @@ func (e *StorageExecutor) shortestPath(startNode, endNode *storage.Node, relType
 
 			// Check if we've reached the end
 			if nextNodeID == endNode.ID {
-				return &newPath
+				return &newPath, nil
 			}
 
 			visited[nextNodeID] = true
@@ -1951,13 +1998,14 @@ func (e *StorageExecutor) shortestPath(startNode, endNode *storage.Node, relType
 		}
 	}
 
-	return nil // No path found
+	return nil, nil // No path found
 }
 
-// allShortestPaths finds all shortest paths between two nodes
-func (e *StorageExecutor) allShortestPaths(startNode, endNode *storage.Node, relTypes []string, direction string, maxHops int) []PathResult {
+// allShortestPaths finds all shortest paths between two nodes.
+// ctx is checked periodically inside the BFS so the caller can cancel.
+func (e *StorageExecutor) allShortestPaths(ctx context.Context, startNode, endNode *storage.Node, relTypes []string, direction string, maxHops int) ([]PathResult, error) {
 	if startNode == nil || endNode == nil {
-		return nil
+		return nil, nil
 	}
 
 	relTypeSet := buildRelTypeSet(relTypes)
@@ -1984,6 +2032,11 @@ func (e *StorageExecutor) allShortestPaths(startNode, endNode *storage.Node, rel
 	visitedDepth := map[storage.NodeID]int{startNode.ID: 0}
 
 	for head := 0; head < len(queue); head++ {
+		if head&bfsCancelCheckMask == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		current := queue[head]
 
 		// If we've found a path, don't explore beyond that length
@@ -2070,7 +2123,7 @@ func (e *StorageExecutor) allShortestPaths(startNode, endNode *storage.Node, rel
 		}
 	}
 
-	return results
+	return results, nil
 }
 
 // getRelType gets the type of a relationship - used for type(r) function

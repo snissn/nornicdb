@@ -433,11 +433,18 @@ func (e *StorageExecutor) executeQueryAgainstStorage(ctx context.Context, cypher
 	case strings.HasPrefix(upper, "MATCH"):
 		// Check for shortestPath queries first
 		if isShortestPathQuery(cypher) {
-			query, err := e.parseShortestPathQuery(cypher)
+			// Substitute parameters before parsing so variable bindings from
+			// the preceding MATCH clause resolve to actual values rather than
+			// the literal `$param` text.
+			spCypher := cypher
+			if params := getParamsFromContext(ctx); params != nil {
+				spCypher = e.substituteParams(spCypher, params)
+			}
+			query, err := e.parseShortestPathQuery(spCypher)
 			if err != nil {
 				return nil, err
 			}
-			return e.executeShortestPathQuery(query)
+			return e.executeShortestPathQuery(ctx, query)
 		}
 		// Check for compound MATCH...OPTIONAL MATCH queries
 		if findKeywordIndex(cypher, "OPTIONAL MATCH") > 0 {

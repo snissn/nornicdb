@@ -8,16 +8,29 @@
 package cypher
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+// bfsCancelCheckMask is the bitmask used to check ctx.Done() periodically
+// inside hot BFS loops. Checking on every iteration is measurable overhead
+// for traversals over large fan-out graphs; checking once every 256 dequeues
+// is enough to react to client disconnects/server shutdown within a few ms
+// while keeping the per-iteration cost negligible. Power of two so the
+// compiler turns the modulo into a single AND.
+const bfsCancelCheckMask = 0xFF
+
 // parseShortestPathQuery parses queries with shortestPath() or allShortestPaths()
 func (e *StorageExecutor) parseShortestPathQuery(cypher string) (*ShortestPathQuery, error) {
 	query := &ShortestPathQuery{
-		maxHops:        10, // Default max depth
+		// shortestPath terminates when the BFS frontier is exhausted, so the
+		// only reason to cap depth is to bound worst-case work. Using the
+		// shared sentinel keeps `[*]` semantics consistent with the rest of
+		// the variable-length parser.
+		maxHops:        VarLengthUnboundedMaxHops,
 		originalCypher: cypher,
 	}
 
@@ -194,8 +207,10 @@ type ShortestPathQuery struct {
 	originalCypher  string // Full original query for MATCH clause parsing
 }
 
-// executeShortestPathQuery executes a shortestPath or allShortestPaths query
-func (e *StorageExecutor) executeShortestPathQuery(query *ShortestPathQuery) (*ExecuteResult, error) {
+// executeShortestPathQuery executes a shortestPath or allShortestPaths query.
+// ctx is checked between start/end pairs and inside the BFS so the caller can
+// abandon expensive traversals on client disconnect or server shutdown.
+func (e *StorageExecutor) executeShortestPathQuery(ctx context.Context, query *ShortestPathQuery) (*ExecuteResult, error) {
 	result := &ExecuteResult{
 		Columns: []string{},
 		Rows:    [][]interface{}{},
@@ -213,12 +228,19 @@ func (e *StorageExecutor) executeShortestPathQuery(query *ShortestPathQuery) (*E
 	startHasPattern := len(query.startNode.labels) > 0 || len(query.startNode.properties) > 0
 	endHasPattern := len(query.endNode.labels) > 0 || len(query.endNode.properties) > 0
 
-	if !startHasPattern && query.startVarBinding != nil {
-		// Variable reference - use the resolved node from MATCH clause
+	startIsVarRef := !startHasPattern && query.startNode.variable != ""
+	endIsVarRef := !endHasPattern && query.endNode.variable != ""
+
+	if startIsVarRef && query.startVarBinding != nil {
 		startNodes = []*storage.Node{query.startVarBinding}
+	} else if startIsVarRef {
+		// Variable referenced but couldn't be resolved against the previous
+		// MATCH clause — refuse rather than silently scanning every node and
+		// running BFS from each one (which produces a multi-second hang on
+		// any non-trivial graph).
+		return nil, fmt.Errorf("shortestPath: could not resolve start variable %q from preceding MATCH clause", query.startNode.variable)
 	} else if len(query.startNode.labels) > 0 {
 		startNodes, _ = e.storage.GetNodesByLabel(query.startNode.labels[0])
-		// Filter by properties
 		if len(query.startNode.properties) > 0 {
 			var filtered []*storage.Node
 			for _, n := range startNodes {
@@ -232,12 +254,12 @@ func (e *StorageExecutor) executeShortestPathQuery(query *ShortestPathQuery) (*E
 		startNodes, _ = e.storage.AllNodes()
 	}
 
-	if !endHasPattern && query.endVarBinding != nil {
-		// Variable reference - use the resolved node from MATCH clause
+	if endIsVarRef && query.endVarBinding != nil {
 		endNodes = []*storage.Node{query.endVarBinding}
+	} else if endIsVarRef {
+		return nil, fmt.Errorf("shortestPath: could not resolve end variable %q from preceding MATCH clause", query.endNode.variable)
 	} else if len(query.endNode.labels) > 0 {
 		endNodes, _ = e.storage.GetNodesByLabel(query.endNode.labels[0])
-		// Filter by properties
 		if len(query.endNode.properties) > 0 {
 			var filtered []*storage.Node
 			for _, n := range endNodes {
@@ -255,15 +277,24 @@ func (e *StorageExecutor) executeShortestPathQuery(query *ShortestPathQuery) (*E
 	var allPaths []PathResult
 	for _, start := range startNodes {
 		for _, end := range endNodes {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if start.ID == end.ID {
 				continue // Skip same node
 			}
 
 			if query.findAll {
-				paths := e.allShortestPaths(start, end, query.relTypes, query.direction, query.maxHops)
+				paths, err := e.allShortestPaths(ctx, start, end, query.relTypes, query.direction, query.maxHops)
+				if err != nil {
+					return nil, err
+				}
 				allPaths = append(allPaths, paths...)
 			} else {
-				path := e.shortestPath(start, end, query.relTypes, query.direction, query.maxHops)
+				path, err := e.shortestPath(ctx, start, end, query.relTypes, query.direction, query.maxHops)
+				if err != nil {
+					return nil, err
+				}
 				if path != nil {
 					allPaths = append(allPaths, *path)
 				}
@@ -349,7 +380,160 @@ func (e *StorageExecutor) pathToValue(path PathResult, expr, pathVar string) int
 		return rels
 	}
 
+	// Handle list comprehensions over path elements:
+	//   [n IN nodes(p) | n.<prop>]
+	//   [r IN relationships(p) | type(r)]
+	if v, ok := e.pathListComprehension(path, expr, pathVar); ok {
+		return v
+	}
+
 	return nil
+}
+
+// pathListComprehension evaluates `[var IN nodes(pathVar) | <expr>]` and
+// `[var IN relationships(pathVar) | <expr>]`. Returns (value, true) if expr
+// is recognised as a comprehension over a path source, otherwise (nil, false).
+func (e *StorageExecutor) pathListComprehension(path PathResult, expr, pathVar string) (interface{}, bool) {
+	expr = strings.TrimSpace(expr)
+	if !strings.HasPrefix(expr, "[") || !strings.HasSuffix(expr, "]") {
+		return nil, false
+	}
+	inner := strings.TrimSpace(expr[1 : len(expr)-1])
+	upper := strings.ToUpper(inner)
+	inIdx := strings.Index(upper, " IN ")
+	if inIdx <= 0 {
+		return nil, false
+	}
+	pipeIdx := strings.Index(inner[inIdx+4:], "|")
+	if pipeIdx < 0 {
+		return nil, false
+	}
+	pipeIdx += inIdx + 4
+	loopVar := strings.TrimSpace(inner[:inIdx])
+	listExpr := strings.TrimSpace(inner[inIdx+4 : pipeIdx])
+	transform := strings.TrimSpace(inner[pipeIdx+1:])
+
+	listExprLower := strings.ToLower(listExpr)
+	pathVarLower := strings.ToLower(pathVar)
+	switch {
+	case strings.HasPrefix(listExprLower, "nodes(") && strings.HasSuffix(listExprLower, ")") &&
+		strings.TrimSpace(listExpr[len("nodes("):len(listExpr)-1]) == pathVar:
+		out := make([]interface{}, len(path.Nodes))
+		for i, n := range path.Nodes {
+			out[i] = applyPathListTransform(transform, loopVar, "node", n, nil)
+		}
+		return out, true
+	case strings.HasPrefix(listExprLower, "relationships(") && strings.HasSuffix(listExprLower, ")") &&
+		strings.TrimSpace(listExpr[len("relationships("):len(listExpr)-1]) == pathVar:
+		out := make([]interface{}, len(path.Relationships))
+		for i, r := range path.Relationships {
+			out[i] = applyPathListTransform(transform, loopVar, "rel", nil, r)
+		}
+		return out, true
+	}
+	// Tolerate non-pathVar list expressions only when the iterator is over
+	// a path-shaped source we recognise; otherwise hand back to the caller.
+	_ = pathVarLower
+	return nil, false
+}
+
+// applyPathListTransform evaluates the projection expression of a path-rooted
+// list comprehension. Supports the common shapes:
+//   - <var>                       → element itself (node or rel map)
+//   - <var>.<property>            → property access on a node
+//   - id(<var>) / elementId(<var>) → node identifiers
+//   - type(<var>)                 → relationship type
+//   - labels(<var>)               → list of labels for a node
+//
+// More elaborate transforms fall through to nil rather than returning
+// nonsense; callers can extend this as needed.
+func applyPathListTransform(transform, loopVar, kind string, node *storage.Node, edge *storage.Edge) interface{} {
+	t := strings.TrimSpace(transform)
+	if t == loopVar {
+		if kind == "node" && node != nil {
+			return nodeToValue(node)
+		}
+		if kind == "rel" && edge != nil {
+			return edgeToValueShortestPath(edge)
+		}
+		return nil
+	}
+	// <var>.<prop>
+	if strings.HasPrefix(t, loopVar+".") {
+		prop := t[len(loopVar)+1:]
+		if kind == "node" && node != nil {
+			if v, ok := node.Properties[prop]; ok {
+				return v
+			}
+			return nil
+		}
+		if kind == "rel" && edge != nil {
+			if v, ok := edge.Properties[prop]; ok {
+				return v
+			}
+			return nil
+		}
+	}
+	// id(<var>) / elementId(<var>) — use the storage ID (string).
+	if strings.EqualFold(t, "id("+loopVar+")") || strings.EqualFold(t, "elementId("+loopVar+")") {
+		if kind == "node" && node != nil {
+			return string(node.ID)
+		}
+		if kind == "rel" && edge != nil {
+			return string(edge.ID)
+		}
+	}
+	// type(<var>) for relationships.
+	if strings.EqualFold(t, "type("+loopVar+")") {
+		if kind == "rel" && edge != nil {
+			return edge.Type
+		}
+	}
+	// labels(<var>) for nodes.
+	if strings.EqualFold(t, "labels("+loopVar+")") {
+		if kind == "node" && node != nil {
+			labels := make([]interface{}, len(node.Labels))
+			for i, l := range node.Labels {
+				labels[i] = l
+			}
+			return labels
+		}
+	}
+	return nil
+}
+
+func nodeToValue(n *storage.Node) interface{} {
+	props := make(map[string]interface{}, len(n.Properties))
+	for k, v := range n.Properties {
+		props[k] = v
+	}
+	return map[string]interface{}{
+		"elementId":  string(n.ID),
+		"labels":     labelStringSlice(n.Labels),
+		"properties": props,
+	}
+}
+
+func edgeToValueShortestPath(edge *storage.Edge) interface{} {
+	props := make(map[string]interface{}, len(edge.Properties))
+	for k, v := range edge.Properties {
+		props[k] = v
+	}
+	return map[string]interface{}{
+		"elementId":  string(edge.ID),
+		"type":       edge.Type,
+		"start":      string(edge.StartNode),
+		"end":        string(edge.EndNode),
+		"properties": props,
+	}
+}
+
+func labelStringSlice(in []string) []interface{} {
+	out := make([]interface{}, len(in))
+	for i, s := range in {
+		out[i] = s
+	}
+	return out
 }
 
 // pathToMap converts a PathResult to a map representation

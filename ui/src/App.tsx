@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import {
   BrowserRouter,
   Routes,
@@ -18,6 +18,9 @@ import { KnowledgePoliciesAdmin } from "./pages/KnowledgePoliciesAdmin";
 import { RetentionAdmin } from "./pages/RetentionAdmin";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { BASE_PATH } from "./utils/basePath";
+
+// /demo pulls in three.js + 3d-force-graph; lazy so the main bundle stays lean.
+const Demo = lazy(() => import("./pages/Demo").then((m) => ({ default: m.Demo })));
 
 // Base path from environment variable (set at build time)
 // Env: VITE_BASE_PATH (same as NORNICDB_BASE_PATH on server)
@@ -44,6 +47,20 @@ function App() {
       <TrailingSlashCanonicalizer />
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route
+          path="/demo"
+          element={
+            <Suspense
+              fallback={
+                <div className="min-h-screen flex items-center justify-center bg-norse-night text-norse-silver">
+                  Loading galaxy...
+                </div>
+              }
+            >
+              <Demo />
+            </Suspense>
+          }
+        />
         <Route
           path="/"
           element={

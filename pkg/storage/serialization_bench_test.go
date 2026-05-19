@@ -47,7 +47,8 @@ func BenchmarkDeserializeNode(b *testing.B) {
 		if encErr != nil {
 			return encErr
 		}
-		return eng.propKeyDict.flushTxnCounters(txn)
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
 	}); err != nil {
 		b.Fatal(err)
 	}
@@ -87,10 +88,9 @@ func BenchmarkDeserializeEdge(b *testing.B) {
 		if encErr != nil {
 			return encErr
 		}
-		if err := eng.idDict.flushTxnCounters(txn); err != nil {
-			return err
-		}
-		return eng.propKeyDict.flushTxnCounters(txn)
+		_, _ = eng.idDict.flushTxnCounters(txn)
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
 	}); err != nil {
 		b.Fatal(err)
 	}

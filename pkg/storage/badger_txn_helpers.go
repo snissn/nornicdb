@@ -30,22 +30,42 @@ func (b *BadgerEngine) withUpdate(fn func(txn *badger.Txn) error) error {
 	if err := b.ensureOpen(); err != nil {
 		return err
 	}
-	return recoverBadgerClosedPanic(func() error {
+	var nodeMax, edgeMax uint64
+	var propKeyDrain propKeyTxnDrain
+	err := recoverBadgerClosedPanic(func() error {
 		return b.db.Update(func(txn *badger.Txn) error {
 			if err := fn(txn); err != nil {
 				if b.idDict != nil {
 					b.idDict.discardTxnCounters(txn)
 				}
+				if b.propKeyDict != nil {
+					b.propKeyDict.discardTxnCounters(txn)
+				}
 				return err
 			}
+			// Drain the staged counter high-water marks and any
+			// pending property-key forward/reverse entries so they
+			// can be persisted out-of-band (see flushTxnCounters
+			// doc — these keys cannot ride the user txn or
+			// concurrent writers race on them).
 			if b.idDict != nil {
-				if err := b.idDict.flushTxnCounters(txn); err != nil {
-					return err
-				}
+				nodeMax, edgeMax = b.idDict.flushTxnCounters(txn)
+			}
+			if b.propKeyDict != nil {
+				propKeyDrain = b.propKeyDict.flushTxnCounters(txn)
 			}
 			return nil
 		})
 	})
+	if err == nil {
+		if b.idDict != nil {
+			b.idDict.persistCounters(b.db, nodeMax, edgeMax)
+		}
+		if b.propKeyDict != nil {
+			b.propKeyDict.persistTxnCounters(b.db, propKeyDrain)
+		}
+	}
+	return err
 }
 
 func recoverBadgerClosedPanic(fn func() error) (err error) {

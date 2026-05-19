@@ -742,7 +742,7 @@ func TestCypherHelpers_TraversalAndShortestPathHelpers(t *testing.T) {
 	require.NotNil(t, match)
 	startNodes, err := eng.GetNodesByLabel("A")
 	require.NoError(t, err)
-	paths := exec.traverseGraphParallel(match, startNodes, ParallelConfig{
+	paths := exec.traverseGraphParallel(context.Background(), match, startNodes, ParallelConfig{
 		Enabled:      true,
 		MaxWorkers:   2,
 		MinBatchSize: 1,

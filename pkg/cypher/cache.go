@@ -1085,3 +1085,37 @@ func (e *StorageExecutor) invalidateNodeLookupCache() {
 	e.nodeLookupCache = make(map[string]*storage.Node, 1000)
 	cacheMu.Unlock()
 }
+
+// promoteNodeLookupCacheTo copies this executor's MERGE/MATCH lookup cache
+// entries into dst's cache. Called after a transactional clone successfully
+// commits so its now-durable entries can serve subsequent Execute calls on
+// the parent. On rollback callers invoke invalidateNodeLookupCache instead
+// so uncommitted entries are dropped without ever reaching the parent.
+//
+// The two caches are isolated by design (see cloneWithStorage and the
+// nodeLookupCache field doc); promotion only runs in the success path.
+func (e *StorageExecutor) promoteNodeLookupCacheTo(dst *StorageExecutor) {
+	if e == nil || dst == nil || dst == e {
+		return
+	}
+	if e.nodeLookupCacheMu == dst.nodeLookupCacheMu {
+		return // already shared, nothing to promote
+	}
+	srcMu := e.nodeLookupCacheLock()
+	srcMu.RLock()
+	entries := make(map[string]*storage.Node, len(e.nodeLookupCache))
+	for k, v := range e.nodeLookupCache {
+		entries[k] = v
+	}
+	srcMu.RUnlock()
+	if len(entries) == 0 {
+		return
+	}
+	dst.ensureNodeLookupCache()
+	dstMu := dst.nodeLookupCacheLock()
+	dstMu.Lock()
+	for k, v := range entries {
+		dst.nodeLookupCache[k] = v
+	}
+	dstMu.Unlock()
+}

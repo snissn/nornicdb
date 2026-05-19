@@ -903,23 +903,33 @@ func (b *BadgerEngine) loadPersistedMVCCSequence() (uint64, error) {
 }
 
 // allocateMVCCVersion mints the next (CommitTimestamp, CommitSequence)
-// pair for namespace, persisting the new sequence to its per-namespace
-// key on disk in the same Badger transaction that holds the user write.
-// namespace must be non-empty; the transaction layer enforces this via
-// pinNamespaceFromIDLocked.
+// pair for namespace. namespace must be non-empty; the transaction layer
+// enforces this via pinNamespaceFromIDLocked.
+//
+// CRITICAL: the per-namespace sequence is NOT written to the user's
+// badger.Txn. Doing so would make every commit in the same namespace
+// touch the same hot key, causing Badger to surface a write-write
+// conflict ("Transaction Conflict") on the second concurrent commit
+// before our constraint-validation lock can catch the actual user-data
+// conflict. The contract pinned by
+// docs/plans/consumer-pinned-error-contract-plan.md §2.1 requires
+// commit-time UNIQUE violations to surface as
+// "constraint violation: ... already exists", not Badger conflicts.
+//
+// Durability: the counter is in-memory authoritative for the lifetime of
+// the engine; on restart, namespaceMVCC seeds the counter from
+// (a) the persisted per-namespace key, last written by persistMVCCSequence,
+// and (b) the legacy global counter as a backward-compat seed. A crash
+// between commit and persistence loses at most the unflushed window of
+// allocated-but-unpersisted sequences, which is reconciled by the
+// startup max-of-persisted-and-legacy floor.
 func (b *BadgerEngine) allocateMVCCVersion(txn *badger.Txn, namespace string, commitTime time.Time) (MVCCVersion, error) {
+	_ = txn // intentionally unused — see doc above
 	state, err := b.namespaceMVCC(namespace)
 	if err != nil {
 		return MVCCVersion{}, err
 	}
 	seq, saturated := state.nextSequence()
-	if !saturated {
-		encodedSeq := make([]byte, 8)
-		binary.BigEndian.PutUint64(encodedSeq, seq)
-		if err := txn.Set(state.persistKey, encodedSeq); err != nil {
-			return MVCCVersion{}, err
-		}
-	}
 	commitStamp, err := state.reserveCommitTimestamp(commitTime.UTC(), saturated)
 	if err != nil {
 		return MVCCVersion{}, err
@@ -928,6 +938,32 @@ func (b *BadgerEngine) allocateMVCCVersion(txn *badger.Txn, namespace string, co
 		CommitTimestamp: commitStamp,
 		CommitSequence:  seq,
 	}, nil
+}
+
+// persistMVCCSequence writes the namespace's current sequence to disk in
+// a separate Badger transaction so the persistence write does not
+// participate in the user transaction's conflict-detection set. Best
+// effort: a failure is logged at debug level rather than failing the
+// commit, since the in-memory counter is authoritative and any lost
+// persistence window is reconciled at next engine open.
+func (b *BadgerEngine) persistMVCCSequence(namespace string) {
+	if namespace == "" {
+		return
+	}
+	state, err := b.namespaceMVCC(namespace)
+	if err != nil {
+		return
+	}
+	seq := state.seq.Load()
+	if seq == 0 {
+		return
+	}
+	encodedSeq := make([]byte, 8)
+	binary.BigEndian.PutUint64(encodedSeq, seq)
+	persistKey := state.persistKey
+	_ = b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(persistKey, encodedSeq)
+	})
 }
 
 func (b *BadgerEngine) readSchemaVersion() (int, error) {

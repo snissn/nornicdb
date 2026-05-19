@@ -41,9 +41,7 @@ func writeV1CompactEdgeBody(t *testing.T, eng *BadgerEngine, edge *Edge) {
 		if err != nil {
 			return err
 		}
-		if err := eng.idDict.flushTxnCounters(txn); err != nil {
-			return err
-		}
+		_, _ = eng.idDict.flushTxnCounters(txn)
 		return txn.Set(edgeKey(edge.ID), body)
 	}))
 }
@@ -124,7 +122,8 @@ func TestMigrateV1ToV2_RewritesAllEdges(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return eng.idDict.flushTxnCounters(txn)
+		_, _ = eng.idDict.flushTxnCounters(txn)
+		return nil
 	}))
 
 	for i := 0; i < 20; i++ {
@@ -350,7 +349,8 @@ func TestMigrateV1ToV2_ResumableAfterPartialPass(t *testing.T) {
 			if err := txn.Set(nodeKey(NodeID("test:done-"+strconv.Itoa(i))), body); err != nil {
 				return err
 			}
-			return eng.propKeyDict.flushTxnCounters(txn)
+			_ = eng.propKeyDict.flushTxnCounters(txn)
+			return nil
 		}))
 	}
 	// Other half still V1.

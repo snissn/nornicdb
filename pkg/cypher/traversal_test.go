@@ -104,7 +104,7 @@ func TestParseRelationshipPattern(t *testing.T) {
 		{"-[r:KNOWS|FOLLOWS]->", "outgoing", []string{"KNOWS", "FOLLOWS"}, "r", 1, 1},
 		{"-[*1..3]->", "outgoing", nil, "", 1, 3},
 		{"-[r*2..5:KNOWS]->", "outgoing", []string{"KNOWS"}, "r", 2, 5},
-		{"-[*]->", "outgoing", nil, "", 1, 10}, // Default max for unbounded
+		{"-[*]->", "outgoing", nil, "", 1, VarLengthUnboundedMaxHops}, // unbounded var-length
 	}
 
 	for _, tt := range tests {
@@ -273,7 +273,10 @@ func TestShortestPath(t *testing.T) {
 	// Test shortest path Alice -> Carol
 	// Direct: Alice -[WORKS_WITH]-> Carol (length 1)
 	// Via Bob: Alice -[KNOWS]-> Bob -[KNOWS]-> Carol (length 2)
-	path := exec.shortestPath(alice, carol, nil, "outgoing", 10)
+	path, err := exec.shortestPath(context.Background(), alice, carol, nil, "outgoing", 10)
+	if err != nil {
+		t.Fatalf("shortestPath: %v", err)
+	}
 
 	if path == nil {
 		t.Fatal("shortestPath returned nil")
@@ -285,7 +288,10 @@ func TestShortestPath(t *testing.T) {
 	}
 
 	// Test shortest path with type filter
-	pathKnows := exec.shortestPath(alice, carol, []string{"KNOWS"}, "outgoing", 10)
+	pathKnows, err := exec.shortestPath(context.Background(), alice, carol, []string{"KNOWS"}, "outgoing", 10)
+	if err != nil {
+		t.Fatalf("shortestPath KNOWS: %v", err)
+	}
 	if pathKnows == nil {
 		t.Fatal("shortestPath with KNOWS filter returned nil")
 	}
@@ -317,7 +323,10 @@ func TestAllShortestPaths(t *testing.T) {
 	}
 
 	// All shortest paths from Alice to Carol
-	paths := exec.allShortestPaths(alice, carol, nil, "outgoing", 10)
+	paths, err := exec.allShortestPaths(context.Background(), alice, carol, nil, "outgoing", 10)
+	if err != nil {
+		t.Fatalf("allShortestPaths: %v", err)
+	}
 
 	// Should find at least the direct path
 	if len(paths) == 0 {

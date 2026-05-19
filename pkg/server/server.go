@@ -629,6 +629,12 @@ type Server struct {
 
 	httpServer *http.Server
 	listener   net.Listener
+	// requestsCtx is the parent context handed to every inbound HTTP request
+	// via http.Server.BaseContext. Cancelled at the start of Stop() so any
+	// long-running handler (Cypher traversals, etc.) can unwind promptly
+	// instead of holding shutdown open until ReadTimeout/WriteTimeout fires.
+	requestsCtx       context.Context
+	cancelRequestsCtx context.CancelFunc
 
 	// httpMetrics is the Plan-04-02 HTTP catalog bag (D-02 typed handle DI).
 	// Populated by SetHTTPMetrics(...) AFTER observability.New runs in
@@ -1797,11 +1803,18 @@ func (s *Server) Start() error {
 	// re-propagating (T-04-08).
 	instrumented := instrumentedMux(mux, s.httpMetrics)
 
+	s.requestsCtx, s.cancelRequestsCtx = context.WithCancel(context.Background())
 	s.httpServer = &http.Server{
 		Handler:      instrumented,
 		ReadTimeout:  s.config.ReadTimeout,
 		WriteTimeout: s.config.WriteTimeout,
 		IdleTimeout:  s.config.IdleTimeout,
+		// BaseContext links every request's r.Context() to the server's
+		// shutdown signal. When Stop() cancels requestsCtx, all in-flight
+		// handlers see ctx.Err() != nil on their next cancellation probe and
+		// unwind, so http.Server.Shutdown returns instead of waiting on a
+		// long-running BFS.
+		BaseContext: func(net.Listener) context.Context { return s.requestsCtx },
 	}
 
 	// Configure HTTP/2 (always enabled, backwards compatible with HTTP/1.1)
@@ -1863,6 +1876,15 @@ func (s *Server) Stop(ctx context.Context) error {
 
 	if s.httpServer == nil {
 		return nil
+	}
+
+	// Cancel the BaseContext handed to all in-flight requests so handlers that
+	// honour ctx (Cypher BFS / shortestPath traversals, etc.) abandon work
+	// and let http.Server.Shutdown drain promptly. Without this, an unbounded
+	// shortestPath traversal could hold shutdown open for the duration of the
+	// configured WriteTimeout.
+	if s.cancelRequestsCtx != nil {
+		s.cancelRequestsCtx()
 	}
 
 	// Hard-bound shutdown: even if net/http Shutdown fails to return at ctx deadline

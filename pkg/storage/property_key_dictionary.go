@@ -44,18 +44,22 @@ type propertyKeyDictionary struct {
 	reverse map[string]map[uint64]string // namespace -> (id -> name)
 	nextID  map[string]*atomic.Uint64    // namespace -> next id
 
-	// Per-txn staged counter high-water marks, written once at commit
-	// (mirrors idDictionary.txnCounters).
-	txnMu       sync.Mutex
-	txnCounters map[*badger.Txn]map[string]uint64
+	// Per-txn staged counter high-water marks and pending forward/
+	// reverse entries, persisted out-of-band of the user transaction at
+	// commit time (see resolveOrAllocateInTxn for why those writes
+	// cannot ride the user txn).
+	txnMu             sync.Mutex
+	txnCounters       map[*badger.Txn]map[string]uint64
+	txnPendingForward map[*badger.Txn][]propKeyPersistEntry
 }
 
 func newPropertyKeyDictionary() *propertyKeyDictionary {
 	return &propertyKeyDictionary{
-		forward:     make(map[string]map[string]uint64),
-		reverse:     make(map[string]map[uint64]string),
-		nextID:      make(map[string]*atomic.Uint64),
-		txnCounters: make(map[*badger.Txn]map[string]uint64),
+		forward:           make(map[string]map[string]uint64),
+		reverse:           make(map[string]map[uint64]string),
+		nextID:            make(map[string]*atomic.Uint64),
+		txnCounters:       make(map[*badger.Txn]map[string]uint64),
+		txnPendingForward: make(map[*badger.Txn][]propKeyPersistEntry),
 	}
 }
 
@@ -107,9 +111,28 @@ func (d *propertyKeyDictionary) ensureNamespace(namespace string) {
 }
 
 // resolveOrAllocateInTxn returns the varint id for (namespace, name),
-// allocating a new id and persisting forward+reverse entries if the
-// name has never been seen in this namespace. Counter writes are staged
-// on the txn and flushed once at commit time.
+// allocating a new id and STAGING the forward+reverse entries for
+// out-of-band persistence if the name has never been seen in this
+// namespace. The persistence keys do NOT ride the user transaction:
+// two concurrent writers in the same namespace both first-allocating
+// the same property name would otherwise both write
+// propKeyForwardKey(ns, name) inside their own user txns, triggering
+// Badger's optimistic write-write conflict before the higher-level
+// commit-time UNIQUE check could surface as the contracted
+// "constraint violation: ... already exists" shape (see
+// docs/plans/consumer-pinned-error-contract-plan.md §2.1).
+//
+// In-memory correctness: the d.mu Lock around the allocation makes the
+// in-memory forward/reverse maps single-writer-correct — only one
+// goroutine ever wins id=N for a given (namespace, name). Persistence
+// is idempotent because every writer that subsequently reads the same
+// (namespace, name) sees the same id from the map.
+//
+// Durability: the in-memory maps are authoritative for the engine's
+// lifetime; on restart, loadFromBadger rebuilds them from the persisted
+// forward/reverse keys. A crash between commit and persistence loses
+// at most the unflushed window of allocated ids; reconciled at next
+// engine open.
 //
 // Lock discipline: reads happen under RLock; allocation upgrades to
 // Lock and re-checks for the concurrent-create race. The losing
@@ -136,16 +159,33 @@ func (d *propertyKeyDictionary) resolveOrAllocateInTxn(txn *badger.Txn, namespac
 	d.reverse[namespace][id] = name
 	d.mu.Unlock()
 
-	var idBuf [binary.MaxVarintLen64]byte
-	n := binary.PutUvarint(idBuf[:], id)
-	if err := txn.Set(propKeyForwardKey(namespace, name), append([]byte(nil), idBuf[:n]...)); err != nil {
-		return 0, err
-	}
-	if err := txn.Set(propKeyReverseKey(namespace, id), []byte(name)); err != nil {
-		return 0, err
-	}
+	d.recordTxnPendingPersist(txn, namespace, name, id)
 	d.recordTxnCounterUse(txn, namespace, id)
 	return id, nil
+}
+
+// recordTxnPendingPersist stages a (namespace, name, id) tuple on the
+// txn so the user's commit can later flush them via flushTxnCounters
+// (which now drains BOTH the per-namespace counter high-water marks
+// AND the staged forward/reverse entries) and persist them in a fresh
+// badger transaction via persistTxnCounters.
+func (d *propertyKeyDictionary) recordTxnPendingPersist(txn *badger.Txn, namespace, name string, id uint64) {
+	d.txnMu.Lock()
+	if d.txnPendingForward == nil {
+		d.txnPendingForward = make(map[*badger.Txn][]propKeyPersistEntry)
+	}
+	d.txnPendingForward[txn] = append(d.txnPendingForward[txn], propKeyPersistEntry{
+		namespace: namespace,
+		name:      name,
+		id:        id,
+	})
+	d.txnMu.Unlock()
+}
+
+type propKeyPersistEntry struct {
+	namespace string
+	name      string
+	id        uint64
 }
 
 // lookup returns the property-key name for a given (namespace, id).
@@ -176,28 +216,80 @@ func (d *propertyKeyDictionary) recordTxnCounterUse(txn *badger.Txn, namespace s
 	d.txnMu.Unlock()
 }
 
-// flushTxnCounters writes one counter key per dirty namespace and
-// detaches the staged state. Caller must invoke this from the commit
-// path BEFORE badgerTx.Commit(). Safe to call on a txn that never
-// allocated — does nothing.
-func (d *propertyKeyDictionary) flushTxnCounters(txn *badger.Txn) error {
+// propKeyTxnDrain holds the per-txn staged state — counter high-water
+// marks and pending forward/reverse entries — drained at commit time
+// for out-of-band persistence.
+type propKeyTxnDrain struct {
+	counters map[string]uint64
+	pending  []propKeyPersistEntry
+}
+
+// flushTxnCounters detaches the staged counter state and pending
+// forward/reverse entries for this txn and returns them for OUT-OF-TXN
+// persistence by the caller. The persistence writes must NOT go
+// through the user txn: every property-writing commit in the same
+// namespace would otherwise touch propKeyCounterKey(ns) and the
+// propKeyForwardKey(ns, name) keys for any newly-seen property name,
+// triggering Badger's optimistic write-write conflict on concurrent
+// commits and hiding genuine constraint violations from the
+// per-namespace commit-time UNIQUE check (see
+// consumer-pinned-error-contract-plan.md §2.1).
+//
+// Returns a zero-value drain if the txn allocated no fresh property
+// keys.
+func (d *propertyKeyDictionary) flushTxnCounters(txn *badger.Txn) propKeyTxnDrain {
 	d.txnMu.Lock()
-	state, ok := d.txnCounters[txn]
-	if ok {
+	state, hasCounters := d.txnCounters[txn]
+	if hasCounters {
 		delete(d.txnCounters, txn)
 	}
-	d.txnMu.Unlock()
-	if !ok || len(state) == 0 {
-		return nil
+	pending, hasPending := d.txnPendingForward[txn]
+	if hasPending {
+		delete(d.txnPendingForward, txn)
 	}
-	var buf [binary.MaxVarintLen64]byte
-	for namespace, max := range state {
-		n := binary.PutUvarint(buf[:], max)
-		if err := txn.Set(propKeyCounterKey(namespace), append([]byte(nil), buf[:n]...)); err != nil {
-			return err
+	d.txnMu.Unlock()
+	out := propKeyTxnDrain{}
+	if hasCounters && len(state) > 0 {
+		out.counters = make(map[string]uint64, len(state))
+		for k, v := range state {
+			out.counters[k] = v
 		}
 	}
-	return nil
+	if hasPending && len(pending) > 0 {
+		out.pending = pending
+	}
+	return out
+}
+
+// persistTxnCounters writes the staged forward/reverse entries and
+// per-namespace counter keys in a fresh badger transaction. Best
+// effort: the in-memory dictionary is authoritative for the engine's
+// lifetime; a crash before persistence loses at most the unflushed
+// window of allocated property keys, reconciled at next engine open.
+func (d *propertyKeyDictionary) persistTxnCounters(db *badger.DB, drain propKeyTxnDrain) {
+	if db == nil || (len(drain.counters) == 0 && len(drain.pending) == 0) {
+		return
+	}
+	_ = db.Update(func(txn *badger.Txn) error {
+		var idBuf [binary.MaxVarintLen64]byte
+		for _, entry := range drain.pending {
+			n := binary.PutUvarint(idBuf[:], entry.id)
+			if err := txn.Set(propKeyForwardKey(entry.namespace, entry.name), append([]byte(nil), idBuf[:n]...)); err != nil {
+				return err
+			}
+			if err := txn.Set(propKeyReverseKey(entry.namespace, entry.id), []byte(entry.name)); err != nil {
+				return err
+			}
+		}
+		var buf [binary.MaxVarintLen64]byte
+		for namespace, max := range drain.counters {
+			n := binary.PutUvarint(buf[:], max)
+			if err := txn.Set(propKeyCounterKey(namespace), append([]byte(nil), buf[:n]...)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // discardTxnCounters drops staged counter state for a rolled-back txn.
@@ -205,6 +297,7 @@ func (d *propertyKeyDictionary) flushTxnCounters(txn *badger.Txn) error {
 func (d *propertyKeyDictionary) discardTxnCounters(txn *badger.Txn) {
 	d.txnMu.Lock()
 	delete(d.txnCounters, txn)
+	delete(d.txnPendingForward, txn)
 	d.txnMu.Unlock()
 }
 

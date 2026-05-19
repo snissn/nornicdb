@@ -340,7 +340,7 @@ func TestShortestPathQueryParsingAndExecutionHelpers(t *testing.T) {
 	require.NotNil(t, parsed.startVarBinding)
 	require.NotNil(t, parsed.endVarBinding)
 
-	pathResult, err := exec.executeShortestPathQuery(parsed)
+	pathResult, err := exec.executeShortestPathQuery(context.Background(), parsed)
 	require.NoError(t, err)
 	require.NotEmpty(t, pathResult.Rows)
 
@@ -352,7 +352,7 @@ func TestShortestPathQueryParsingAndExecutionHelpers(t *testing.T) {
 		direction:    "outgoing",
 		maxHops:      5,
 	}
-	noReturnResult, err := exec.executeShortestPathQuery(direct)
+	noReturnResult, err := exec.executeShortestPathQuery(context.Background(), direct)
 	require.NoError(t, err)
 	require.Equal(t, []string{"p"}, noReturnResult.Columns)
 	require.NotEmpty(t, noReturnResult.Rows)
@@ -366,7 +366,7 @@ func TestShortestPathQueryParsingAndExecutionHelpers(t *testing.T) {
 		maxHops:      5,
 		returnClause: "unknownExpr",
 	}
-	invalidExprRes, err := exec.executeShortestPathQuery(invalidExpr)
+	invalidExprRes, err := exec.executeShortestPathQuery(context.Background(), invalidExpr)
 	require.NoError(t, err)
 	require.NotEmpty(t, invalidExprRes.Rows)
 	assert.Nil(t, invalidExprRes.Rows[0][0])

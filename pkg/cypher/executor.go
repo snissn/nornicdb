@@ -273,9 +273,18 @@ type StorageExecutor struct {
 
 	// Node lookup cache for MATCH patterns like (n:Label {prop: value})
 	// Key: "Label:{prop:value,...}", Value: *storage.Node
-	// This dramatically speeds up repeated MATCH lookups for the same pattern
-	nodeLookupCache map[string]*storage.Node
-	// cloneWithStorage shares nodeLookupCache, so clones must share this lock too.
+	// This dramatically speeds up repeated MATCH lookups for the same pattern.
+	//
+	// Transaction scoping: cloneWithStorage gives transactional clones a
+	// FRESH cache + mutex so concurrent transactions can't see each other's
+	// uncommitted MERGE node-ID mappings. Without that scoping, two writers
+	// MERGE-ing on the same (label, prop, value) would each populate the
+	// shared cache pre-commit; the peer would then probe its own
+	// tx.badgerTx for the cached uncommitted node ID, taking the peer's
+	// node key into its read set, and Badger SSI would reject the loser
+	// with "Transaction Conflict" instead of the consumer-pinned
+	// commit-time UNIQUE shape.
+	nodeLookupCache   map[string]*storage.Node
 	nodeLookupCacheMu *sync.RWMutex
 
 	// deferFlush when true, writes are not auto-flushed (Bolt layer handles it)
@@ -368,6 +377,29 @@ type unwindMergeChainPlanCache struct {
 
 func (e *StorageExecutor) cloneWithStorage(override storage.Engine) *StorageExecutor {
 	e.ensureNodeLookupCache()
+	// Transactional clones use the lookup cache pinned to the
+	// transactionStorageWrapper. Concurrent transactions hold distinct
+	// wrappers and therefore distinct caches — that isolation prevents
+	// a peer's uncommitted node-ID mapping from leaking into this
+	// transaction's tx.badgerTx read set (and corrupting Badger SSI
+	// conflict shapes). Re-entrant Execute calls within the same
+	// transaction reuse the wrapper, so the in-tx cache survives
+	// across clauses. On successful commit, callers promote the
+	// wrapper-scoped entries back into the parent executor via
+	// promoteNodeLookupCacheTo so subsequent Execute calls still
+	// benefit from the cross-query speedup.
+	lookupCache := e.nodeLookupCache
+	lookupCacheMu := e.nodeLookupCacheLock()
+	if txWrapper, isTxScoped := override.(*transactionStorageWrapper); isTxScoped {
+		// Seed the wrapper-scoped cache from the parent's committed
+		// entries on first clone so subsequent Execute calls retain
+		// the cross-query speedup. Concurrent transactions still hold
+		// distinct wrappers — the seeding is a one-shot copy, not a
+		// live alias, so peer-tx writes after this point cannot leak.
+		txWrapper.ensureNodeLookupCacheLocked(e)
+		lookupCache = txWrapper.txNodeLookupCache
+		lookupCacheMu = txWrapper.txNodeLookupCacheMu
+	}
 	return &StorageExecutor{
 		parser:                      e.parser,
 		storage:                     override,
@@ -376,8 +408,8 @@ func (e *StorageExecutor) cloneWithStorage(override storage.Engine) *StorageExec
 		planCache:                   e.planCache,
 		fabricPlanCache:             e.fabricPlanCache,
 		analyzer:                    e.analyzer,
-		nodeLookupCache:             e.nodeLookupCache,
-		nodeLookupCacheMu:           e.nodeLookupCacheLock(),
+		nodeLookupCache:             lookupCache,
+		nodeLookupCacheMu:           lookupCacheMu,
 		deferFlush:                  e.deferFlush,
 		embedder:                    e.embedder,
 		searchService:               e.searchService,
@@ -1997,6 +2029,12 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 		}
 	}
 
+	// Promote the tx-scoped MERGE lookup cache into the parent so
+	// subsequent Execute calls still benefit from the cross-query
+	// speedup. Tx isolation is preserved because each in-flight tx had
+	// its own clone; only post-commit entries graduate to the parent.
+	txExec.promoteNodeLookupCacheTo(e)
+
 	// Flush if needed for durability
 	if !e.deferFlush && asyncEngine != nil {
 		releaseAsyncFlushHold()
@@ -2177,6 +2215,19 @@ type transactionStorageWrapper struct {
 	separator        string
 	mutatedNodeIDs   map[string]struct{}
 	mutatedNodeIDsMu sync.Mutex
+
+	// txNodeLookupCache scopes the executor's MERGE/MATCH lookup cache to
+	// this single transaction. Concurrent transactions get distinct
+	// wrappers — and therefore distinct caches — so a peer's uncommitted
+	// node-ID mapping cannot leak into this transaction's read set via
+	// store.GetNode(...) inside tx.badgerTx (which would otherwise put
+	// the peer's node key into Badger's SSI read set and convert a
+	// constraint violation into a generic Transaction Conflict). Within
+	// a single transaction the cache is shared across re-entries that
+	// reuse the same wrapper, so multi-clause queries still benefit
+	// from the cross-clause speedup.
+	txNodeLookupCache   map[string]*storage.Node
+	txNodeLookupCacheMu *sync.RWMutex
 }
 
 func (w *transactionStorageWrapper) Namespace() string {
@@ -2184,6 +2235,31 @@ func (w *transactionStorageWrapper) Namespace() string {
 		return ""
 	}
 	return w.namespace
+}
+
+// ensureNodeLookupCacheLocked lazily initializes the wrapper's MERGE/MATCH
+// lookup cache, seeding it once from the parent executor's committed
+// entries. The cache exists for the lifetime of the transaction; on
+// commit, executor code drains it back into the parent executor via
+// promoteNodeLookupCacheTo, on rollback the wrapper is discarded and the
+// cache with it. Subsequent calls (e.g. recursive Execute re-entry on
+// the same wrapper) are no-ops, so the in-tx state survives across
+// multi-clause queries.
+func (w *transactionStorageWrapper) ensureNodeLookupCacheLocked(seedFrom *StorageExecutor) {
+	if w.txNodeLookupCacheMu != nil && w.txNodeLookupCache != nil {
+		return
+	}
+	w.txNodeLookupCacheMu = &sync.RWMutex{}
+	w.txNodeLookupCache = make(map[string]*storage.Node, 1000)
+	if seedFrom == nil {
+		return
+	}
+	srcMu := seedFrom.nodeLookupCacheLock()
+	srcMu.RLock()
+	for k, v := range seedFrom.nodeLookupCache {
+		w.txNodeLookupCache[k] = v
+	}
+	srcMu.RUnlock()
 }
 
 func (w *transactionStorageWrapper) GetEngine() storage.Engine {
@@ -3007,12 +3083,21 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		// Handles flexible whitespace: "OPTIONAL MATCH", "OPTIONAL\tMATCH", "OPTIONAL\nMATCH", etc.
 		return e.executeOptionalMatch(ctx, cypher)
 	case startsWithMatch && isShortestPathQuery(cypher):
-		// Handle shortestPath() and allShortestPaths() queries
-		query, err := e.parseShortestPathQuery(cypher)
+		// Handle shortestPath() and allShortestPaths() queries.
+		// Parameter substitution must happen before parsing so the variable-
+		// binding lookup for `MATCH (start:Star {starId: $startId})` resolves
+		// to the actual property value rather than the literal `$startId`.
+		// Without this, `findNodeByPattern` matches no node, the executor
+		// falls through to AllNodes() × AllNodes(), and the BFS explodes.
+		spCypher := cypher
+		if params := getParamsFromContext(ctx); params != nil {
+			spCypher = e.substituteParams(spCypher, params)
+		}
+		query, err := e.parseShortestPathQuery(spCypher)
 		if err != nil {
 			return nil, err
 		}
-		return e.executeShortestPathQuery(query)
+		return e.executeShortestPathQuery(ctx, query)
 	case startsWithMatch:
 		// Multi-MATCH chains have dedicated routing inside executeMatch (executeMultiMatch,
 		// executeChainedMatchWithAggregations). Keep them on that path to preserve WHERE

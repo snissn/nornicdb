@@ -59,7 +59,8 @@ func codecRoundTripNode(t *testing.T, n *Node) (*Node, error) {
 		if encErr != nil {
 			return encErr
 		}
-		return eng.propKeyDict.flushTxnCounters(txn)
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -81,7 +82,8 @@ func buildV2NodeBody(t *testing.T, engine *BadgerEngine, n *Node) ([]byte, error
 		if encErr != nil {
 			return encErr
 		}
-		return engine.propKeyDict.flushTxnCounters(txn)
+		_ = engine.propKeyDict.flushTxnCounters(txn)
+		return nil
 	})
 	return data, err
 }
@@ -100,10 +102,9 @@ func codecRoundTripEdge(t *testing.T, e *Edge) (*Edge, error) {
 		if encErr != nil {
 			return encErr
 		}
-		if err := eng.idDict.flushTxnCounters(txn); err != nil {
-			return err
-		}
-		return eng.propKeyDict.flushTxnCounters(txn)
+		_, _ = eng.idDict.flushTxnCounters(txn)
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
 	})
 	if err != nil {
 		return nil, err
