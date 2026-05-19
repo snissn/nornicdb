@@ -67,6 +67,12 @@ var (
 	ErrInvalidEdge      = errors.New("invalid edge: start or end node not found")
 	ErrStorageClosed    = errors.New("storage closed")
 	ErrIterationStopped = errors.New("iteration stopped") // Sentinel to stop streaming early
+	// ErrCrossNamespaceTransaction is returned when a single transaction
+	// attempts to mix writes from multiple namespaces. The transaction layer
+	// pins each transaction to one namespace at the first prefixed write, and
+	// every subsequent write must share that prefix. Per-database MVCC
+	// counters depend on this invariant.
+	ErrCrossNamespaceTransaction = errors.New("transaction spans multiple namespaces")
 )
 
 // NodeID is a strongly-typed unique identifier for graph nodes.

@@ -36,7 +36,7 @@ func TestDrawerFeedTraversal_UsesStartSeedTopK(t *testing.T) {
 	require.NoError(t, err)
 	_, err = eng.CreateNode(&storage.Node{ID: "test:room-1", Labels: []string{"Room"}, Properties: map[string]interface{}{"name": "Root Room"}})
 	require.NoError(t, err)
-	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "edge-room-wing", Type: "IN_WING", StartNode: "test:room-1", EndNode: "test:wing-1"}))
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "test:edge-room-wing", Type: "IN_WING", StartNode: "test:room-1", EndNode: "test:wing-1"}))
 
 	drawers := []struct {
 		id       string
@@ -64,7 +64,7 @@ func TestDrawerFeedTraversal_UsesStartSeedTopK(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
-		require.NoError(t, eng.CreateEdge(&storage.Edge{ID: storage.EdgeID(drawer.id + "-room"), Type: "IN_ROOM", StartNode: drawerNodeID, EndNode: "test:room-1"}))
+		require.NoError(t, eng.CreateEdge(&storage.Edge{ID: storage.EdgeID("test:" + drawer.id + "-room"), Type: "IN_ROOM", StartNode: drawerNodeID, EndNode: "test:room-1"}))
 	}
 
 	_, err = exec.Execute(ctx, "CREATE INDEX idx_drawer_filed_at FOR (d:Drawer) ON (d.filed_at)", nil)

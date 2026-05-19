@@ -122,13 +122,18 @@ func TestCartesianWherePushdown_ContradictoryNullConstraint(t *testing.T) {
 }
 
 func TestMatchCreate_BatchJoinWithDualInFilters(t *testing.T) {
-	store := storage.NewMemoryEngine()
+	// Wrap the in-memory engine in a NamespacedEngine so the executor's
+	// transactionStorageWrapper sees a non-empty namespace and prefixes
+	// IDs uniformly. Without the wrapper, freshly-minted edge UUIDs would
+	// land in BadgerTransaction unprefixed and trip the per-tx namespace
+	// pin (see ErrCrossNamespaceTransaction).
+	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornic")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
 	for _, k := range []string{"k1", "k2", "k3"} {
 		_, err := store.CreateNode(&storage.Node{
-			ID:     storage.NodeID("nornic:o-" + k),
+			ID:     storage.NodeID("o-" + k),
 			Labels: []string{"OriginalText"},
 			Properties: map[string]interface{}{
 				"joinKey": k,
@@ -136,7 +141,7 @@ func TestMatchCreate_BatchJoinWithDualInFilters(t *testing.T) {
 		})
 		require.NoError(t, err)
 		_, err = store.CreateNode(&storage.Node{
-			ID:     storage.NodeID("nornic:t-" + k),
+			ID:     storage.NodeID("t-" + k),
 			Labels: []string{"TranslatedText"},
 			Properties: map[string]interface{}{
 				"joinKey": k,

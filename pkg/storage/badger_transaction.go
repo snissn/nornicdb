@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +33,14 @@ type BadgerTransaction struct {
 	readTS    MVCCVersion
 	// CommitVersion is assigned once for a successful commit that mutates storage.
 	CommitVersion MVCCVersion
+
+	// namespace pins this transaction to a single database namespace. It is
+	// set lazily on the first prefixed write (or eagerly via SetNamespace by
+	// callers that already know the target). Every subsequent mutation must
+	// share this namespace; mixed writes return ErrCrossNamespaceTransaction.
+	// Per-database MVCC counters and per-namespace lifecycle registries depend
+	// on this invariant — without it, two namespaces' versions could collide.
+	namespace string
 
 	// Badger's native transaction
 	badgerTx *badger.Txn
@@ -72,26 +79,43 @@ type BadgerTransaction struct {
 	closedErr          error
 }
 
-func (b *BadgerEngine) currentMVCCReadVersion() MVCCVersion {
-	// Clamp the read timestamp to max(now, last-committed-timestamp).
-	// Without this, a wall-clock that drifted backward between an
-	// earlier allocateMVCCVersion call and this read can let the
-	// returned readTS sit BEFORE a head version that was committed
-	// before this transaction began, which then trips the
-	// "X changed after transaction start" write-conflict guard on
-	// straight-line single-goroutine work.
+// currentMVCCReadVersion returns the read snapshot for a transaction in
+// the given namespace. Clamps the wall-clock sample to the namespace's
+// high-water mark so a backward NTP step cannot make a new transaction
+// observe an earlier timestamp than something already committed, then
+// reads the namespace's current commit sequence. If namespace is empty
+// (transaction has no pinned namespace yet — i.e. no write has named one
+// and no SetNamespace was called) the engine returns a wall-clock-only
+// version with sequence 0; the transaction must rebind readTS the moment
+// its namespace is pinned via refreshReadVersionForNamespaceLocked.
+func (b *BadgerEngine) currentMVCCReadVersion(namespace string) MVCCVersion {
 	now := time.Now().UTC()
-	highWater := b.mvccHighWaterNanos.Load()
+	if namespace == "" {
+		return MVCCVersion{CommitTimestamp: now}
+	}
+	state, err := b.namespaceMVCC(namespace)
+	if err != nil {
+		return MVCCVersion{CommitTimestamp: now}
+	}
+	highWater := state.highWaterNanos.Load()
 	if highWater > now.UnixNano() {
 		now = time.Unix(0, highWater).UTC()
 	}
 	return MVCCVersion{
 		CommitTimestamp: now,
-		CommitSequence:  b.mvccSeq.Load(),
+		CommitSequence:  state.seq.Load(),
 	}
 }
 
 // BeginTransaction starts a new Badger transaction with ACID guarantees.
+//
+// At begin time the namespace is unknown; readTS is populated with a
+// wall-clock-only sample (no sequence component) and rebound the moment
+// the transaction's namespace is pinned via the first prefixed write or
+// SetNamespace. Pre-pin reads see a version that does not constrain
+// against any namespace's commit sequence, which is the correct behavior:
+// a transaction that has not yet identified its database has not made
+// any per-database isolation claims.
 func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 	b.mu.RLock()
 	if b.closed {
@@ -101,24 +125,10 @@ func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 	badgerDB := b.db
 	b.mu.RUnlock()
 
-	readTS := b.currentMVCCReadVersion()
+	readTS := b.currentMVCCReadVersion("")
 	txID := generateTxID()
 	startTime := time.Now()
-	readerInfo := SnapshotReaderInfo{
-		ReaderID:        txID,
-		SnapshotVersion: readTS,
-		StartTime:       startTime,
-	}
-	var deregister func()
 	badgerTx := badgerDB.NewTransaction(true)
-	if !readTS.IsZero() {
-		var err error
-		deregister, err = b.acquireSnapshotReader(readerInfo)
-		if err != nil {
-			badgerTx.Discard()
-			return nil, err
-		}
-	}
 
 	return &BadgerTransaction{
 		ID:                 txID,
@@ -135,9 +145,31 @@ func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 		pendingWrites:      make(map[string][]byte),
 		pendingDeletes:     make(map[string]bool),
 		Metadata:           make(map[string]interface{}),
-		snapshotReaderInfo: readerInfo,
-		snapshotDeregister: deregister,
+		snapshotReaderInfo: SnapshotReaderInfo{ReaderID: txID, SnapshotVersion: readTS, StartTime: startTime},
 	}, nil
+}
+
+// refreshReadVersionForNamespaceLocked rebinds tx.readTS once the
+// transaction's namespace is known, registering the snapshot reader at
+// the namespace-specific version. Called from pinNamespaceFromIDLocked /
+// SetNamespace immediately after tx.namespace is set.
+func (tx *BadgerTransaction) refreshReadVersionForNamespaceLocked() error {
+	readTS := tx.engine.currentMVCCReadVersion(tx.namespace)
+	tx.readTS = readTS
+	tx.snapshotReaderInfo.SnapshotVersion = readTS
+	tx.snapshotReaderInfo.Namespace = tx.namespace
+	if readTS.IsZero() {
+		return nil
+	}
+	deregister, err := tx.engine.acquireSnapshotReader(tx.snapshotReaderInfo)
+	if err != nil {
+		return err
+	}
+	if tx.snapshotDeregister != nil {
+		tx.snapshotDeregister()
+	}
+	tx.snapshotDeregister = deregister
+	return nil
 }
 
 // IsActive returns true if the transaction is still active.
@@ -168,6 +200,100 @@ func (tx *BadgerTransaction) closeLocked(status TransactionStatus, discard bool,
 		tx.snapshotDeregister()
 		tx.snapshotDeregister = nil
 	}
+}
+
+// Namespace returns the database namespace this transaction is pinned to,
+// or "" if no namespaced write has been recorded yet. Once set, every
+// subsequent write must share this namespace.
+func (tx *BadgerTransaction) Namespace() string {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	return tx.namespace
+}
+
+// SetNamespace eagerly pins the transaction to ns. Callers that already
+// know the target namespace at BeginTransaction time (the cypher executor's
+// transactionStorageWrapper, for example) use this to fail fast on misrouted
+// writes instead of waiting for the first prefixed mutation. Returns an
+// error if the transaction is already pinned to a different namespace.
+//
+// SetNamespace deliberately does not call ensureLifecycleActiveLocked
+// before the namespace bind: lifecycle expiration is meaningless for a
+// transaction that has not yet registered against any namespace. We only
+// require Status==active.
+func (tx *BadgerTransaction) SetNamespace(ns string) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.Status != TxStatusActive {
+		if tx.closedErr != nil {
+			return tx.closedErr
+		}
+		return ErrTransactionClosed
+	}
+	if ns == "" {
+		return fmt.Errorf("namespace must be non-empty")
+	}
+	if tx.namespace != "" && tx.namespace != ns {
+		return fmt.Errorf("%w: pinned to %q, attempted %q",
+			ErrCrossNamespaceTransaction, tx.namespace, ns)
+	}
+	if tx.namespace == "" {
+		tx.namespace = ns
+		if err := tx.refreshReadVersionForNamespaceLocked(); err != nil {
+			tx.namespace = ""
+			return err
+		}
+	}
+	return nil
+}
+
+// pinNamespaceFromIDLocked extracts the namespace from a prefixed entity ID
+// and either pins the transaction (first write) or asserts that the new ID
+// shares the existing pin (subsequent writes). Caller must hold tx.mu.
+//
+// IDs without a namespace prefix are rejected: the storage layer requires
+// every transactional write to carry a "<db>:<id>" prefix.
+func (tx *BadgerTransaction) pinNamespaceFromIDLocked(id string) error {
+	ns, _, ok := ParseDatabasePrefix(id)
+	if !ok {
+		return fmt.Errorf("ID must be prefixed with namespace (e.g., 'nornic:node-123'), got: %s", id)
+	}
+	if tx.namespace == "" {
+		tx.namespace = ns
+		if err := tx.refreshReadVersionForNamespaceLocked(); err != nil {
+			tx.namespace = ""
+			return err
+		}
+		return nil
+	}
+	if tx.namespace != ns {
+		return fmt.Errorf("%w: pinned to %q, attempted %q",
+			ErrCrossNamespaceTransaction, tx.namespace, ns)
+	}
+	return nil
+}
+
+// pinEdgeNamespaceLocked asserts that an edge's three identifiers — its own
+// ID, StartNode, and EndNode — share a single namespace, then pins the
+// transaction to that namespace. An edge whose endpoints live in different
+// namespaces is rejected even if no other writes have happened in this
+// transaction yet, because such an edge could never satisfy the
+// per-namespace MVCC ordering invariant. Caller must hold tx.mu.
+func (tx *BadgerTransaction) pinEdgeNamespaceLocked(edge *Edge) error {
+	if err := tx.pinNamespaceFromIDLocked(string(edge.ID)); err != nil {
+		return err
+	}
+	if edge.StartNode != "" {
+		if err := tx.pinNamespaceFromIDLocked(string(edge.StartNode)); err != nil {
+			return err
+		}
+	}
+	if edge.EndNode != "" {
+		if err := tx.pinNamespaceFromIDLocked(string(edge.EndNode)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (tx *BadgerTransaction) ensureLifecycleActiveLocked() error {
@@ -334,9 +460,14 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 		return "", err
 	}
 
-	// Enforce namespace prefix at storage layer - all node IDs must be prefixed
-	if node != nil && node.ID != "" && !strings.Contains(string(node.ID), ":") {
-		return "", fmt.Errorf("node ID must be prefixed with namespace (e.g., 'nornic:node-123'), got unprefixed ID: %s", node.ID)
+	// Enforce namespace prefix at storage layer and pin the transaction to a
+	// single namespace; cross-namespace writes break per-database MVCC
+	// counters and per-namespace lifecycle bookkeeping.
+	if node == nil || node.ID == "" {
+		return "", ErrInvalidID
+	}
+	if err := tx.pinNamespaceFromIDLocked(string(node.ID)); err != nil {
+		return "", err
 	}
 
 	// Validate constraints BEFORE writing
@@ -430,6 +561,13 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 	defer tx.mu.Unlock()
 
 	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
+	}
+
+	if node == nil || node.ID == "" {
+		return ErrInvalidID
+	}
+	if err := tx.pinNamespaceFromIDLocked(string(node.ID)); err != nil {
 		return err
 	}
 
@@ -727,6 +865,13 @@ func (tx *BadgerTransaction) DeleteNode(nodeID NodeID) error {
 		return err
 	}
 
+	if nodeID == "" {
+		return ErrInvalidID
+	}
+	if err := tx.pinNamespaceFromIDLocked(string(nodeID)); err != nil {
+		return err
+	}
+
 	// Capture old node state for constraint bookkeeping (e.g., unique value unregister).
 	var oldNode *Node
 	if pending, exists := tx.pendingNodes[nodeID]; exists {
@@ -771,6 +916,13 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 	defer tx.mu.Unlock()
 
 	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
+	}
+
+	if edge == nil || edge.ID == "" {
+		return ErrInvalidID
+	}
+	if err := tx.pinEdgeNamespaceLocked(edge); err != nil {
 		return err
 	}
 
@@ -885,6 +1037,9 @@ func (tx *BadgerTransaction) BulkCreateEdges(edges []*Edge) error {
 		if edge.ID == "" {
 			return ErrInvalidID
 		}
+		if err := tx.pinEdgeNamespaceLocked(edge); err != nil {
+			return err
+		}
 
 		if !nodeVisible(edge.StartNode) {
 			return fmt.Errorf("start node %s does not exist", edge.StartNode)
@@ -957,6 +1112,9 @@ func (tx *BadgerTransaction) UpdateEdge(edge *Edge) error {
 		return ErrInvalidID
 	}
 	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
+	}
+	if err := tx.pinEdgeNamespaceLocked(edge); err != nil {
 		return err
 	}
 	if _, deleted := tx.deletedEdges[edge.ID]; deleted {
@@ -1064,6 +1222,13 @@ func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 		return err
 	}
 
+	if edgeID == "" {
+		return ErrInvalidID
+	}
+	if err := tx.pinNamespaceFromIDLocked(string(edgeID)); err != nil {
+		return err
+	}
+
 	// Get edge to delete its indexes
 	var edge *Edge
 	if pending, exists := tx.pendingEdges[edgeID]; exists {
@@ -1111,10 +1276,19 @@ func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 }
 
 // GetNode retrieves a node (read-your-writes).
+//
+// Reads pin the transaction to the node's namespace if it isn't already
+// pinned. Without this, a transaction's pre-pin readTS sits at sequence 0
+// and visibility checks against a head whose FloorVersion is non-zero
+// reject every committed value as "not yet visible" — which manifests as
+// lost updates under the Read-Modify-Write retry loop in DB.Update.
 func (tx *BadgerTransaction) GetNode(nodeID NodeID) (*Node, error) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
+	if err := tx.pinNamespaceFromIDLocked(string(nodeID)); err != nil {
 		return nil, err
 	}
 
@@ -1132,10 +1306,17 @@ func (tx *BadgerTransaction) GetNode(nodeID NodeID) (*Node, error) {
 }
 
 // GetEdge retrieves an edge with read-your-writes semantics.
+//
+// Like GetNode, reads pin the transaction to the edge's namespace so the
+// readTS is bound to the namespace's actual sequence rather than the
+// pre-pin sequence-0 placeholder.
 func (tx *BadgerTransaction) GetEdge(edgeID EdgeID) (*Edge, error) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
+	if err := tx.pinNamespaceFromIDLocked(string(edgeID)); err != nil {
 		return nil, err
 	}
 
@@ -1157,6 +1338,9 @@ func (tx *BadgerTransaction) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 	if err := tx.ensureLifecycleActiveLocked(); err != nil {
 		return nil, err
 	}
+	if err := tx.pinNamespaceFromIDLocked(string(nodeID)); err != nil {
+		return nil, err
+	}
 
 	committed, err := tx.engine.GetOutgoingEdges(nodeID)
 	if err != nil {
@@ -1174,6 +1358,9 @@ func (tx *BadgerTransaction) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 	if err := tx.ensureLifecycleActiveLocked(); err != nil {
 		return nil, err
 	}
+	if err := tx.pinNamespaceFromIDLocked(string(nodeID)); err != nil {
+		return nil, err
+	}
 
 	committed, err := tx.engine.GetIncomingEdges(nodeID)
 	if err != nil {
@@ -1189,6 +1376,12 @@ func (tx *BadgerTransaction) GetEdgesBetween(startID, endID NodeID) ([]*Edge, er
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
+	if err := tx.pinNamespaceFromIDLocked(string(startID)); err != nil {
+		return nil, err
+	}
+	if err := tx.pinNamespaceFromIDLocked(string(endID)); err != nil {
 		return nil, err
 	}
 
@@ -1429,7 +1622,11 @@ func (tx *BadgerTransaction) Commit() error {
 	}
 
 	if len(tx.operations) > 0 || len(tx.pendingWrites) > 0 || len(tx.pendingDeletes) > 0 {
-		version, err := tx.engine.allocateMVCCVersion(tx.badgerTx, time.Now())
+		if tx.namespace == "" {
+			tx.closeLocked(TxStatusRolledBack, true, nil)
+			return fmt.Errorf("commit: transaction has writes but no pinned namespace")
+		}
+		version, err := tx.engine.allocateMVCCVersion(tx.badgerTx, tx.namespace, time.Now())
 		if err != nil {
 			tx.closeLocked(TxStatusRolledBack, true, nil)
 			return fmt.Errorf("allocating mvcc commit version: %w", err)
@@ -1519,58 +1716,48 @@ func (tx *BadgerTransaction) Commit() error {
 	// Update derived unique-constraint caches (in-memory) based on committed operations.
 	// This keeps non-transactional CreateNode() uniqueness checks consistent with transactional writes.
 	//
+	// All committed ops belong to the transaction's pinned namespace, so the
+	// schema lookup is hoisted out of the loop.
+	//
 	// NOTE: We don't persist these caches; they are rebuilt from stored nodes on startup.
-	for _, op := range tx.operations {
-		switch op.Type {
-		case OpCreateNode:
-			if op.Node == nil {
-				continue
-			}
-			dbName, _, ok := ParseDatabasePrefix(string(op.Node.ID))
-			if !ok {
-				continue
-			}
-			schema := tx.engine.GetSchemaForNamespace(dbName)
-			for _, label := range op.Node.Labels {
-				for propName, propValue := range op.Node.Properties {
-					schema.RegisterUniqueValue(label, propName, propValue, op.Node.ID)
-				}
-			}
-		case OpUpdateNode:
-			if op.OldNode != nil {
-				dbName, _, ok := ParseDatabasePrefix(string(op.OldNode.ID))
-				if ok {
-					schema := tx.engine.GetSchemaForNamespace(dbName)
-					for _, label := range op.OldNode.Labels {
-						for propName, propValue := range op.OldNode.Properties {
-							schema.UnregisterUniqueValue(label, propName, propValue)
-						}
+	if tx.namespace != "" {
+		schema := tx.engine.GetSchemaForNamespace(tx.namespace)
+		if schema != nil {
+			for _, op := range tx.operations {
+				switch op.Type {
+				case OpCreateNode:
+					if op.Node == nil {
+						continue
 					}
-				}
-			}
-			if op.Node != nil {
-				dbName, _, ok := ParseDatabasePrefix(string(op.Node.ID))
-				if ok {
-					schema := tx.engine.GetSchemaForNamespace(dbName)
 					for _, label := range op.Node.Labels {
 						for propName, propValue := range op.Node.Properties {
 							schema.RegisterUniqueValue(label, propName, propValue, op.Node.ID)
 						}
 					}
-				}
-			}
-		case OpDeleteNode:
-			if op.OldNode == nil {
-				continue
-			}
-			dbName, _, ok := ParseDatabasePrefix(string(op.OldNode.ID))
-			if !ok {
-				continue
-			}
-			schema := tx.engine.GetSchemaForNamespace(dbName)
-			for _, label := range op.OldNode.Labels {
-				for propName, propValue := range op.OldNode.Properties {
-					schema.UnregisterUniqueValue(label, propName, propValue)
+				case OpUpdateNode:
+					if op.OldNode != nil {
+						for _, label := range op.OldNode.Labels {
+							for propName, propValue := range op.OldNode.Properties {
+								schema.UnregisterUniqueValue(label, propName, propValue)
+							}
+						}
+					}
+					if op.Node != nil {
+						for _, label := range op.Node.Labels {
+							for propName, propValue := range op.Node.Properties {
+								schema.RegisterUniqueValue(label, propName, propValue, op.Node.ID)
+							}
+						}
+					}
+				case OpDeleteNode:
+					if op.OldNode == nil {
+						continue
+					}
+					for _, label := range op.OldNode.Labels {
+						for propName, propValue := range op.OldNode.Properties {
+							schema.UnregisterUniqueValue(label, propName, propValue)
+						}
+					}
 				}
 			}
 		}
@@ -1792,7 +1979,8 @@ func (tx *BadgerTransaction) validateSnapshotIsolationConflicts() error {
 
 // snapshotIsolationConflict reports true when the head version was
 // committed STRICTLY AFTER the transaction began, comparing on the
-// monotonic mvccSeq counter rather than on wall-clock timestamps.
+// per-namespace monotonic commit sequence rather than on wall-clock
+// timestamps.
 //
 // Why seq-only and not Compare(): MVCCVersion.Compare orders by
 // timestamp first and breaks ties on sequence. Timestamps are wall-
@@ -1801,13 +1989,16 @@ func (tx *BadgerTransaction) validateSnapshotIsolationConflicts() error {
 // the SI conflict check as a false positive: the head was committed
 // SAME-SEQ as our readTS but with a slightly LATER wall timestamp,
 // and Compare> returns true even though no concurrent tx actually
-// wrote between BeginTransaction and Commit. The mvccSeq counter is
-// an atomic uint64 incremented at every allocateMVCCVersion call —
-// it cannot move non-monotonically. A real concurrent commit MUST
-// bump seq past tx.readTS.CommitSequence for it to have written
-// anything. When the global sequence saturates at MaxUint64 we can no
-// longer distinguish commits by seq, so allocateMVCCVersion forces
-// strictly increasing commit timestamps and this check falls back to
+// wrote between BeginTransaction and Commit. Each namespace's commit
+// sequence is an atomic uint64 incremented at every
+// allocateMVCCVersion call for that namespace — it cannot move
+// non-monotonically. A real concurrent commit in the same namespace
+// MUST bump that namespace's seq past tx.readTS.CommitSequence to
+// have written anything. Cross-namespace comparisons never reach
+// this function because BadgerTransaction is pinned to one namespace.
+// When a namespace's sequence saturates at MaxUint64 we can no longer
+// distinguish commits by seq, so allocateMVCCVersion forces strictly
+// increasing commit timestamps and this check falls back to
 // timestamp ordering only for the equal-MaxUint64 case.
 func (tx *BadgerTransaction) snapshotIsolationConflict(headVersion MVCCVersion) bool {
 	if headVersion.CommitSequence != tx.readTS.CommitSequence {
@@ -1975,14 +2166,17 @@ func hasUUIDShape(id string) bool {
 }
 
 // validateNodeConstraints checks all constraints for a node.
+//
+// The transaction is pinned to a single namespace at the first prefixed
+// write (see pinNamespaceFromIDLocked); all writes therefore share that
+// namespace and the schema lookup is cached on the transaction rather than
+// re-derived from each node ID. Direct callers (tests, internal helpers)
+// that have not yet performed a pinned write will pin here on first use.
 func (tx *BadgerTransaction) validateNodeConstraints(node *Node) error {
-	dbName, _, ok := ParseDatabasePrefix(string(node.ID))
-	if !ok {
-		return fmt.Errorf("node ID must be prefixed with namespace (e.g., 'nornic:node-123'), got: %s", node.ID)
+	if err := tx.pinNamespaceFromIDLocked(string(node.ID)); err != nil {
+		return err
 	}
-
-	// Get constraints from the schema for this namespace (per DB).
-	schema := tx.engine.GetSchemaForNamespace(dbName)
+	schema := tx.engine.GetSchemaForNamespace(tx.namespace)
 	constraints := schema.GetConstraintsForLabels(node.Labels)
 
 	for _, constraint := range constraints {
@@ -2036,6 +2230,11 @@ func (tx *BadgerTransaction) validateNodeConstraints(node *Node) error {
 }
 
 // checkUniqueConstraint ensures property value is unique across ALL data.
+//
+// All pending nodes share the transaction's pinned namespace by invariant
+// (see pinNamespaceFromIDLocked), so the in-tx scan does not need to
+// re-filter by namespace prefix. The committed-data fallback still filters
+// because the label index spans all namespaces.
 func (tx *BadgerTransaction) checkUniqueConstraint(node *Node, c Constraint) error {
 	prop := c.Properties[0]
 	value := node.Properties[prop]
@@ -2044,18 +2243,12 @@ func (tx *BadgerTransaction) checkUniqueConstraint(node *Node, c Constraint) err
 		return nil // NULL doesn't violate uniqueness
 	}
 
-	dbName, _, ok := ParseDatabasePrefix(string(node.ID))
-	if !ok {
-		return fmt.Errorf("node ID must be prefixed with namespace, got: %s", node.ID)
+	if err := tx.pinNamespaceFromIDLocked(string(node.ID)); err != nil {
+		return err
 	}
-	nsPrefix := dbName + ":"
 
-	// Check pending nodes in this transaction (namespace-scoped).
 	for id, n := range tx.pendingNodes {
 		if id == node.ID {
-			continue
-		}
-		if !strings.HasPrefix(string(id), nsPrefix) {
 			continue
 		}
 		if hasLabel(n.Labels, c.Label) && n.Properties[prop] == value {
@@ -2068,7 +2261,7 @@ func (tx *BadgerTransaction) checkUniqueConstraint(node *Node, c Constraint) err
 		}
 	}
 
-	schema := tx.engine.GetSchemaForNamespace(dbName)
+	schema := tx.engine.GetSchemaForNamespace(tx.namespace)
 	if existingNode, found, cacheComplete, constrained := schema.lookupUniqueConstraintValueForValidation(c.Label, prop, value); constrained && cacheComplete {
 		if found && existingNode != node.ID {
 			if _, deleted := tx.deletedNodes[existingNode]; !deleted {
@@ -2081,7 +2274,7 @@ func (tx *BadgerTransaction) checkUniqueConstraint(node *Node, c Constraint) err
 	// If the derived unique-value cache is not complete, fall back to
 	// the label scan. Normal schema creation/reload marks the cache complete
 	// once after rebuilding it from stored nodes, so hot writes avoid this path.
-	return tx.scanForUniqueViolation(dbName, c.Label, prop, value, node.ID)
+	return tx.scanForUniqueViolation(tx.namespace, c.Label, prop, value, node.ID)
 }
 
 func uniqueConstraintViolation(label, property string, value interface{}, nodeID NodeID) *ConstraintViolationError {
@@ -2163,18 +2356,15 @@ func (tx *BadgerTransaction) checkNodeKeyConstraint(node *Node, c Constraint) er
 		}
 	}
 
-	dbName, _, ok := ParseDatabasePrefix(string(node.ID))
-	if !ok {
-		return fmt.Errorf("node ID must be prefixed with namespace, got: %s", node.ID)
+	if err := tx.pinNamespaceFromIDLocked(string(node.ID)); err != nil {
+		return err
 	}
-	nsPrefix := dbName + ":"
 
-	// Check pending nodes in this transaction (namespace-scoped).
+	// All pending nodes share the transaction's pinned namespace by
+	// invariant; the namespace-prefix filter that used to live here is
+	// redundant.
 	for id, n := range tx.pendingNodes {
 		if id == node.ID {
-			continue
-		}
-		if !strings.HasPrefix(string(id), nsPrefix) {
 			continue
 		}
 		if !hasLabel(n.Labels, c.Label) {
@@ -2200,7 +2390,7 @@ func (tx *BadgerTransaction) checkNodeKeyConstraint(node *Node, c Constraint) er
 	}
 
 	// Full-scan check: scan all existing nodes with this label (namespace-scoped).
-	if err := tx.scanForNodeKeyViolation(dbName, c.Label, c.Properties, values, node.ID); err != nil {
+	if err := tx.scanForNodeKeyViolation(tx.namespace, c.Label, c.Properties, values, node.ID); err != nil {
 		return err
 	}
 
@@ -2296,18 +2486,16 @@ func (tx *BadgerTransaction) checkTemporalConstraint(node *Node, c Constraint) e
 	}
 	end, hasEnd := coerceTemporalTime(node.Properties[endProp])
 
-	dbName, _, ok := ParseDatabasePrefix(string(node.ID))
-	if !ok {
-		return fmt.Errorf("node ID must be prefixed with namespace, got: %s", node.ID)
+	if err := tx.pinNamespaceFromIDLocked(string(node.ID)); err != nil {
+		return err
 	}
-	nsPrefix := dbName + ":"
+	nsPrefix := tx.namespace + ":"
 
-	// Check overlaps against pending nodes in this transaction (namespace + label + key match).
+	// All pending nodes share the transaction's pinned namespace by
+	// invariant; only the committed-data scan still needs the prefix filter
+	// because the label index spans namespaces.
 	for id, other := range tx.pendingNodes {
 		if id == node.ID {
-			continue
-		}
-		if !strings.HasPrefix(string(id), nsPrefix) {
 			continue
 		}
 		if !hasLabel(other.Labels, c.Label) {
@@ -2386,11 +2574,11 @@ func (tx *BadgerTransaction) checkTemporalConstraint(node *Node, c Constraint) e
 	return nil
 }
 
-// validateAllConstraints performs final validation before commit.
 // acquireUniqueConstraintCommitLocks collects the unique constraints touched
 // by this transaction's pending nodes and acquires bounded
-// per-(label, property, value) mutex stripes on each affected schema. Returns
-// a release function that unlocks in reverse order; safe to defer.
+// per-(label, property, value) mutex stripes on the transaction's pinned
+// namespace's schema. Returns a release function that unlocks in reverse
+// order; safe to defer.
 //
 // Locks are keyed by value, not only by constraint: a transaction adding
 // nodes with uids "X" and "Y" hashes those values to bounded lock stripes; a
@@ -2400,32 +2588,28 @@ func (tx *BadgerTransaction) checkTemporalConstraint(node *Node, c Constraint) e
 // every writer touching a UNIQUE-constrained property — see
 // uniqueConstraintLockKey doc.
 //
-// Locks are partitioned by namespace because each namespace has its own
-// SchemaManager and its own constraint registry — a transaction that spans
-// multiple namespaces locks each namespace's affected values independently.
-// Namespaces are processed in sorted order so that two transactions
-// touching overlapping namespaces always acquire locks in the same order,
-// eliminating the AB-BA deadlock risk.
+// The transaction is pinned to a single namespace at the first prefixed
+// write (see pinNamespaceFromIDLocked / SetNamespace). All pending nodes
+// therefore share that namespace, so we look up the schema once instead of
+// re-parsing each node ID. Stripe ordering inside the schema's own
+// acquireUniqueConstraintCommitLocks prevents AB-BA deadlocks between peer
+// transactions in the same namespace.
 //
 // Pending nodes with non-comparable property values skip lock acquisition
 // for that property. Constraint validation still fires at commit time;
 // commit-window serialization is best-effort for non-comparable types
 // (which UNIQUE-constrained Eshu/Neo4j workloads do not use in practice).
 func (tx *BadgerTransaction) acquireUniqueConstraintCommitLocks() func() {
-	if len(tx.pendingNodes) == 0 {
+	if len(tx.pendingNodes) == 0 || tx.namespace == "" {
 		return func() {}
 	}
-	perNamespace := make(map[string]map[uniqueConstraintLockKey]struct{})
+	schema := tx.engine.GetSchemaForNamespace(tx.namespace)
+	if schema == nil {
+		return func() {}
+	}
+	seen := make(map[uniqueConstraintLockKey]struct{}, len(tx.pendingNodes))
 	for _, node := range tx.pendingNodes {
 		if node == nil {
-			continue
-		}
-		dbName, _, ok := ParseDatabasePrefix(string(node.ID))
-		if !ok {
-			continue
-		}
-		schema := tx.engine.GetSchemaForNamespace(dbName)
-		if schema == nil {
 			continue
 		}
 		constraints := schema.GetConstraintsForLabels(node.Labels)
@@ -2445,43 +2629,21 @@ func (tx *BadgerTransaction) acquireUniqueConstraintCommitLocks() func() {
 				// best-effort for these (no constraint cache anyway).
 				continue
 			}
-			if perNamespace[dbName] == nil {
-				perNamespace[dbName] = make(map[uniqueConstraintLockKey]struct{})
-			}
-			perNamespace[dbName][uniqueConstraintLockKey{
+			seen[uniqueConstraintLockKey{
 				label:    c.Label,
 				property: prop,
 				value:    canonicalValue,
 			}] = struct{}{}
 		}
 	}
-	if len(perNamespace) == 0 {
+	if len(seen) == 0 {
 		return func() {}
 	}
-
-	namespaces := make([]string, 0, len(perNamespace))
-	for ns := range perNamespace {
-		namespaces = append(namespaces, ns)
+	keys := make([]uniqueConstraintLockKey, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
 	}
-	sort.Strings(namespaces)
-
-	releases := make([]func(), 0, len(namespaces))
-	for _, ns := range namespaces {
-		schema := tx.engine.GetSchemaForNamespace(ns)
-		if schema == nil {
-			continue
-		}
-		keys := make([]uniqueConstraintLockKey, 0, len(perNamespace[ns]))
-		for k := range perNamespace[ns] {
-			keys = append(keys, k)
-		}
-		releases = append(releases, schema.acquireUniqueConstraintCommitLocks(keys))
-	}
-	return func() {
-		for i := len(releases) - 1; i >= 0; i-- {
-			releases[i]()
-		}
-	}
+	return schema.acquireUniqueConstraintCommitLocks(keys)
 }
 
 func (tx *BadgerTransaction) validateAllConstraints() error {
@@ -2506,8 +2668,10 @@ func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
 	if edge == nil || edge.Type == "" {
 		return nil
 	}
-	dbName, _, _ := ParseDatabasePrefix(string(edge.ID))
-	schema := tx.engine.GetSchemaForNamespace(dbName)
+	if tx.namespace == "" {
+		return nil
+	}
+	schema := tx.engine.GetSchemaForNamespace(tx.namespace)
 	if schema == nil {
 		return nil
 	}
@@ -2519,7 +2683,7 @@ func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
 		}
 		switch c.Type {
 		case ConstraintUnique:
-			if err := tx.checkEdgeUniqueness(edge, c, dbName); err != nil {
+			if err := tx.checkEdgeUniqueness(edge, c, tx.namespace); err != nil {
 				return err
 			}
 		case ConstraintExists:
@@ -2530,11 +2694,11 @@ func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
 			if err := checkEdgeExistence(edge, c); err != nil {
 				return err
 			}
-			if err := tx.checkEdgeUniqueness(edge, c, dbName); err != nil {
+			if err := tx.checkEdgeUniqueness(edge, c, tx.namespace); err != nil {
 				return err
 			}
 		case ConstraintTemporal:
-			if err := tx.checkEdgeTemporalConstraint(edge, c, dbName); err != nil {
+			if err := tx.checkEdgeTemporalConstraint(edge, c, tx.namespace); err != nil {
 				return err
 			}
 		case ConstraintDomain:
@@ -2551,14 +2715,14 @@ func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
 				}
 			}
 		case ConstraintCardinality:
-			if err := tx.checkEdgeCardinality(edge, c, dbName); err != nil {
+			if err := tx.checkEdgeCardinality(edge, c, tx.namespace); err != nil {
 				return err
 			}
 		}
 	}
 
 	// Policy constraints must be evaluated as a set (all ALLOWED policies form a union).
-	if err := tx.checkEdgePolicy(edge, schema, dbName); err != nil {
+	if err := tx.checkEdgePolicy(edge, schema, tx.namespace); err != nil {
 		return err
 	}
 
@@ -2582,15 +2746,13 @@ func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
 }
 
 // checkEdgeUniqueness checks uniqueness constraints for an edge against pending and committed edges.
-// The namespace parameter filters committed edges to the same database namespace.
+// The namespace parameter filters committed edges (which span all namespaces
+// in the underlying engine) to the transaction's pinned namespace; all
+// pending edges already belong to that namespace by invariant.
 func (tx *BadgerTransaction) checkEdgeUniqueness(edge *Edge, c Constraint, namespace string) error {
-	// Check against other pending edges in this transaction
 	nsPrefix := namespace + ":"
 	for id, otherEdge := range tx.pendingEdges {
 		if id == edge.ID || otherEdge.Type != edge.Type {
-			continue
-		}
-		if namespace != "" && !strings.HasPrefix(string(id), nsPrefix) {
 			continue
 		}
 		if len(c.Properties) == 1 {
@@ -2943,13 +3105,15 @@ func (tx *BadgerTransaction) checkEdgePolicy(edge *Edge, schema *SchemaManager, 
 // validatePolicyOnNodeLabelChange checks all policy constraints on edges connected to
 // a node whose labels are changing within a transaction.
 func (tx *BadgerTransaction) validatePolicyOnNodeLabelChange(node *Node, oldNode *Node) error {
-	dbName, _, _ := ParseDatabasePrefix(string(node.ID))
-	schema := tx.engine.GetSchemaForNamespace(dbName)
+	if tx.namespace == "" {
+		return nil
+	}
+	schema := tx.engine.GetSchemaForNamespace(tx.namespace)
 	if schema == nil {
 		return nil
 	}
 
-	nsPrefix := dbName + ":"
+	nsPrefix := tx.namespace + ":"
 
 	// Scan both outgoing and incoming edges.
 	for _, isOutgoing := range []bool{true, false} {
@@ -2977,7 +3141,7 @@ func (tx *BadgerTransaction) validatePolicyOnNodeLabelChange(node *Node, oldNode
 			if _, deleted := tx.deletedEdges[edge.ID]; deleted {
 				continue
 			}
-			if dbName != "" && !strings.HasPrefix(string(edge.ID), nsPrefix) {
+			if !strings.HasPrefix(string(edge.ID), nsPrefix) {
 				continue
 			}
 

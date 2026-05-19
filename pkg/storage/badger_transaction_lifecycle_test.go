@@ -105,6 +105,11 @@ func (s *txLifecycleControllerStub) ReaderRegistry() SnapshotReaderRegistry {
 }
 
 func TestBeginTransaction_WithLifecycleAdmissionDoesNotDeadlock(t *testing.T) {
+	// Reader admission is registered the first time the transaction's
+	// namespace is pinned (on first prefixed write or SetNamespace),
+	// not at BeginTransaction itself, because the namespace — and the
+	// per-namespace MVCC counter to register against — is unknown at
+	// begin time.
 	engine := NewMemoryEngine()
 	t.Cleanup(func() { _ = engine.Close() })
 	controller := &txLifecycleControllerStub{enabled: true}
@@ -115,6 +120,9 @@ func TestBeginTransaction_WithLifecycleAdmissionDoesNotDeadlock(t *testing.T) {
 	var err error
 	go func() {
 		tx, err = engine.BeginTransaction()
+		if err == nil && tx != nil {
+			err = tx.SetNamespace("test")
+		}
 		close(done)
 	}()
 
@@ -134,15 +142,20 @@ func TestBeginTransaction_WithLifecycleAdmissionDoesNotDeadlock(t *testing.T) {
 }
 
 func TestBeginTransaction_LifecycleAdmissionFailureReturnsError(t *testing.T) {
+	// Admission failure now surfaces on the first pin attempt, since
+	// admission cannot run until a namespace is bound.
 	engine := NewMemoryEngine()
 	t.Cleanup(func() { _ = engine.Close() })
 	controller := &txLifecycleControllerStub{enabled: true, err: ErrMVCCResourcePressure}
 	engine.SetLifecycleController(controller)
 
 	tx, err := engine.BeginTransaction()
-	require.Nil(t, tx)
-	require.ErrorIs(t, err, ErrMVCCResourcePressure)
+	require.NoError(t, err)
+	require.NotNil(t, tx)
+	pinErr := tx.SetNamespace("test")
+	require.ErrorIs(t, pinErr, ErrMVCCResourcePressure)
 	require.Equal(t, 0, controller.releaseCount)
+	require.NoError(t, tx.Rollback())
 }
 
 func TestTransaction_GracefulSnapshotExpirationCancelsWorkAndReleasesReader(t *testing.T) {
@@ -154,6 +167,9 @@ func TestTransaction_GracefulSnapshotExpirationCancelsWorkAndReleasesReader(t *t
 	tx, err := engine.BeginTransaction()
 	require.NoError(t, err)
 	require.NotNil(t, tx)
+	// Pin the transaction so the snapshot reader is registered with the
+	// lifecycle controller; expiration paths only fire for registered readers.
+	require.NoError(t, tx.SetNamespace("nornic"))
 
 	controller.mu.Lock()
 	controller.gracefulExpire = true
@@ -175,6 +191,7 @@ func TestTransaction_HardSnapshotExpirationFailsCommitAndReleasesReader(t *testi
 	tx, err := engine.BeginTransaction()
 	require.NoError(t, err)
 	require.NotNil(t, tx)
+	require.NoError(t, tx.SetNamespace("nornic"))
 
 	controller.mu.Lock()
 	controller.hardExpire = true

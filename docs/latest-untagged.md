@@ -2,6 +2,35 @@
 
 Changes that have landed on `main` since the last tagged release. Promoted into a versioned section of `CHANGELOG.md` when the next tag cuts.
 
+## MVCC counter sharded per database; transactions pinned to one namespace
+
+The MVCC commit-sequence counter and high-water timestamp clamp moved off `BadgerEngine` (engine-global) onto a per-namespace `namespaceMVCCState` map keyed by database name. Each transaction is pinned to a single namespace at the first prefixed write (or eagerly via `BadgerTransaction.SetNamespace`); cross-namespace writes return the new sentinel `ErrCrossNamespaceTransaction`. Snapshot-isolation conflict detection compares `CommitSequence` values that now share a namespace by construction, so noisy tenants can no longer interleave version numbers with quiet ones, and a `DROP DATABASE` drops its counter alongside its keys.
+
+Behind the storage layer, the lifecycle prune planner consults a **per-namespace safe-floor callback** instead of a single global `oldestReader`: cross-namespace counters are not comparable, so a head in namespace A must be evaluated against namespace A's oldest reader, not the global minimum across every tenant. `ReaderRegistry.OldestReaderVersionsByNamespace()` groups active readers by `info.Namespace` and returns the per-group minimum; namespaces with no active reader fall through to the sentinel "no floor" so TTL and `MaxVersionsPerKey` alone bound their pruning.
+
+### Backward compatibility — no breaking storage changes
+
+The on-disk MVCC head/version payloads are unchanged. The counter's persistence key moved from the legacy engine-global `[prefixMVCCMeta, 0x01]` to per-namespace `[prefixMVCCMeta, 0x04, namespace bytes…]` (new subkey `prefixMVCCMetaNamespaceSeq`). On engine open, the legacy global key is read once into `mvccLegacyGlobalSeed`; the first time any namespace is touched, its starting sequence is set to `max(persisted-per-ns, legacyGlobalSeed)` so versions previously emitted under the global counter remain strictly less than anything new namespaces will mint. Existing databases come up unchanged.
+
+### Cross-namespace transactions — invariant enforced, dead branches deleted
+
+Production never opened a transaction whose pending writes spanned multiple namespaces; the cypher executor's `transactionStorageWrapper` (executor.go:1932) and the explicit-tx path (transaction.go:313) both pin a single namespace at construction. The defensive multi-namespace branches in `acquireUniqueConstraintCommitLocks` (badger_transaction.go:2418), `validateNodeConstraints`, `checkUniqueConstraint`, `checkNodeKeyConstraint`, `checkTemporalConstraint`, `validateEdgeConstraints`, and `validatePolicyOnNodeLabelChange` were unreachable — and unreachable code that *looks* live is worse than absent code, because callers grow false confidence in capabilities the transaction layer cannot honor. All of those paths now look up the schema once from `tx.namespace` instead of re-parsing the prefix off each entity ID.
+
+### Read-path lazy pin — closes a lost-update regression caught by `TestDB_UpdateConcurrentIncrements`
+
+The transaction's `readTS` is rebound from a wall-clock-only sample to its namespace's actual `(timestamp, sequence)` pair the moment the namespace is pinned. Pre-pin reads (e.g. the `GetNode` at the head of a `db.Update` retry loop) now also lazy-pin from the entity's ID prefix; without this, a transaction that reads before any write would carry `readTS.CommitSequence == 0`, fail the `version.Compare(head.FloorVersion) < 0` visibility gate against any committed head, and the `Read → Modify → Write → Conflict-Retry` loop in `DB.Update` would silently lose increments under contention.
+
+### Pinned with deterministic regression tests
+
+- `pkg/storage/badger_transaction_namespace_pin_test.go` — 12 tests asserting (a) first prefixed write pins the namespace, (b) same-namespace writes succeed, (c) `CreateNode`/`UpdateNode`/`DeleteNode` reject cross-namespace writes with `ErrCrossNamespaceTransaction`, (d) `CreateEdge` and `BulkCreateEdges` reject mismatched endpoints/IDs, (e) `SetNamespace` is idempotent within a namespace and rejects empty/conflicting input, (f) a rejected write does not alter the pinned namespace.
+- `pkg/storage/badger_mvcc_per_namespace_test.go` — 6 tests asserting (a) two namespaces have independent sequences, (b) a high-throughput namespace cannot accelerate another's counter under concurrent allocation, (c) the high-water clamp is per-namespace, (d) a transaction in one namespace cannot observe entities in another, (e) sequence saturation falls back to timestamp-only ordering per-namespace without rewriting the persisted key, (f) the legacy global counter seeds new namespaces on upgrade so first-allocation = `legacySeed + 1`.
+- `pkg/storage/lifecycle/per_namespace_floor_test.go` — 4 tests asserting (a) `OldestReaderVersionsByNamespace` filters readers by `Namespace` and returns per-namespace minimums, (b) deregistration drops the namespace's floor entry, (c) the planner spares a head whose namespace has an active reader pinning it but prunes a head in a namespace with no reader, (d) a nil floor callback treats every namespace as having no reader.
+- Existing tests `TestCurrentMVCCReadVersion_ClampsToHighWater`, `TestAllocateMVCCVersion_AdvancesHighWater`, `TestBeginTransaction_DoesNotConflictAfterClockSkew`, and `TestAllocateMVCCVersion_FallsBackToTimestampOrderingWhenSequenceExhausted` rewritten against the per-namespace state.
+
+### Cleanup of orphan test fixtures
+
+`TestImplicitTx_UnwindBulkCreate_ArchitecturePayload_PersistsAcrossRestart` (server) was loading a renamed-and-deleted doc; pointed at the surviving `docs/architecture/cognitive-slm-architecture.md`. Three test fixtures (`pkg/cypher/cartesian_where_pushdown_test.go`, `pkg/cypher/translation_query_family_test_helpers_test.go`, `pkg/cypher/traversal_start_seed_topk_test.go`) were creating prefixed nodes but unprefixed edge IDs against raw `MemoryEngine`s — a pattern that worked before the per-tx namespace pin and now (correctly) fails. Updated to either wrap in `NamespacedEngine` or carry the prefix on edge IDs uniformly. `pkg/inference/edge_decay_test.go` and `pkg/storage/badger_transaction_reads_test.go` had similar mixed-namespace fixtures; split into per-namespace transactions and uniformly prefixed IDs.
+
 ## Bolt wire contract — single commit-failure wrapper across both commit paths
 
 The implicit-autocommit path at `pkg/cypher/executor.go:1978` historically wrapped commit failures with `"failed to commit implicit transaction: ..."`, while the explicit `BEGIN/COMMIT` path at `pkg/cypher/transaction.go:181` used `"commit failed: ..."`. Downstream Bolt consumers classify retryable transients on the substring; the two-shape wire surface meant a classifier that retried one path silently surfaced the other as a permanent failure.

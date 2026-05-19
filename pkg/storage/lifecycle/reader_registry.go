@@ -52,7 +52,10 @@ func (r *ReaderRegistry) ActiveCount() int64 {
 	return int64(len(r.readers))
 }
 
-// OldestReaderVersion returns the smallest active snapshot version.
+// OldestReaderVersion returns the smallest active snapshot version across
+// all namespaces. Used for global metrics; for prune-floor decisions, prefer
+// OldestReaderVersionByNamespace because version sequences are per-database
+// and not comparable across namespaces.
 func (r *ReaderRegistry) OldestReaderVersion() (storage.MVCCVersion, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -65,6 +68,29 @@ func (r *ReaderRegistry) OldestReaderVersion() (storage.MVCCVersion, bool) {
 		}
 	}
 	return oldest, have
+}
+
+// OldestReaderVersionsByNamespace returns the smallest active snapshot
+// version per namespace. A namespace appears in the result only if it has
+// at least one registered reader; callers should treat absence as "no
+// active reader in this namespace" (effectively no floor).
+//
+// Per-database MVCC counters mean a reader's CommitSequence in namespace A
+// has no ordering relationship to a head's CommitSequence in namespace B —
+// so the prune planner must use this map to compute a per-namespace safe
+// floor, not the global oldest reader.
+func (r *ReaderRegistry) OldestReaderVersionsByNamespace() map[string]storage.MVCCVersion {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]storage.MVCCVersion)
+	for _, reader := range r.readers {
+		ns := reader.info.Namespace
+		existing, ok := out[ns]
+		if !ok || reader.info.SnapshotVersion.Compare(existing) < 0 {
+			out[ns] = reader.info.SnapshotVersion
+		}
+	}
+	return out
 }
 
 // OldestReaderAge returns the maximum age of active readers.

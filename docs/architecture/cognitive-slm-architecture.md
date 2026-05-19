@@ -9,22 +9,6 @@ This document is the architectural overview for **Heimdall**: NornicDB's embedde
 - A plugin system that lets the model invoke registered actions, observe database events, and (optionally) trigger autonomous remediation.
 - Inference-engine integration for Auto-TLP edge quality control (`pkg/inference/HeimdallQC`).
 
-## What's out of scope (NOT shipped)
-
-The original proposal that motivated Heimdall described several subsystems that **do not ship**:
-
-- Built-in graph anomaly detector (`pkg/heimdall/anomaly/`).
-- Built-in Go runtime diagnostician (`pkg/heimdall/health/`).
-- Built-in memory curator (`pkg/heimdall/curator/`).
-- Multi-model GPU scheduler with LRU eviction. The real `Manager` loads one configured model at startup; runtime model hot-swap is not supported.
-- WebSocket chat streaming. Streaming uses Server-Sent Events on the OpenAI-compatible endpoint, not WebSockets.
-- A separate TLS chat-portal port. Bifrost shares the regular HTTP listener.
-- Per-`slm:*` RBAC permissions. Bifrost endpoints reuse the standard `read` / `write` entitlements.
-
-If any of those features show up in user-facing docs or skills, those are stale references — flag them.
-
----
-
 ## Architecture
 
 ```
@@ -54,11 +38,11 @@ The reasoning SLM is a separate model from the embedding model. Both run inside 
 
 `heimdall.Manager` is the entry point. It hides three provider backends behind a `Generator` interface:
 
-| Provider | Source file | Selected by |
-|---|---|---|
+| Provider                       | Source file                                          | Selected by                                   |
+| ------------------------------ | ---------------------------------------------------- | --------------------------------------------- |
 | **Local GGUF** (CGO llama.cpp) | `pkg/heimdall/generator_cgo.go`, `generator_yzma.go` | `NORNICDB_HEIMDALL_PROVIDER=local` (or unset) |
-| **Ollama** | `pkg/heimdall/generator_ollama.go` | `NORNICDB_HEIMDALL_PROVIDER=ollama` |
-| **OpenAI / OpenAI-compatible** | `pkg/heimdall/generator_openai.go` | `NORNICDB_HEIMDALL_PROVIDER=openai` |
+| **Ollama**                     | `pkg/heimdall/generator_ollama.go`                   | `NORNICDB_HEIMDALL_PROVIDER=ollama`           |
+| **OpenAI / OpenAI-compatible** | `pkg/heimdall/generator_openai.go`                   | `NORNICDB_HEIMDALL_PROVIDER=openai`           |
 
 The Manager is constructed once at startup with `NewManager(cfg)`. Provider selection cannot change at runtime; restart the server to switch. Each provider implements the same `Generate`, `GenerateStream`, `Chat`, and `GenerateWithTools` methods.
 
@@ -68,13 +52,13 @@ CPU fallback for the local provider is implemented in `loadLocalGenerator`: if G
 
 Default model: `qwen3-0.6b-instruct` (Apache 2.0). Override via `NORNICDB_HEIMDALL_MODEL`. The model name is the GGUF filename without the `.gguf` extension for the local provider; for Ollama and OpenAI it's the provider-specific model identifier.
 
-| Model | License | Quantization | VRAM (Q4_K_M) | Notes |
-|---|---|---|---|---|
-| qwen3-0.6b-instruct | Apache 2.0 | Q4_K_M | ~350 MB | Default; good JSON adherence |
-| qwen2.5-1.5b-instruct | Apache 2.0 | Q4_K_M | ~900 MB | When 0.6B is insufficient |
-| qwen2.5-3b-instruct | Apache 2.0 | Q4_K_M | ~1.8 GB | Strongest reasoning |
-| phi-3-mini-4k-instruct | MIT | Q4_K_M | ~2.3 GB | Microsoft alternative |
-| llama-3.2-1b-instruct | Llama 3.2 community | Q4_K_M | ~1.3 GB | Llama alternative |
+| Model                  | License             | Quantization | VRAM (Q4_K_M) | Notes                        |
+| ---------------------- | ------------------- | ------------ | ------------- | ---------------------------- |
+| qwen3-0.6b-instruct    | Apache 2.0          | Q4_K_M       | ~350 MB       | Default; good JSON adherence |
+| qwen2.5-1.5b-instruct  | Apache 2.0          | Q4_K_M       | ~900 MB       | When 0.6B is insufficient    |
+| qwen2.5-3b-instruct    | Apache 2.0          | Q4_K_M       | ~1.8 GB       | Strongest reasoning          |
+| phi-3-mini-4k-instruct | MIT                 | Q4_K_M       | ~2.3 GB       | Microsoft alternative        |
+| llama-3.2-1b-instruct  | Llama 3.2 community | Q4_K_M       | ~1.3 GB       | Llama alternative            |
 
 All recommended models are commercial-use compatible.
 
@@ -82,14 +66,14 @@ All recommended models are commercial-use compatible.
 
 The Bifrost endpoint is an OpenAI-compatible chat API. It shares the regular HTTP listener and uses standard NornicDB authentication.
 
-| Path | Method | Description |
-|---|---|---|
-| `/api/bifrost/status` | GET | Heimdall + Bifrost status (auth: read) |
-| `/api/bifrost/chat/completions` | POST | Native chat endpoint (auth: write) |
-| `/api/bifrost/autocomplete` | POST | Cypher autocomplete (auth: read) |
-| `/api/bifrost/events` | GET | SSE stream for real-time events (auth: read) |
-| `/v1/chat/completions` | POST | OpenAI-compatible alias for `/api/bifrost/chat/completions` |
-| `/v1/models` | GET | OpenAI-compatible model list |
+| Path                            | Method | Description                                                 |
+| ------------------------------- | ------ | ----------------------------------------------------------- |
+| `/api/bifrost/status`           | GET    | Heimdall + Bifrost status (auth: read)                      |
+| `/api/bifrost/chat/completions` | POST   | Native chat endpoint (auth: write)                          |
+| `/api/bifrost/autocomplete`     | POST   | Cypher autocomplete (auth: read)                            |
+| `/api/bifrost/events`           | GET    | SSE stream for real-time events (auth: read)                |
+| `/v1/chat/completions`          | POST   | OpenAI-compatible alias for `/api/bifrost/chat/completions` |
+| `/v1/models`                    | GET    | OpenAI-compatible model list                                |
 
 Streaming uses Server-Sent Events when the request sets `stream: true`, matching OpenAI's wire format. The `model` field in chat requests is accepted but ignored — Heimdall always uses the configured backend model.
 
@@ -97,12 +81,12 @@ Streaming uses Server-Sent Events when the request sets `stream: true`, matching
 
 Heimdall plugins implement `heimdall.HeimdallPlugin` (`pkg/heimdall/plugin.go`). Plugins register **actions** that the SLM can invoke, plus optional **lifecycle hooks**:
 
-| Hook | Purpose |
-|---|---|
-| `PrePromptHook` | Modify the system prompt before the SLM call (or cancel the request). |
-| `PreExecuteHook` | Validate or rewrite action params before execution (or cancel the request). |
-| `PostExecuteHook` | Log, audit, or send follow-up notifications after action execution. |
-| `DatabaseEventHook` | React to graph mutations, query events, transaction commits, etc. |
+| Hook                | Purpose                                                                     |
+| ------------------- | --------------------------------------------------------------------------- |
+| `PrePromptHook`     | Modify the system prompt before the SLM call (or cancel the request).       |
+| `PreExecuteHook`    | Validate or rewrite action params before execution (or cancel the request). |
+| `PostExecuteHook`   | Log, audit, or send follow-up notifications after action execution.         |
+| `DatabaseEventHook` | React to graph mutations, query events, transaction commits, etc.           |
 
 Plugins receive a `SubsystemContext` with handles to:
 
@@ -150,21 +134,21 @@ These apply to all providers. Override via `NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS
 
 The minimal env var set:
 
-| Variable | Purpose |
-|---|---|
-| `NORNICDB_HEIMDALL_ENABLED` | Master switch. Default `false`. |
-| `NORNICDB_HEIMDALL_PROVIDER` | `local` \| `ollama` \| `openai`. Default `local`. |
-| `NORNICDB_HEIMDALL_MODEL` | Model identifier. |
-| `NORNICDB_HEIMDALL_API_URL` | Provider URL (Ollama/OpenAI). |
-| `NORNICDB_HEIMDALL_API_KEY` | Provider API key (OpenAI). |
-| `NORNICDB_MODELS_DIR` | Local GGUF directory. |
-| `NORNICDB_HEIMDALL_GPU_LAYERS` | `-1` = auto, `0` = CPU only. Local provider only. |
-| `NORNICDB_HEIMDALL_CONTEXT_SIZE` | Local context window size in tokens. |
-| `NORNICDB_HEIMDALL_BATCH_SIZE` | Local batch size. |
-| `NORNICDB_HEIMDALL_MAX_TOKENS` | Max tokens per response. |
-| `NORNICDB_HEIMDALL_TEMPERATURE` | Sampling temperature. |
-| `NORNICDB_HEIMDALL_MCP_ENABLE` | Add MCP memory tools (`store`, `recall`, `discover`, `link`, `task`, `tasks`) to the agentic loop. Default `false`. |
-| `NORNICDB_HEIMDALL_MCP_TOOLS` | Allowlist for MCP tools. Unset = all (when MCP enabled); empty = none; comma-separated list = subset. |
+| Variable                         | Purpose                                                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `NORNICDB_HEIMDALL_ENABLED`      | Master switch. Default `false`.                                                                                     |
+| `NORNICDB_HEIMDALL_PROVIDER`     | `local` \| `ollama` \| `openai`. Default `local`.                                                                   |
+| `NORNICDB_HEIMDALL_MODEL`        | Model identifier.                                                                                                   |
+| `NORNICDB_HEIMDALL_API_URL`      | Provider URL (Ollama/OpenAI).                                                                                       |
+| `NORNICDB_HEIMDALL_API_KEY`      | Provider API key (OpenAI).                                                                                          |
+| `NORNICDB_MODELS_DIR`            | Local GGUF directory.                                                                                               |
+| `NORNICDB_HEIMDALL_GPU_LAYERS`   | `-1` = auto, `0` = CPU only. Local provider only.                                                                   |
+| `NORNICDB_HEIMDALL_CONTEXT_SIZE` | Local context window size in tokens.                                                                                |
+| `NORNICDB_HEIMDALL_BATCH_SIZE`   | Local batch size.                                                                                                   |
+| `NORNICDB_HEIMDALL_MAX_TOKENS`   | Max tokens per response.                                                                                            |
+| `NORNICDB_HEIMDALL_TEMPERATURE`  | Sampling temperature.                                                                                               |
+| `NORNICDB_HEIMDALL_MCP_ENABLE`   | Add MCP memory tools (`store`, `recall`, `discover`, `link`, `task`, `tasks`) to the agentic loop. Default `false`. |
+| `NORNICDB_HEIMDALL_MCP_TOOLS`    | Allowlist for MCP tools. Unset = all (when MCP enabled); empty = none; comma-separated list = subset.               |
 
 For the complete reference (including the token-budget overrides above) see [Environment Variables Reference](../operations/environment-variables.md).
 
@@ -172,12 +156,12 @@ For the complete reference (including the token-budget overrides above) see [Env
 
 For the default configuration (BGE-M3 embedding + qwen3-0.6b reasoning, both Q4_K_M):
 
-| Component | VRAM |
-|---|---|
-| BGE-M3 embedding | ~600 MB |
-| qwen3-0.6b reasoning | ~350 MB |
-| KV cache | ~200 MB |
-| **Total** | **~1.2 GB** |
+| Component            | VRAM        |
+| -------------------- | ----------- |
+| BGE-M3 embedding     | ~600 MB     |
+| qwen3-0.6b reasoning | ~350 MB     |
+| KV cache             | ~200 MB     |
+| **Total**            | **~1.2 GB** |
 
 Both fit comfortably on Apple Silicon's unified memory and on NVIDIA GPUs with 4 GB+ VRAM. CPU fallback is supported for both models when GPU memory is insufficient or unavailable.
 

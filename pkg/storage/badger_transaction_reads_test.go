@@ -13,45 +13,57 @@ import (
 //	test:alice -KNOWS->   test:bob
 //	test:alice -KNOWS->   test:carol     (second alice→other KNOWS edge)
 //	test:bob   -FOLLOWS-> test:carol
-//	test:dave  -REVIEWS-> test:doc       (cross-namespace, separate root)
+//	test:dave  -REVIEWS-> test:doc       (separate "other" namespace)
 //
 // Labels: alice/bob/carol/dave are People; alice is also Engineer; doc
 // is Document. The mix of types, multi-edges, and shared endpoints is
 // deliberate so the assertions below distinguish "the right edge" from
 // "any edge with these endpoints."
 //
-// The fixture commits its own transaction so the reads we test see
-// committed state. Returns the engine, the per-edge ID lookup, and a
-// fresh second transaction the test can layer pending writes onto.
+// Each namespace is committed in its own transaction because the storage
+// layer pins every transaction to a single namespace; the cross-namespace
+// REVIEWS edge that previously linked the two roots is omitted so the
+// fixture remains within the supported invariants.
+//
+// Returns the engine; tests open a fresh transaction to layer pending
+// writes onto the committed state.
 func txReadFixture(t *testing.T) *MemoryEngine {
 	t.Helper()
 	engine := NewMemoryEngine()
 	t.Cleanup(func() { _ = engine.Close() })
 
-	tx, err := engine.BeginTransaction()
-	require.NoError(t, err)
-
-	for _, n := range []*Node{
-		{ID: "test:alice", Labels: []string{"Person", "Engineer"}, Properties: map[string]any{"name": "Alice"}},
-		{ID: "test:bob", Labels: []string{"Person"}, Properties: map[string]any{"name": "Bob"}},
-		{ID: "test:carol", Labels: []string{"Person"}, Properties: map[string]any{"name": "Carol"}},
-		{ID: "test:dave", Labels: []string{"Person"}, Properties: map[string]any{"name": "Dave"}},
-		{ID: "other:doc", Labels: []string{"Document"}, Properties: map[string]any{"title": "Spec"}},
-	} {
-		_, err := tx.CreateNode(n)
-		require.NoError(t, err, "CreateNode(%q)", n.ID)
+	commitNamespace := func(nodes []*Node, edges []*Edge) {
+		tx, err := engine.BeginTransaction()
+		require.NoError(t, err)
+		for _, n := range nodes {
+			_, err := tx.CreateNode(n)
+			require.NoError(t, err, "CreateNode(%q)", n.ID)
+		}
+		for _, e := range edges {
+			require.NoError(t, tx.CreateEdge(e), "CreateEdge(%q)", e.ID)
+		}
+		require.NoError(t, tx.Commit())
 	}
 
-	for _, e := range []*Edge{
-		{ID: "test:e-knows-1", StartNode: "test:alice", EndNode: "test:bob", Type: "KNOWS", Properties: map[string]any{"since": int64(2020)}},
-		{ID: "test:e-knows-2", StartNode: "test:alice", EndNode: "test:carol", Type: "KNOWS", Properties: map[string]any{"since": int64(2021)}},
-		{ID: "test:e-follows", StartNode: "test:bob", EndNode: "test:carol", Type: "FOLLOWS", Properties: map[string]any{"strength": "weak"}},
-		{ID: "test:e-reviews", StartNode: "test:dave", EndNode: "other:doc", Type: "REVIEWS", Properties: map[string]any{"verdict": "accept"}},
-	} {
-		require.NoError(t, tx.CreateEdge(e), "CreateEdge(%q)", e.ID)
-	}
-
-	require.NoError(t, tx.Commit())
+	commitNamespace(
+		[]*Node{
+			{ID: "test:alice", Labels: []string{"Person", "Engineer"}, Properties: map[string]any{"name": "Alice"}},
+			{ID: "test:bob", Labels: []string{"Person"}, Properties: map[string]any{"name": "Bob"}},
+			{ID: "test:carol", Labels: []string{"Person"}, Properties: map[string]any{"name": "Carol"}},
+			{ID: "test:dave", Labels: []string{"Person"}, Properties: map[string]any{"name": "Dave"}},
+		},
+		[]*Edge{
+			{ID: "test:e-knows-1", StartNode: "test:alice", EndNode: "test:bob", Type: "KNOWS", Properties: map[string]any{"since": int64(2020)}},
+			{ID: "test:e-knows-2", StartNode: "test:alice", EndNode: "test:carol", Type: "KNOWS", Properties: map[string]any{"since": int64(2021)}},
+			{ID: "test:e-follows", StartNode: "test:bob", EndNode: "test:carol", Type: "FOLLOWS", Properties: map[string]any{"strength": "weak"}},
+		},
+	)
+	commitNamespace(
+		[]*Node{
+			{ID: "other:doc", Labels: []string{"Document"}, Properties: map[string]any{"title": "Spec"}},
+		},
+		nil,
+	)
 	return engine
 }
 

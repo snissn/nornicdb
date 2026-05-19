@@ -261,11 +261,20 @@ func (m *MVCCLifecycleManager) loop(ctx context.Context, interval time.Duration)
 func (m *MVCCLifecycleManager) runCycle(ctx context.Context, opts storage.MVCCPruneOptions) (ApplyResult, error) {
 	band := m.pressure.Update()
 	m.emergency.SetCritical(band == storage.PressureCritical)
-	oldestReader, ok := m.registry.OldestReaderVersion()
-	if !ok {
-		oldestReader = maxVersion()
+	// Per-namespace MVCC counters mean a reader's CommitSequence in
+	// namespace A has no ordering relationship to a head's
+	// CommitSequence in namespace B. The planner therefore resolves a
+	// per-namespace safe floor for each head it visits; namespaces with
+	// no active readers fall through to maxVersion(), letting TTL and
+	// MaxVersionsPerKey alone bound pruning.
+	floors := m.registry.OldestReaderVersionsByNamespace()
+	safeFloor := func(namespace string) storage.MVCCVersion {
+		if v, ok := floors[namespace]; ok {
+			return v
+		}
+		return maxVersion()
 	}
-	plan, err := m.planner.Plan(ctx, m.engine, oldestReader)
+	plan, err := m.planner.Plan(ctx, m.engine, safeFloor)
 	if err != nil {
 		return ApplyResult{}, err
 	}

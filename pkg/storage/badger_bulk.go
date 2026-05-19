@@ -16,6 +16,9 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 	if err := b.ensureOpen(); err != nil {
 		return err
 	}
+	if len(nodes) == 0 {
+		return nil
+	}
 
 	// Validate all nodes first
 	for _, node := range nodes {
@@ -31,8 +34,16 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 		return err
 	}
 
-	err := b.withUpdate(func(txn *badger.Txn) error {
-		version, err := b.allocateMVCCVersion(txn, time.Now())
+	ids := make([]NodeID, 0, len(nodes))
+	for _, node := range nodes {
+		ids = append(ids, node.ID)
+	}
+	ns, err := namespaceForNodeIDs(ids)
+	if err != nil {
+		return err
+	}
+	err = b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, ns, time.Now())
 		if err != nil {
 			return err
 		}
@@ -218,6 +229,9 @@ func (b *BadgerEngine) BulkCreateEdges(edges []*Edge) error {
 	if err := b.ensureOpen(); err != nil {
 		return err
 	}
+	if len(edges) == 0 {
+		return nil
+	}
 
 	// Validate all edges first
 	for _, edge := range edges {
@@ -229,8 +243,16 @@ func (b *BadgerEngine) BulkCreateEdges(edges []*Edge) error {
 		}
 	}
 
-	err := b.withUpdate(func(txn *badger.Txn) error {
-		version, err := b.allocateMVCCVersion(txn, time.Now())
+	edgeIDs := make([]EdgeID, 0, len(edges))
+	for _, edge := range edges {
+		edgeIDs = append(edgeIDs, edge.ID)
+	}
+	ns, err := namespaceForEdgeIDs(edgeIDs)
+	if err != nil {
+		return err
+	}
+	err = b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, ns, time.Now())
 		if err != nil {
 			return err
 		}

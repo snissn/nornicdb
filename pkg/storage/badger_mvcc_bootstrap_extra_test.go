@@ -32,7 +32,7 @@ func TestWriteNodeMVCCHeadForFreshCreateInTxn_FloorEqualsVersion(t *testing.T) {
 
 	id := NodeID("test:fresh-1")
 	require.NoError(t, be.db.Update(func(txn *badger.Txn) error {
-		v, err := be.allocateMVCCVersion(txn, time.Now().UTC())
+		v, err := be.allocateMVCCVersion(txn, "test", time.Now().UTC())
 		require.NoError(t, err)
 		// Allocate a numID via the public head-key resolver so the head
 		// write below has a numeric mapping to point at.
@@ -56,23 +56,27 @@ func TestAllocateMVCCVersion_FallsBackToTimestampOrderingWhenSequenceExhausted(t
 	be := NewMemoryEngine()
 	t.Cleanup(func() { _ = be.Close() })
 
-	be.mvccSeq.Store(maxMVCCCommitSequence)
+	state, err := be.namespaceMVCC("test")
+	require.NoError(t, err)
+	state.seq.Store(maxMVCCCommitSequence)
 	base := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	be.mvccHighWaterNanos.Store(base.UnixNano())
+	state.highWaterNanos.Store(base.UnixNano())
 
 	var version MVCCVersion
-	err := be.db.Update(func(txn *badger.Txn) error {
+	err = be.db.Update(func(txn *badger.Txn) error {
 		var allocErr error
-		version, allocErr = be.allocateMVCCVersion(txn, base.Add(-time.Hour))
+		version, allocErr = be.allocateMVCCVersion(txn, "test", base.Add(-time.Hour))
 		return allocErr
 	})
 	require.NoError(t, err)
 	require.Equal(t, maxMVCCCommitSequence, version.CommitSequence)
 	require.Equal(t, base.Add(time.Nanosecond), version.CommitTimestamp,
 		"saturated allocator should fall back to a strictly increasing high-water timestamp")
-	require.Equal(t, maxMVCCCommitSequence, be.mvccSeq.Load(), "allocator must not wrap back to zero on exhaustion")
+	require.Equal(t, maxMVCCCommitSequence, state.seq.Load(), "allocator must not wrap back to zero on exhaustion")
 
-	persistedSeq, loadErr := be.loadPersistedMVCCSequence()
+	// Per-namespace fallback must not rewrite the namespace's persisted
+	// sequence key (the saturation branch only bumps the high-water mark).
+	persistedSeq, loadErr := be.loadPersistedNamespaceSequence("test")
 	require.NoError(t, loadErr)
 	require.Equal(t, uint64(0), persistedSeq, "timestamp-only fallback must not rewrite the persisted sequence key")
 }
@@ -83,7 +87,7 @@ func TestWriteEdgeMVCCHeadForFreshCreateInTxn_FloorEqualsVersion(t *testing.T) {
 
 	id := EdgeID("test:fresh-edge-1")
 	require.NoError(t, be.db.Update(func(txn *badger.Txn) error {
-		v, err := be.allocateMVCCVersion(txn, time.Now().UTC())
+		v, err := be.allocateMVCCVersion(txn, "test", time.Now().UTC())
 		require.NoError(t, err)
 		if _, err := be.mvccEdgeHeadKeyString(txn, id); err != nil {
 			return err

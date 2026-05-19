@@ -55,6 +55,21 @@ const (
 const (
 	prefixMVCCMetaSchemaVersion         = byte(0x02)
 	prefixMVCCMetaEdgeBetweenIndexReady = byte(0x03)
+	// prefixMVCCMetaNamespaceSeq stores the last committed MVCC sequence
+	// for one namespace. Encoded as
+	//   [prefixMVCCMeta, prefixMVCCMetaNamespaceSeq, namespace bytes…]
+	// (the namespace is the trailing variable-length field; its bytes are
+	// already a valid Badger key segment because namespaces are validated
+	// to contain neither ':' nor binary control bytes).
+	//
+	// On engine open, the legacy global key [prefixMVCCMeta, 0x01] (no
+	// namespace component) is read once as a backward-compatibility seed:
+	// per-namespace counters bootstrap to max(persisted-per-ns, legacy)
+	// before the first allocation, so versions in any namespace remain
+	// strictly greater than anything previously committed under the
+	// global counter. The legacy key is left in place for older binaries
+	// that may still read it; new commits no longer write it.
+	prefixMVCCMetaNamespaceSeq = byte(0x04)
 )
 
 // maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)
@@ -144,21 +159,34 @@ type BadgerEngine struct {
 	// Eliminates expensive full table scans for node/edge counts
 	nodeCount atomic.Int64
 	edgeCount atomic.Int64
-	mvccSeq   atomic.Uint64
 
-	// mvccHighWaterNanos tracks the most recent commit-timestamp the
-	// engine has stamped onto any MVCC version (in nanoseconds since
-	// the Unix epoch). currentMVCCReadVersion clamps tx.readTS to
-	// max(now, high-water) so a transaction that begins after a commit
-	// can never observe a head version with a later timestamp than
-	// the one it'll compare against. Without this, a non-monotonic
-	// wall clock (containerized CI runners under NTP correction, or
-	// Linux clock_gettime() drift across goroutine schedulings) can
-	// briefly let a freshly-committed head's timestamp exceed a
-	// subsequent BeginTransaction's sample, producing spurious
+	// mvccByNamespace holds the per-database MVCC sequence counter and
+	// high-water clamp. Each transaction is pinned to one namespace at
+	// BeginTransaction (see BadgerTransaction.namespace), so the engine
+	// keeps an independent monotonic sequence per database — a
+	// high-throughput tenant cannot accelerate another tenant's version
+	// numbers, and DROP DATABASE drops its counter alongside its keys.
+	//
+	// Each namespaceMVCCState.seq is a strictly-increasing uint64
+	// incremented on every commit in that namespace. .highWaterNanos
+	// caches the most recent commit-timestamp stamped onto any version
+	// in the namespace; currentMVCCReadVersion clamps a transaction's
+	// readTS to max(now, highWater) so a non-monotonic wall clock
+	// (containerized CI runners under NTP correction, Linux
+	// clock_gettime drift across goroutine schedulings) cannot let a
+	// freshly-committed head's timestamp exceed a subsequent
+	// BeginTransaction's sample — which previously surfaced as spurious
 	// "node X changed after transaction start" conflicts on
-	// straight-line single-goroutine code paths.
-	mvccHighWaterNanos atomic.Int64
+	// single-goroutine code paths.
+	//
+	// On engine open, the legacy engine-global mvccSequenceKey is read
+	// once as a backward-compatibility seed; new namespaces bootstrap
+	// to max(persisted-per-ns, legacy-global) so no namespace can
+	// regress past versions previously emitted under the global
+	// counter. See loadPersistedMVCCSequence and namespaceMVCC().
+	mvccByNamespaceMu    sync.RWMutex
+	mvccByNamespace      map[string]*namespaceMVCCState
+	mvccLegacyGlobalSeed uint64
 
 	retentionPolicy           RetentionPolicy
 	activeMVCCSnapshotReaders atomic.Int64
@@ -835,12 +863,18 @@ func NewBadgerEngineInMemory() (*BadgerEngine, error) {
 	})
 }
 
+// initializeMVCCSequence reads the legacy engine-global MVCC sequence
+// counter (if any) into b.mvccLegacyGlobalSeed. Per-namespace counters
+// hydrate lazily via namespaceMVCC() and bootstrap to
+// max(persisted-per-ns, legacyGlobalSeed) so versions in any namespace
+// remain strictly greater than anything emitted under the global
+// counter by older binaries.
 func (b *BadgerEngine) initializeMVCCSequence() error {
-	seq, err := b.loadPersistedMVCCSequence()
+	seed, err := b.loadPersistedMVCCSequence()
 	if err != nil {
 		return err
 	}
-	b.mvccSeq.Store(seq)
+	b.mvccLegacyGlobalSeed = seed
 	return nil
 }
 
@@ -868,16 +902,25 @@ func (b *BadgerEngine) loadPersistedMVCCSequence() (uint64, error) {
 	return seq, nil
 }
 
-func (b *BadgerEngine) allocateMVCCVersion(txn *badger.Txn, commitTime time.Time) (MVCCVersion, error) {
-	seq, saturated := b.nextMVCCSequence()
+// allocateMVCCVersion mints the next (CommitTimestamp, CommitSequence)
+// pair for namespace, persisting the new sequence to its per-namespace
+// key on disk in the same Badger transaction that holds the user write.
+// namespace must be non-empty; the transaction layer enforces this via
+// pinNamespaceFromIDLocked.
+func (b *BadgerEngine) allocateMVCCVersion(txn *badger.Txn, namespace string, commitTime time.Time) (MVCCVersion, error) {
+	state, err := b.namespaceMVCC(namespace)
+	if err != nil {
+		return MVCCVersion{}, err
+	}
+	seq, saturated := state.nextSequence()
 	if !saturated {
 		encodedSeq := make([]byte, 8)
 		binary.BigEndian.PutUint64(encodedSeq, seq)
-		if err := txn.Set(mvccSequenceKey(), encodedSeq); err != nil {
+		if err := txn.Set(state.persistKey, encodedSeq); err != nil {
 			return MVCCVersion{}, err
 		}
 	}
-	commitStamp, err := b.reserveMVCCCommitTimestamp(commitTime.UTC(), saturated)
+	commitStamp, err := state.reserveCommitTimestamp(commitTime.UTC(), saturated)
 	if err != nil {
 		return MVCCVersion{}, err
 	}
@@ -885,40 +928,6 @@ func (b *BadgerEngine) allocateMVCCVersion(txn *badger.Txn, commitTime time.Time
 		CommitTimestamp: commitStamp,
 		CommitSequence:  seq,
 	}, nil
-}
-
-func (b *BadgerEngine) nextMVCCSequence() (uint64, bool) {
-	for {
-		cur := b.mvccSeq.Load()
-		if cur == maxMVCCCommitSequence {
-			return cur, true
-		}
-		next := cur + 1
-		if b.mvccSeq.CompareAndSwap(cur, next) {
-			return next, false
-		}
-	}
-}
-
-func (b *BadgerEngine) reserveMVCCCommitTimestamp(commitTime time.Time, forceAdvance bool) (time.Time, error) {
-	stampNanos := commitTime.UTC().UnixNano()
-	for {
-		cur := b.mvccHighWaterNanos.Load()
-		next := stampNanos
-		if forceAdvance {
-			if cur == int64(^uint64(0)>>1) {
-				return time.Time{}, fmt.Errorf("mvcc commit timestamp exhausted: %w", ErrExhausted)
-			}
-			if next <= cur {
-				next = cur + 1
-			}
-		} else if next <= cur {
-			return commitTime.UTC(), nil
-		}
-		if b.mvccHighWaterNanos.CompareAndSwap(cur, next) {
-			return time.Unix(0, next).UTC(), nil
-		}
-	}
 }
 
 func (b *BadgerEngine) readSchemaVersion() (int, error) {

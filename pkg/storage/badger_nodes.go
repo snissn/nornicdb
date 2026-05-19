@@ -49,7 +49,7 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 	var persistSeparateEmbeddings bool
 	var embeddingsToPersist [][]float32
 	err := b.withUpdate(func(txn *badger.Txn) error {
-		version, err := b.allocateMVCCVersion(txn, time.Now())
+		version, err := b.allocateMVCCVersion(txn, namespaceForNodeID(node.ID), time.Now())
 		if err != nil {
 			return err
 		}
@@ -213,7 +213,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 	var persistSeparateEmbeddings bool
 	var embeddingsToPersist [][]float32
 	err := b.withUpdate(func(txn *badger.Txn) error {
-		version, err := b.allocateMVCCVersion(txn, time.Now())
+		version, err := b.allocateMVCCVersion(txn, namespaceForNodeID(node.ID), time.Now())
 		if err != nil {
 			return err
 		}
@@ -444,7 +444,7 @@ func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
 	var persistSeparateEmbeddings bool
 	var embeddingsToPersist [][]float32
 	err := b.withUpdate(func(txn *badger.Txn) error {
-		version, err := b.allocateMVCCVersion(txn, time.Now())
+		version, err := b.allocateMVCCVersion(txn, namespaceForNodeID(node.ID), time.Now())
 		if err != nil {
 			return err
 		}
@@ -649,7 +649,7 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 	var deletedNode *Node
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
-		version, allocErr := b.allocateMVCCVersion(txn, time.Now())
+		version, allocErr := b.allocateMVCCVersion(txn, namespaceForNodeID(id), time.Now())
 		if allocErr != nil {
 			return allocErr
 		}

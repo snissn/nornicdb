@@ -208,8 +208,8 @@ func TestImplicitTx_UnwindBulkCreate_ArchitecturePayload_PersistsAcrossRestart(t
 	srv, db := setupAsyncUnwindServerWithDir(t, rootDir)
 
 	docCandidates := []string{
-		filepath.Join("docs", "architecture", "COGNITIVE_SLM_PROPOSAL.md"),
-		filepath.Join("..", "..", "docs", "architecture", "COGNITIVE_SLM_PROPOSAL.md"),
+		filepath.Join("docs", "architecture", "cognitive-slm-architecture.md"),
+		filepath.Join("..", "..", "docs", "architecture", "cognitive-slm-architecture.md"),
 	}
 	var raw []byte
 	var err error

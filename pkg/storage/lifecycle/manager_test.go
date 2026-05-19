@@ -225,7 +225,7 @@ func TestPrunePlanner_CreatesPlan(t *testing.T) {
 		{version: storage.MVCCVersion{CommitTimestamp: base.Add(3 * time.Minute), CommitSequence: 4}, sizeBytes: 40},
 	}
 	planner := NewPrunePlanner(LifecycleConfig{MaxVersionsPerKey: 1, DebtSampleFraction: 1})
-	plan, err := planner.Plan(context.Background(), engine, maxVersion())
+	plan, err := planner.Plan(context.Background(), engine, nil)
 	require.NoError(t, err)
 	require.Len(t, plan.Entries, 1)
 	entry := plan.Entries[0]
@@ -254,7 +254,7 @@ func TestPrunePlanner_MaxChainHardCapFallback(t *testing.T) {
 		{version: storage.MVCCVersion{CommitTimestamp: base.Add(4 * time.Minute), CommitSequence: 5}, sizeBytes: 10},
 	}
 	planner := NewPrunePlanner(LifecycleConfig{MaxVersionsPerKey: 100, MaxChainHardCap: 3, DebtSampleFraction: 1})
-	plan, err := planner.Plan(context.Background(), engine, maxVersion())
+	plan, err := planner.Plan(context.Background(), engine, nil)
 	require.NoError(t, err)
 	require.Len(t, plan.Entries, 1)
 	require.Len(t, plan.Entries[0].VersionsToDelete, 2)
@@ -267,7 +267,7 @@ func TestPrunePlanner_PropagatesVersionIterationError(t *testing.T) {
 	engine.heads[key] = storage.MVCCHead{Version: storage.MVCCVersion{CommitTimestamp: time.Now(), CommitSequence: 1}}
 	engine.iterateVersionsErr[key] = errors.New("boom")
 	planner := NewPrunePlanner(LifecycleConfig{DebtSampleFraction: 1})
-	_, err := planner.Plan(context.Background(), engine, maxVersion())
+	_, err := planner.Plan(context.Background(), engine, nil)
 	require.ErrorContains(t, err, "boom")
 }
 
@@ -275,7 +275,7 @@ func TestPrunePlanner_PropagatesHeadIterationError(t *testing.T) {
 	engine := newMockLifecycleEngine()
 	engine.iterateHeadsErr = errors.New("head scan failed")
 	planner := NewPrunePlanner(DefaultLifecycleConfig())
-	_, err := planner.Plan(context.Background(), engine, maxVersion())
+	_, err := planner.Plan(context.Background(), engine, nil)
 	require.ErrorContains(t, err, "head scan failed")
 }
 

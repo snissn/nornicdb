@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"hash/fnv"
+	"strings"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -56,11 +57,22 @@ func NewPrunePlanner(config LifecycleConfig) *PrunePlanner {
 }
 
 // Plan scans MVCC heads and computes per-key prune work.
-func (p *PrunePlanner) Plan(ctx context.Context, engine LifecycleStorageEngine, globalSafeFloor storage.MVCCVersion) (*PrunePlan, error) {
+//
+// safeFloorForNamespace resolves the prune-safe floor version for a given
+// namespace. With per-database MVCC counters the global oldest-reader
+// version is no longer comparable across namespaces; the planner must
+// resolve a namespace-specific floor for each head it visits. A nil
+// callback is treated as "no active readers anywhere" — every namespace
+// resolves to maxVersion(), which lets the TTL/MaxVersions bounds drive
+// pruning alone.
+func (p *PrunePlanner) Plan(ctx context.Context, engine LifecycleStorageEngine, safeFloorForNamespace func(namespace string) storage.MVCCVersion) (*PrunePlan, error) {
 	p.cycleCount++
 	entries := make([]PrunePlanEntry, 0)
 	keysScanned := 0
 	ttlBound := TTLBoundVersion(p.config.TTL)
+	if safeFloorForNamespace == nil {
+		safeFloorForNamespace = func(string) storage.MVCCVersion { return maxVersion() }
+	}
 	err := engine.IterateMVCCHeads(ctx, func(logicalKey []byte, head storage.MVCCHead) error {
 		if !p.shouldScanKey(logicalKey) {
 			return nil
@@ -83,7 +95,8 @@ func (p *PrunePlanner) Plan(ctx context.Context, engine LifecycleStorageEngine, 
 			return nil
 		}
 		maxVersionsBound := p.maxVersionsBoundVersion(versions)
-		newFloor := ComputeSafeFloor(globalSafeFloor, ttlBound, maxVersionsBound, head.FloorVersion)
+		nsFloor := safeFloorForNamespace(plannerNamespaceFromLogicalKey(logicalKey))
+		newFloor := ComputeSafeFloor(nsFloor, ttlBound, maxVersionsBound, head.FloorVersion)
 		toDelete := make([]storage.MVCCVersion, 0)
 		for _, version := range versions {
 			if version.version.Compare(newFloor) < 0 && version.version.Compare(head.Version) != 0 {
@@ -109,6 +122,21 @@ func (p *PrunePlanner) Plan(ctx context.Context, engine LifecycleStorageEngine, 
 		return nil, err
 	}
 	return &PrunePlan{CreatedAt: time.Now(), KeysScanned: keysScanned, Entries: entries}, nil
+}
+
+// plannerNamespaceFromLogicalKey extracts the namespace from an MVCC head
+// logical key. Logical keys are the namespace-prefixed entity ID bytes
+// produced by the storage layer; the namespace is the segment up to the
+// first ':' separator.
+func plannerNamespaceFromLogicalKey(logicalKey []byte) string {
+	if len(logicalKey) <= 1 {
+		return ""
+	}
+	parts := strings.SplitN(string(logicalKey[1:]), ":", 2)
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
 }
 
 func (p *PrunePlanner) shouldScanKey(logicalKey []byte) bool {

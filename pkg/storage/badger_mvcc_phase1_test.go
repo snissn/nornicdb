@@ -44,7 +44,7 @@ func TestBadgerTransaction_AssignsMonotonicMVCCCommitVersions(t *testing.T) {
 	require.NoError(t, tx1.Commit())
 	require.False(t, tx1.CommitVersion.IsZero())
 
-	persistedSeq, err := engine.loadPersistedMVCCSequence()
+	persistedSeq, err := engine.loadPersistedNamespaceSequence("nornic")
 	require.NoError(t, err)
 	require.Equal(t, tx1.CommitVersion.CommitSequence, persistedSeq)
 
@@ -61,7 +61,7 @@ func TestBadgerTransaction_AssignsMonotonicMVCCCommitVersions(t *testing.T) {
 	require.NoError(t, tx3.Commit())
 	require.True(t, tx3.CommitVersion.IsZero())
 
-	persistedAfterEmpty, err := engine.loadPersistedMVCCSequence()
+	persistedAfterEmpty, err := engine.loadPersistedNamespaceSequence("nornic")
 	require.NoError(t, err)
 	require.Equal(t, tx2.CommitVersion.CommitSequence, persistedAfterEmpty)
 
@@ -71,7 +71,7 @@ func TestBadgerTransaction_AssignsMonotonicMVCCCommitVersions(t *testing.T) {
 	require.NoError(t, err)
 	defer reopened.Close()
 
-	reopenedSeq, err := reopened.loadPersistedMVCCSequence()
+	reopenedSeq, err := reopened.loadPersistedNamespaceSequence("nornic")
 	require.NoError(t, err)
 	require.Equal(t, tx2.CommitVersion.CommitSequence, reopenedSeq)
 

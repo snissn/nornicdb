@@ -1718,7 +1718,7 @@ func (b *BadgerEngine) applyNodeBootstrapBatch(nodes []*Node) error {
 			} else if err != ErrNotFound {
 				return err
 			}
-			version, err := b.allocateMVCCVersion(txn, mvccBootstrapTime(node.CreatedAt, node.UpdatedAt))
+			version, err := b.allocateMVCCVersion(txn, namespaceForNodeID(node.ID), mvccBootstrapTime(node.CreatedAt, node.UpdatedAt))
 			if err != nil {
 				return err
 			}
@@ -1807,7 +1807,7 @@ func (b *BadgerEngine) applyEdgeBootstrapBatch(edges []*Edge) error {
 			} else if err != ErrNotFound {
 				return err
 			}
-			version, err := b.allocateMVCCVersion(txn, mvccBootstrapTime(edge.CreatedAt, edge.UpdatedAt))
+			version, err := b.allocateMVCCVersion(txn, namespaceForEdgeID(edge.ID), mvccBootstrapTime(edge.CreatedAt, edge.UpdatedAt))
 			if err != nil {
 				return err
 			}
@@ -1846,7 +1846,7 @@ func (b *BadgerEngine) bootstrapNodeMVCCFromCurrentStateInTxn(txn *badger.Txn) e
 		}); err != nil {
 			return err
 		}
-		version, err := b.allocateMVCCVersion(txn, mvccBootstrapTime(node.CreatedAt, node.UpdatedAt))
+		version, err := b.allocateMVCCVersion(txn, namespaceForNodeID(node.ID), mvccBootstrapTime(node.CreatedAt, node.UpdatedAt))
 		if err != nil {
 			return err
 		}
@@ -1884,7 +1884,7 @@ func (b *BadgerEngine) bootstrapEdgeMVCCFromCurrentStateInTxn(txn *badger.Txn) e
 		}); err != nil {
 			return err
 		}
-		version, err := b.allocateMVCCVersion(txn, mvccBootstrapTime(edge.CreatedAt, edge.UpdatedAt))
+		version, err := b.allocateMVCCVersion(txn, namespaceForEdgeID(edge.ID), mvccBootstrapTime(edge.CreatedAt, edge.UpdatedAt))
 		if err != nil {
 			return err
 		}

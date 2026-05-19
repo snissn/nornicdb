@@ -27,13 +27,16 @@ func TestCurrentMVCCReadVersion_ClampsToHighWater(t *testing.T) {
 	e := NewMemoryEngine()
 	t.Cleanup(func() { _ = e.Close() })
 
-	// Force the high-water mark to a timestamp ~1s in the future. This
-	// simulates a head being stamped with a clock that briefly ran
-	// ahead of the wall-clock observed by the next BeginTransaction.
+	// Force one namespace's high-water mark to a timestamp ~1s in the
+	// future. This simulates a head being stamped with a clock that
+	// briefly ran ahead of the wall-clock observed by the next
+	// BeginTransaction in that namespace.
+	state, err := e.namespaceMVCC("test")
+	require.NoError(t, err)
 	future := time.Now().Add(time.Second).UnixNano()
-	e.mvccHighWaterNanos.Store(future)
+	state.highWaterNanos.Store(future)
 
-	got := e.currentMVCCReadVersion()
+	got := e.currentMVCCReadVersion("test")
 	require.GreaterOrEqual(t, got.CommitTimestamp.UnixNano(), future,
 		"currentMVCCReadVersion must not return a timestamp earlier than the high-water mark")
 }
@@ -44,20 +47,22 @@ func TestAllocateMVCCVersion_AdvancesHighWater(t *testing.T) {
 
 	commitAt := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	require.NoError(t, e.db.Update(func(txn *badger.Txn) error {
-		_, err := e.allocateMVCCVersion(txn, commitAt)
+		_, err := e.allocateMVCCVersion(txn, "test", commitAt)
 		return err
 	}))
-	require.Equal(t, commitAt.UnixNano(), e.mvccHighWaterNanos.Load(),
-		"allocateMVCCVersion must publish its commit timestamp to the high-water mark")
+	state, err := e.namespaceMVCC("test")
+	require.NoError(t, err)
+	require.Equal(t, commitAt.UnixNano(), state.highWaterNanos.Load(),
+		"allocateMVCCVersion must publish its commit timestamp to the namespace's high-water mark")
 
 	// A subsequent allocate at an EARLIER timestamp must not lower the
 	// high-water mark — monotonicity is the whole point.
 	earlier := commitAt.Add(-time.Hour)
 	require.NoError(t, e.db.Update(func(txn *badger.Txn) error {
-		_, err := e.allocateMVCCVersion(txn, earlier)
+		_, err := e.allocateMVCCVersion(txn, "test", earlier)
 		return err
 	}))
-	require.Equal(t, commitAt.UnixNano(), e.mvccHighWaterNanos.Load(),
+	require.Equal(t, commitAt.UnixNano(), state.highWaterNanos.Load(),
 		"high-water mark must never go backward")
 }
 
@@ -77,8 +82,11 @@ func TestBeginTransaction_DoesNotConflictAfterClockSkew(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Pretend a future commit happened: bump high-water past wall-clock.
-	e.mvccHighWaterNanos.Store(time.Now().Add(2 * time.Second).UnixNano())
+	// Pretend a future commit happened in the "test" namespace: bump
+	// its high-water past wall-clock.
+	state, err := e.namespaceMVCC("test")
+	require.NoError(t, err)
+	state.highWaterNanos.Store(time.Now().Add(2 * time.Second).UnixNano())
 
 	tx, err := e.BeginTransaction()
 	require.NoError(t, err)

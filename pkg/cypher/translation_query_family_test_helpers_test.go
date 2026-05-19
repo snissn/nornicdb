@@ -33,7 +33,7 @@ func seedTranslationQueryFamilyData(t *testing.T, store storage.Engine, idPrefix
 		})
 		require.NoError(t, err)
 		require.NoError(t, store.CreateEdge(&storage.Edge{
-			ID:        storage.EdgeID(fmt.Sprintf("edge-fr-%02d", i)),
+			ID:        storage.EdgeID(fmt.Sprintf("%sedge-fr-%02d", idPrefix, i)),
 			Type:      "TRANSLATES_TO",
 			StartNode: origID,
 			EndNode:   trID,
@@ -63,7 +63,7 @@ func seedTranslationQueryFamilyData(t *testing.T, store storage.Engine, idPrefix
 		})
 		require.NoError(t, err)
 		require.NoError(t, store.CreateEdge(&storage.Edge{
-			ID:        storage.EdgeID(fmt.Sprintf("edge-es-%02d", i)),
+			ID:        storage.EdgeID(fmt.Sprintf("%sedge-es-%02d", idPrefix, i)),
 			Type:      "TRANSLATES_TO",
 			StartNode: origID,
 			EndNode:   trID,

@@ -86,7 +86,7 @@ func (b *BadgerEngine) CreateEdge(edge *Edge) error {
 			}
 		}
 
-		version, err := b.allocateMVCCVersion(txn, time.Now())
+		version, err := b.allocateMVCCVersion(txn, dbName, time.Now())
 		if err != nil {
 			return err
 		}
@@ -197,7 +197,7 @@ func (b *BadgerEngine) UpdateEdge(edge *Edge) error {
 
 	var oldType string
 	err := b.withUpdate(func(txn *badger.Txn) error {
-		version, err := b.allocateMVCCVersion(txn, time.Now())
+		version, err := b.allocateMVCCVersion(txn, namespaceForEdgeID(edge.ID), time.Now())
 		if err != nil {
 			return err
 		}
@@ -362,7 +362,7 @@ func (b *BadgerEngine) DeleteEdge(id EdgeID) error {
 	}
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
-		version, err := b.allocateMVCCVersion(txn, time.Now())
+		version, err := b.allocateMVCCVersion(txn, namespaceForEdgeID(id), time.Now())
 		if err != nil {
 			return err
 		}
@@ -584,8 +584,12 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 	totalEdgesDeleted := int64(0)
 	deletedEdgeIDs := make([]EdgeID, 0)
 
-	err := b.withUpdate(func(txn *badger.Txn) error {
-		version, err := b.allocateMVCCVersion(txn, time.Now())
+	ns, err := namespaceForNodeIDs(ids)
+	if err != nil {
+		return err
+	}
+	err = b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, ns, time.Now())
 		if err != nil {
 			return err
 		}
@@ -685,8 +689,12 @@ func (b *BadgerEngine) BulkDeleteEdges(ids []EdgeID) error {
 	// Track which edges were actually deleted for accurate counting
 	deletedCount := int64(0)
 	deletedIDs := make([]EdgeID, 0, len(ids))
-	err := b.withUpdate(func(txn *badger.Txn) error {
-		version, err := b.allocateMVCCVersion(txn, time.Now())
+	ns, err := namespaceForEdgeIDs(ids)
+	if err != nil {
+		return err
+	}
+	err = b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, ns, time.Now())
 		if err != nil {
 			return err
 		}
