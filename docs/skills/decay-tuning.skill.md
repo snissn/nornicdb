@@ -1,6 +1,6 @@
 ---
 name: nornicdb-decay-tuning
-description: Tune NornicDB decay profiles via Cypher — pick half-life, function, threshold, floor, scoreFrom; diagnose suppression vs score-clamp confusion; build forgetting and consolidation curves. Use when adjusting halfLifeSeconds, visibilityThreshold, scoreFloor, function, scoreFrom, or building Ebbinghaus-Roynard inverted-decay setups in NornicDB.
+description: Tune NornicDB decay profiles via Cypher — pick half-life, function, threshold, floor, scoreFrom; diagnose suppression vs score-clamp confusion; build forgetting and consolidation curves. Use when adjusting halfLifeSeconds, visibilityThreshold, scoreFloor, function, scoreFrom, or building inverted-decay (idle-time consolidation) setups in NornicDB.
 ---
 
 # Tuning NornicDB Decay Profiles
@@ -50,7 +50,7 @@ For `linear` the same threshold is reached at `(1 - threshold) * 2 * halfLife`. 
 | `CUSTOM` | `n.<scoreFromProperty>` (e.g. `reviewedAt`) |
 | `LAST_ACCESSED` | last access metadata; falls back to created until first access |
 
-`LAST_ACCESSED` paired with a **negative** `halfLifeSeconds` is the Ebbinghaus-Roynard consolidation curve: starts at 0 right after access, climbs toward 1 as the entity sits idle. The reset on access only works if **a promotion policy on the same target writes `lastAccessedAt`** (or `n.lastAccessedAt`) inside its `ON ACCESS` block. Without that policy, `lastAccessedAt` never updates and the binding behaves as if `scoreFrom: 'CREATED'`.
+`LAST_ACCESSED` paired with a **negative** `halfLifeSeconds` is the inverted (idle-time consolidation) curve: starts at 0 right after access, climbs toward 1 as the entity sits idle. The reset on access only works if **a promotion policy on the same target writes `lastAccessedAt`** (or `n.lastAccessedAt`) inside its `ON ACCESS` block. Without that policy, `lastAccessedAt` never updates and the binding behaves as if `scoreFrom: 'CREATED'`.
 
 ```cypher
 -- Decay binding (reads access metadata)

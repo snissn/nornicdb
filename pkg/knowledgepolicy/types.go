@@ -20,8 +20,9 @@ const (
 	// ScoreFromLastAccessed anchors the score at AccessMetaEntry.Fixed.
 	// LastAccessedAt. Time-since-last-access is the "age" the decay
 	// function consumes — pairs with DecayFunctionInverseExponential
-	// to implement the Ebbinghaus-Roynard consolidation curve. Falls
-	// back to createdAt when no access has been recorded.
+	// to implement an idle-time consolidation curve where time without
+	// access strengthens the score and access resets it. Falls back to
+	// createdAt when no access has been recorded.
 	ScoreFromLastAccessed ScoreFromMode = "LAST_ACCESSED"
 )
 
@@ -40,9 +41,9 @@ const (
 // the chosen Function in place, so the compiled score becomes
 // `1 - f(age, |halfLife|)` instead of `f(age, halfLife)`. The score
 // then grows from 0 toward 1.0 as age increases, instead of falling
-// toward 0. Combined with ScoreFromLastAccessed this implements the
-// Ebbinghaus-Roynard consolidation curve: idle time strengthens the
-// memory and an access resets the anchor (and thus the score) back
+// toward 0. Combined with ScoreFromLastAccessed this implements an
+// idle-time consolidation curve: time without access strengthens the
+// score and an access resets the anchor (and thus the score) back
 // to 0. The inversion is purely a curve property and composes with
 // every Function family and every ScoreFrom anchor.
 type DecayProfileBundle struct {

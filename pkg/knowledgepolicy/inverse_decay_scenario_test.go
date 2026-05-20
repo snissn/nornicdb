@@ -8,11 +8,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Ebbinghaus-Roynard "inverse" decay: time strengthens a memory while
+// Inverted (consolidation) decay: time strengthens a memory while
 // access — by reading or interfering with it — weakens it. The curve is
-// the mirror of the classic Ebbinghaus forgetting curve. A consolidated
-// memory has had time to settle (high score). A memory recently accessed
-// has been disturbed and its score is reset toward zero.
+// the mirror of the classic forgetting curve. A consolidated memory
+// has had time to settle (high score). A memory recently accessed has
+// been disturbed and its score is reset toward zero.
 //
 // The schema-level signal is a negative HalfLifeSeconds. Whatever decay
 // function family the bundle picks (exponential, linear, step) is

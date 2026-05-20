@@ -453,7 +453,7 @@ Decay scores themselves are computed on the fly on every read, so there is no se
 
 ## Optional: Inverted Memory Layer (Consolidation)
 
-The default Memory profile above implements the classic Ebbinghaus forgetting curve — episodes start strong and fade unless reinforced. Roynard's full model also covers the **inverse** dynamic: a memory that is *not* retrieved gains strength as it consolidates, while frequent retrieval (interference) erodes it. This is supported as a first-class profile by giving `halfLifeSeconds` a **negative value** and anchoring on `LAST_ACCESSED`. **The `scoreFloor` choice matters more on the inverted curve than on the forward one** because the inverted curve evaluates to exactly `0.0` immediately after access:
+The default Memory profile above implements the classic Ebbinghaus forgetting curve — episodes start strong and fade unless reinforced. NornicDB also supports the **inverse** dynamic as a first-class profile: a memory that is *not* retrieved gains strength as it consolidates, while frequent retrieval (interference) erodes it. Configure it by giving `halfLifeSeconds` a **negative value** and anchoring on `LAST_ACCESSED`. This is a NornicDB policy primitive — it is not a curve named in any specific cited paper. **The `scoreFloor` choice matters more on the inverted curve than on the forward one** because the inverted curve evaluates to exactly `0.0` immediately after access:
 
 ```cypher
 CREATE DECAY PROFILE memory_consolidation OPTIONS {

@@ -349,10 +349,9 @@ func resolveAnchor(cb *CompiledBinding, createdAt, versionAt int64, accessMeta *
 
 // computeDecay dispatches on the decay function family. A negative
 // halfLifeNanos inverts the curve in place: the compiled score becomes
-// `1 - f(age, |halfLife|)` instead of `f(age, halfLife)`. This is the
-// Ebbinghaus-Roynard signal — paired with ScoreFromLastAccessed, the
-// score grows with idle time and resets on access, with no new
-// function/type/flag in the schema.
+// `1 - f(age, |halfLife|)` instead of `f(age, halfLife)`. Paired with
+// ScoreFromLastAccessed, the score grows with idle time and resets on
+// access, with no new function/type/flag in the schema.
 func computeDecay(fn DecayFunction, ageNanos, halfLifeNanos int64) float64 {
 	inverse := halfLifeNanos < 0
 	if inverse {

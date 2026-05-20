@@ -14,7 +14,7 @@ The skills live alongside the user guides because they are user documentation: a
 | [`qdrant-migration.skill.md`](qdrant-migration.skill.md) | Migrating from Qdrant to NornicDB through the gRPC compat layer. Phase-by-phase plan, mapping reference, cutover playbook. Pairs with `scripts/migration/qdrant/`. |
 | [`neo4j-migration.skill.md`](neo4j-migration.skill.md) | Migrating from Neo4j 5 to NornicDB over Bolt. Schema → nodes → edges with cookbook-pinned UNWIND/MERGE shapes. Pairs with `scripts/migration/neo4j/`. |
 | [`knowledge-policies.skill.md`](knowledge-policies.skill.md) | The full DDL surface for decay profiles, parameter bundles, promotion profiles, and promotion policies. Diagnostics via `nornicdb.knowledgepolicy.*`. |
-| [`decay-tuning.skill.md`](decay-tuning.skill.md) | Picking `halfLifeSeconds`, `function`, `scoreFloor`, `visibilityThreshold`, `scoreFrom`. Forgetting and Ebbinghaus-Roynard consolidation curves. |
+| [`decay-tuning.skill.md`](decay-tuning.skill.md) | Picking `halfLifeSeconds`, `function`, `scoreFloor`, `visibilityThreshold`, `scoreFrom`. Forgetting curves and inverted (idle-time consolidation) curves. |
 | [`promotion-policies.skill.md`](promotion-policies.skill.md) | Reinforcement and dampening with `ON ACCESS` mutations, `WHEN` predicates, and Kalman-smoothed behavioral signals. |
 | [`managed-embeddings.skill.md`](managed-embeddings.skill.md) | Server-side embeddings: `WITH EMBEDDING`, `db.index.vector.embed`, the `ChunkEmbeddings` storage model, provider config. |
 | [`vector-search.skill.md`](vector-search.skill.md) | Vector and full-text indexes — `CREATE/DROP VECTOR INDEX`, `CREATE/DROP FULLTEXT INDEX`, `db.index.vector.queryNodes`, `db.index.fulltext.queryNodes`. |

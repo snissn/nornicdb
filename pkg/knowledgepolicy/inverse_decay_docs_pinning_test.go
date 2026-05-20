@@ -10,9 +10,9 @@ import (
 // These tests pin down the concrete scenarios documented in
 // docs/user-guides/decay-profiles.md (the "Inverted Decay" section) and
 // docs/user-guides/ebbinghaus-roynard-bootstrap.md (the "Optional:
-// Inverted Memory Layer" appendix). Documentation that isn't tested is
-// liable to drift; if any of these break, both the implementation and
-// the docs prose need to change together.
+// Inverted Memory Layer (Consolidation)" appendix). Documentation that
+// isn't tested is liable to drift; if any of these break, both the
+// implementation and the docs prose need to change together.
 
 // scoreInverseFull is the same harness as scoreInverse but accepts
 // promotion profiles + policies so we can exercise the
@@ -151,8 +151,7 @@ func TestDocs_InverseDecayPlusNegativePromotion_FourCellTable(t *testing.T) {
 }
 
 // TestDocs_ConsolidationCurve_LiteralValues pins the prose claims in
-// docs/user-guides/decay-profiles.md "Use Case: Ebbinghaus-Roynard
-// Consolidation":
+// docs/user-guides/decay-profiles.md "Use Case: Idle-Time Consolidation":
 //   - "scores 0.0 immediately after access — suppressed"
 //   - "reaching 0.5 at one day idle"
 //   - "approaching 1.0 over a week"

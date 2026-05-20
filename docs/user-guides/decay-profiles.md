@@ -185,7 +185,7 @@ score(t) = 1.0 if t < halfLife, else 0.0
 | `CREATED` | Decay starts from the entity's creation timestamp |
 | `VERSION` | Decay restarts from the most recent update timestamp |
 | `CUSTOM` | Decay starts from a custom property |
-| `LAST_ACCESSED` | Decay starts from the entity's last access timestamp; falls back to `CREATED` until an access is recorded. Pairs with a negative `halfLifeSeconds` to model Ebbinghaus-Roynard consolidation, where time-since-last-access strengthens the score and an access resets it. |
+| `LAST_ACCESSED` | Decay starts from the entity's last access timestamp; falls back to `CREATED` until an access is recorded. Pairs with a negative `halfLifeSeconds` to model an idle-time consolidation curve, where time-since-last-access strengthens the score and an access resets it. |
 
 ## Inverted Decay (Consolidation)
 
@@ -194,9 +194,9 @@ A **negative `halfLifeSeconds`** flips the chosen function family in place: the 
 | `halfLifeSeconds` sign | Curve shape | Score at age 0 | Asymptote at large age |
 |------------------------|-------------|----------------|-----------------------|
 | Positive | Forgetting (Ebbinghaus) — strong now, fades over time | `1.0` | `0.0` |
-| Negative | Consolidation (Roynard) — weak now, strengthens over time | `0.0` | `1.0` |
+| Negative | Inverted consolidation — weak now, strengthens over time | `0.0` | `1.0` |
 
-### Use Case: Ebbinghaus-Roynard Consolidation
+### Use Case: Idle-Time Consolidation
 
 Combine a negative half-life with `scoreFrom: 'LAST_ACCESSED'` to invert the cognitive model: the entity gains visibility while idle and resets on every access. The two levers do the same independent jobs as in the forward case (`scoreFloor` clamps the score, `visibilityThreshold` checks for suppression) but their interaction is more visible because the inverted curve evaluates to **exactly 0.0 right after access**. Without a positive `scoreFloor`, the post-access score sits at `0.0 < 0.10`, the entity is suppressed and deindexed every time it's read, and the consolidation curve never gets a chance to run.
 
@@ -233,7 +233,7 @@ That `scoreFloor: 0.0` configuration is sometimes what you want — it produces 
 
 ### Use Case: Negative Promotion Combined With Inverted Decay
 
-A `multiplier < 1.0` on a promotion profile **dampens** rather than boosts. Pair it with the inverted curve above to build a "punish frequent access" model that fits Roynard's interference-driven forgetting:
+A `multiplier < 1.0` on a promotion profile **dampens** rather than boosts. Pair it with the inverted curve above to build a "punish frequent access" model in which interference (each retrieval) erodes the consolidated score:
 
 ```cypher
 CREATE PROMOTION PROFILE access_dampener OPTIONS {
@@ -263,7 +263,7 @@ Combined behavior:
 | Idle for a day, accessCount ≥ 5 | `≈0.5` | `0.5` | borderline-suppressed |
 | Idle for a week, accessCount ≥ 5 | `≈0.99` | `0.5` | visible but dampened |
 
-The result is the inverse of the classic graph-DB heuristic: **frequently-accessed nodes and edges decay faster** (each access resets the consolidation clock and the dampener pins the multiplier), while **idle entries gain strength over time**. This matches Roynard's argument that consolidation requires time without retrieval, and is the dual of the recency-bias most caches encode.
+The result is the inverse of the classic graph-DB heuristic: **frequently-accessed nodes and edges decay faster** (each access resets the consolidation clock and the dampener pins the multiplier), while **idle entries gain strength over time**. The model encodes the idea that consolidation requires time without retrieval, and is the dual of the recency-bias most caches use.
 
 > Operational note: inverted profiles bypass the threshold-age fast-path used to skip-scan obviously-visible entries. Read paths score every binding hit, which costs slightly more CPU per read. Reserve inversion for label sets where the consolidation semantics are actually wanted.
 

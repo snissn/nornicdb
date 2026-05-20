@@ -70,7 +70,7 @@ suppressed   = finalScore < visibilityThreshold              // strict less-than
 
 Two specific things that catch people:
 
-- A **negative `halfLifeSeconds`** inverts the curve: the score becomes `1 - f(age, |halfLife|)`. Combined with `scoreFrom: 'LAST_ACCESSED'` and a promotion policy that updates `lastAccessedAt`, this produces the Ebbinghaus-Roynard consolidation curve: 0 right after access, climbs toward 1 with idle time, resets on each access.
+- A **negative `halfLifeSeconds`** inverts the curve: the score becomes `1 - f(age, |halfLife|)`. Combined with `scoreFrom: 'LAST_ACCESSED'` and a promotion policy that updates `lastAccessedAt`, this produces an idle-time consolidation curve: 0 right after access, climbs toward 1 with idle time, resets on each access.
 - `scoreFloor` and `visibilityThreshold` are **independent**. The floor clamps the score value upward; the threshold is a strict-less-than gate. A floor only keeps an entity visible when `scoreFloor >= visibilityThreshold`. Otherwise the floor pins the score above zero **while it stays suppressed**.
 
 ## Binding resolution (which decay binding wins)
