@@ -31,6 +31,16 @@ type BadgerTransaction struct {
 	StartTime time.Time
 	Status    TransactionStatus
 	readTS    MVCCVersion
+	// beginSnapshot freezes per-namespace MVCC sequences as of
+	// BeginTransaction time. When the transaction lazily pins to a
+	// namespace later (via the first prefixed write or SetNamespace),
+	// readTS is rebound to beginSnapshot[namespace] rather than the
+	// namespace's CURRENT sequence — peer commits that landed between
+	// our begin and our pin must remain invisible for snapshot
+	// isolation to hold. Namespaces not present in the snapshot (i.e.
+	// created after our begin) bind to sequence 0, which correctly
+	// treats anything committed under them as post-begin.
+	beginSnapshot map[string]MVCCVersion
 	// CommitVersion is assigned once for a successful commit that mutates storage.
 	CommitVersion MVCCVersion
 
@@ -126,6 +136,7 @@ func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 	b.mu.RUnlock()
 
 	readTS := b.currentMVCCReadVersion("")
+	beginSnapshot := b.snapshotNamespaceVersions()
 	txID := generateTxID()
 	startTime := time.Now()
 	badgerTx := badgerDB.NewTransaction(true)
@@ -135,6 +146,7 @@ func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 		StartTime:          startTime,
 		Status:             TxStatusActive,
 		readTS:             readTS,
+		beginSnapshot:      beginSnapshot,
 		badgerTx:           badgerTx,
 		engine:             b,
 		pendingNodes:       make(map[NodeID]*Node),
@@ -153,8 +165,26 @@ func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 // transaction's namespace is known, registering the snapshot reader at
 // the namespace-specific version. Called from pinNamespaceFromIDLocked /
 // SetNamespace immediately after tx.namespace is set.
+//
+// Bind to the begin-time snapshot of this namespace's MVCC sequence
+// rather than the namespace's CURRENT sequence. Without this, peer
+// commits that landed between BeginTransaction and the lazy pin would
+// become visible to this transaction — the snapshotIsolationConflict
+// check (head.CommitSequence > tx.readTS.CommitSequence) would compare
+// our pinned-in-the-future readTS against an equal-or-older head and
+// silently miss real conflicts, breaking SI for concurrent CREATE on
+// the same ID, RMW retries on contended counters, and the anchored-
+// snapshot read invariants in transaction_snapshot_anomalies_test.go.
+//
+// A namespace not present in the snapshot was created after our begin;
+// pin to sequence 0 and a wall-clock-only timestamp so anything
+// committed under it shows up as post-begin (correct SI for a
+// namespace that did not exist when we started).
 func (tx *BadgerTransaction) refreshReadVersionForNamespaceLocked() error {
-	readTS := tx.engine.currentMVCCReadVersion(tx.namespace)
+	readTS, ok := tx.beginSnapshot[tx.namespace]
+	if !ok {
+		readTS = MVCCVersion{CommitTimestamp: tx.StartTime.UTC()}
+	}
 	tx.readTS = readTS
 	tx.snapshotReaderInfo.SnapshotVersion = readTS
 	tx.snapshotReaderInfo.Namespace = tx.namespace
@@ -1601,6 +1631,14 @@ func (tx *BadgerTransaction) Commit() error {
 
 	if err := tx.validateSnapshotIsolationConflicts(); err != nil {
 		tx.closeLocked(TxStatusRolledBack, true, nil)
+		// MERGE-on-same-unique-value race: surface as the consumer-
+		// pinned constraint-violation wire shape so retry classifiers
+		// see the same prefix as a validate-time UNIQUE failure. The
+		// generic SI conflict shape stays unwrapped.
+		var cv *ConstraintViolationError
+		if errors.As(err, &cv) && cv.Type == ConstraintUnique {
+			return fmt.Errorf("constraint violation: %w", err)
+		}
 		return err
 	}
 
@@ -1873,7 +1911,18 @@ func (tx *BadgerTransaction) getCommittedNodeLocked(nodeID NodeID) (*Node, error
 		return tx.getNodeFromBadgerSnapshotLocked(nodeID)
 	}
 	node, err := tx.engine.GetNodeVisibleAt(nodeID, tx.readTS)
+	if err == ErrNotVisibleAtSnapshot {
+		// The head exists but isn't visible at the reader's snapshot.
+		// Treat as a hard miss — falling back to a primary-key read
+		// would expose a peer's post-begin commit and break SI.
+		return nil, ErrNotFound
+	}
 	if err == ErrNotFound {
+		// No head record at all — fall through to a primary-key read
+		// to serve legacy, pre-MVCC bodies that never had a head
+		// allocated. Safe because the absence of a head means no
+		// version was ever assigned, so there's no SI invariant to
+		// violate.
 		fallbackNode, fallbackErr := tx.getNodeFromBadgerSnapshotLocked(nodeID)
 		if fallbackErr == nil {
 			return fallbackNode, nil
@@ -1939,7 +1988,14 @@ func (tx *BadgerTransaction) getCommittedEdgeLocked(edgeID EdgeID) (*Edge, error
 		}
 		return tx.engine.decodeEdgeBodyByID(edgeBytes, edgeID)
 	}
-	return tx.engine.GetEdgeVisibleAt(edgeID, tx.readTS)
+	edge, err := tx.engine.GetEdgeVisibleAt(edgeID, tx.readTS)
+	if err == ErrNotVisibleAtSnapshot {
+		// SI: edge head exists but isn't visible at our snapshot.
+		// Surface as ErrNotFound so callers can't observe peer
+		// commits that landed after our begin.
+		return nil, ErrNotFound
+	}
+	return edge, err
 }
 
 func (tx *BadgerTransaction) getNodesByLabelLocked(label string) ([]*Node, error) {
@@ -2060,7 +2116,69 @@ func (tx *BadgerTransaction) checkNodeWriteConflict(nodeID NodeID) error {
 		return err
 	}
 	if tx.snapshotIsolationConflict(head.Version) {
+		// MERGE-on-same-unique-value race: this transaction's MERGE
+		// matched a node that a peer committed between our begin and
+		// our commit. The match → UpdateNode redirect onto the peer's
+		// node would normally fire as ErrConflict here, but the
+		// observable cause is "another writer claimed the unique
+		// value" — the consumer-pinned commit-time UNIQUE shape.
+		// Surface that shape directly so retry-aware MERGE clients
+		// converge instead of being told to retry on a transient
+		// conflict (which would just observe the peer's node, find
+		// the constraint already satisfied, and complete cleanly).
+		// See docs/plans/consumer-pinned-error-contract-plan.md §2.1.
+		if cv := tx.classifyUpdateConflictAsUniqueViolation(nodeID); cv != nil {
+			return cv
+		}
 		return fmt.Errorf("%w: node %s changed after transaction start (head=%s, readTS=%s)", ErrConflict, nodeID, head.Version, tx.readTS)
+	}
+	return nil
+}
+
+// classifyUpdateConflictAsUniqueViolation returns a ConstraintViolationError
+// when this transaction's UPDATE on nodeID is the loser of a commit-time
+// unique-value race — i.e., a peer claimed a uniquely-constrained value
+// this transaction's pending node also carries, and our MERGE-MATCH path
+// redirected our UPDATE onto the peer's node. Returns nil for any conflict
+// that isn't shaped this way (lost-update on a contended counter, generic
+// SI conflict on an unrelated update, etc.); the caller falls back to
+// the generic conflict error.
+func (tx *BadgerTransaction) classifyUpdateConflictAsUniqueViolation(nodeID NodeID) error {
+	pending, ok := tx.pendingNodes[nodeID]
+	if !ok || pending == nil || tx.namespace == "" {
+		return nil
+	}
+	schema := tx.engine.GetSchemaForNamespace(tx.namespace)
+	if schema == nil {
+		return nil
+	}
+	for _, c := range schema.GetConstraintsForLabels(pending.Labels) {
+		if c.Type != ConstraintUnique || len(c.Properties) != 1 {
+			continue
+		}
+		prop := c.Properties[0]
+		val, has := pending.Properties[prop]
+		if !has {
+			continue
+		}
+		existing, found, complete, constrained := schema.lookupUniqueConstraintValueForValidation(c.Label, prop, val)
+		if !constrained || !complete || !found {
+			continue
+		}
+		if existing != nodeID {
+			continue
+		}
+		// Peer claimed our unique value; the schema cache has already
+		// recorded their (label, prop, value) → nodeID mapping, and
+		// our pending update targets that same nodeID. This is the
+		// commit-time UNIQUE race the contract documents.
+		return &ConstraintViolationError{
+			Type:       ConstraintUnique,
+			Label:      c.Label,
+			Properties: []string{prop},
+			Message:    fmt.Sprintf("Node with %s=%v already exists (claimed by concurrent commit)", prop, val),
+			Cause:      fmt.Errorf("%w: concurrent transaction modified data before commit", ErrConflict),
+		}
 	}
 	return nil
 }
@@ -3269,14 +3387,27 @@ func hasLabel(labels []string, target string) bool {
 }
 
 // ConstraintViolationError is returned when a constraint is violated.
+//
+// Cause is set when the violation is detected at a non-validation layer
+// — currently used by the snapshot-isolation check when a MERGE's
+// UpdateNode hits a peer-committed node that already carries the
+// matching unique value. Surfacing the underlying ErrConflict via
+// Unwrap keeps errors.Is(err, ErrConflict) and the transient classifier
+// working so retry-aware drivers still see the transient sentinel even
+// though the visible message is the consumer-pinned constraint shape.
 type ConstraintViolationError struct {
 	Type       ConstraintType
 	Label      string
 	Properties []string
 	Message    string
+	Cause      error
 }
 
 func (e *ConstraintViolationError) Error() string {
 	return fmt.Sprintf("Constraint violation (%s on %s.%v): %s",
 		e.Type, e.Label, e.Properties, e.Message)
+}
+
+func (e *ConstraintViolationError) Unwrap() error {
+	return e.Cause
 }

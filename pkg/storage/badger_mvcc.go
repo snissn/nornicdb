@@ -825,7 +825,13 @@ func (b *BadgerEngine) GetNodeVisibleAt(id NodeID, version MVCCVersion) (*Node, 
 			return err
 		}
 		if version.Compare(head.FloorVersion) < 0 {
-			return ErrNotFound
+			// Head exists but the caller's snapshot cannot see it —
+			// SI violation if we let the caller fall back to a
+			// primary-key read. Distinct sentinel so the
+			// transaction-layer fallback can recognize this and
+			// return ErrNotFound to the user without exposing the
+			// peer's commit.
+			return ErrNotVisibleAtSnapshot
 		}
 
 		// Fast path: the caller is reading at or after the current head
@@ -938,7 +944,7 @@ func (b *BadgerEngine) GetEdgeVisibleAt(id EdgeID, version MVCCVersion) (*Edge, 
 			return err
 		}
 		if version.Compare(head.FloorVersion) < 0 {
-			return ErrNotFound
+			return ErrNotVisibleAtSnapshot
 		}
 
 		// Fast path: current head is visible and entity is live — read

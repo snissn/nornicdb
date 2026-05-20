@@ -98,7 +98,7 @@ func TestNamespacedEngine_GetNodeAndEdgeVisibleAt(t *testing.T) {
 		CommitSequence:  0,
 	}
 	_, err = ns.GetNodeVisibleAt("x", old)
-	require.ErrorIs(t, err, ErrNotFound)
+	require.ErrorIs(t, err, ErrNotVisibleAtSnapshot)
 }
 
 func TestNamespacedEngine_LifecycleAndPrune_Delegate(t *testing.T) {

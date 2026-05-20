@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -326,7 +327,7 @@ func TestBadgerEngine_PruneMVCCVersions_UsesRetentionPolicyDefaults(t *testing.T
 	require.Equal(t, 0, head.FloorVersion.Compare(v2.Version))
 
 	_, err = engine.GetNodeVisibleAt(nodeID, v1.Version)
-	require.ErrorIs(t, err, ErrNotFound)
+	require.ErrorIs(t, err, ErrNotVisibleAtSnapshot)
 	nodeAtV2, err := engine.GetNodeVisibleAt(nodeID, v2.Version)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, nodeAtV2.Properties["version"])
@@ -430,7 +431,13 @@ func TestBadgerEngine_MVCCStress_ChurnPruneBoundsRetainedChain(t *testing.T) {
 	_, err = engine.GetNodeVisibleAt(nodeID, headBeforePrune.FloorVersion)
 	if !headBeforePrune.FloorVersion.IsZero() {
 		if err != nil {
-			require.ErrorIs(t, err, ErrNotFound)
+			// Pruning may have either dropped the head entirely (ErrNotFound)
+			// or left a head whose floor moved past the requested version
+			// (ErrNotVisibleAtSnapshot). Either is correct: pre-floor reads
+			// must not surface a body.
+			require.True(t,
+				errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotVisibleAtSnapshot),
+				"want ErrNotFound or ErrNotVisibleAtSnapshot, got %v", err)
 		}
 	}
 	_, err = engine.GetNodeVisibleAt(nodeID, headAfterPrune.Version)

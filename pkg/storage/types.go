@@ -73,6 +73,15 @@ var (
 	// every subsequent write must share that prefix. Per-database MVCC
 	// counters depend on this invariant.
 	ErrCrossNamespaceTransaction = errors.New("transaction spans multiple namespaces")
+	// ErrNotVisibleAtSnapshot signals that the entity exists (a head
+	// record is present) but is not visible to the snapshot version
+	// the caller passed. Distinct from ErrNotFound, which means the
+	// entity has no head at all. Callers that maintain transaction
+	// snapshot isolation MUST treat this as a hard miss rather than
+	// falling back to a fresh-view read of the primary key, which
+	// would expose peer commits that landed between the reader's
+	// begin and the read.
+	ErrNotVisibleAtSnapshot = errors.New("entity not visible at snapshot")
 )
 
 // NodeID is a strongly-typed unique identifier for graph nodes.

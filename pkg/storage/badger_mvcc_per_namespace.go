@@ -134,6 +134,36 @@ func (b *BadgerEngine) namespaceMVCC(namespace string) (*namespaceMVCCState, err
 	return state, nil
 }
 
+// snapshotNamespaceVersions captures the current (sequence, high-water
+// timestamp) for every namespace the engine knows about. Called from
+// BeginTransaction so a transaction's readTS, when later rebound at
+// lazy pin time, points to the namespace's begin-time version rather
+// than its current version. Without this, the lazy-pin path would let
+// peer commits that landed between begin and pin become visible —
+// silently violating snapshot isolation for any reader that pinned
+// after a peer commit. The snapshot is a point-in-time copy, so peer
+// commits after BeginTransaction do NOT mutate it.
+func (b *BadgerEngine) snapshotNamespaceVersions() map[string]MVCCVersion {
+	b.mvccByNamespaceMu.RLock()
+	defer b.mvccByNamespaceMu.RUnlock()
+	if len(b.mvccByNamespace) == 0 {
+		return nil
+	}
+	out := make(map[string]MVCCVersion, len(b.mvccByNamespace))
+	for ns, state := range b.mvccByNamespace {
+		if state == nil {
+			continue
+		}
+		highWater := state.highWaterNanos.Load()
+		ts := time.Unix(0, int64(highWater)).UTC()
+		out[ns] = MVCCVersion{
+			CommitTimestamp: ts,
+			CommitSequence:  state.seq.Load(),
+		}
+	}
+	return out
+}
+
 // loadPersistedNamespaceSequence reads the persisted commit sequence for
 // namespace from disk; returns 0 if the key is absent (fresh namespace).
 func (b *BadgerEngine) loadPersistedNamespaceSequence(namespace string) (uint64, error) {
