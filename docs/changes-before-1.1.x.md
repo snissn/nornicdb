@@ -1415,34 +1415,6 @@ The following changes occurred while NornicDB was part of the Mimir project. Ful
 
 Prior to v1.0.0, NornicDB was versioned as part of the Mimir project. The commit history includes all previous development work.
 
----
-
-## Migration Notes
-
-### For Users Migrating from Mimir
-
-If you were using NornicDB from the Mimir repository, please see [MIGRATION.md](MIGRATION.md) for detailed instructions on:
-
-- Updating import paths
-- Updating git remotes
-- Updating Docker images
-- Updating CI/CD pipelines
-
-### Compatibility
-
-- **Neo4j Compatibility**: Maintained 100%
-- **API Stability**: No breaking changes to public APIs (except import paths)
-- **Docker Images**: Same naming convention, new build source
-- **Data Format**: Fully compatible with existing data
-
----
-
-## Contributing
-
-See [CONTRIBUTING.md](docs/CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for contribution guidelines.
-
----
-
 [v1.0.13]: https://github.com/orneryd/NornicDB/compare/v1.0.12-hotfix...v1.0.13
 [v1.0.14]: https://github.com/orneryd/NornicDB/compare/v1.0.13...v1.0.14
 [v1.0.12-hotfix]: https://github.com/orneryd/NornicDB/compare/v1.0.12...v1.0.12-hotfix
