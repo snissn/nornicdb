@@ -223,7 +223,16 @@ func (b *BadgerEngine) writeEdgeMVCCTombstoneInTxn(txn *badger.Txn, id EdgeID, v
 
 func (b *BadgerEngine) writeNodeMVCCHeadInTxn(txn *badger.Txn, id NodeID, version MVCCVersion, tombstoned bool) error {
 	floorVersion := version
-	if existing, err := b.loadNodeMVCCHeadInTxn(txn, id); err == nil {
+	// Read the existing head via a SEPARATE read txn so the lookup does
+	// not enter the user txn's SSI read set. Without this, an OpUpdateNode
+	// targeting a peer-committed node (a MERGE that matched a node
+	// committed by a concurrent writer between this txn's begin and
+	// commit) would put the peer's mvcc-head key into the user txn's
+	// read set, causing Badger to reject the commit with a generic
+	// "Transaction Conflict" instead of letting the consumer-pinned
+	// constraint-violation shape surface (see
+	// docs/plans/consumer-pinned-error-contract-plan.md §2.1).
+	if existing, err := b.loadNodeMVCCHead(id); err == nil {
 		floorVersion = existing.FloorVersion
 	} else if err != ErrNotFound {
 		return err
@@ -422,12 +431,43 @@ func (b *BadgerEngine) archiveEdgeBodyInTxn(txn *badger.Txn, id EdgeID, body *Ed
 
 func (b *BadgerEngine) writeEdgeMVCCHeadInTxn(txn *badger.Txn, id EdgeID, version MVCCVersion, tombstoned bool) error {
 	floorVersion := version
-	if existing, err := b.loadEdgeMVCCHeadInTxn(txn, id); err == nil {
+	// Read via a fresh read txn so the lookup stays out of the user
+	// txn's SSI read set — see the doc on writeNodeMVCCHeadInTxn for
+	// the same rationale on the node side.
+	if existing, err := b.loadEdgeMVCCHead(id); err == nil {
 		floorVersion = existing.FloorVersion
 	} else if err != ErrNotFound {
 		return err
 	}
 	return b.writeEdgeMVCCHeadWithFloorInTxn(txn, id, version, tombstoned, floorVersion)
+}
+
+// loadEdgeMVCCHead is the edge analogue of loadNodeMVCCHead. Reads the
+// edge MVCC head via a fresh read txn.
+func (b *BadgerEngine) loadEdgeMVCCHead(id EdgeID) (MVCCHead, error) {
+	key := b.mvccEdgeHeadKeyStringLookup(id)
+	if key == nil {
+		return MVCCHead{}, ErrNotFound
+	}
+	var head MVCCHead
+	err := b.db.View(func(rtxn *badger.Txn) error {
+		item, err := rtxn.Get(key)
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			var decodeErr error
+			head, decodeErr = decodeMVCCHead(val)
+			return decodeErr
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return MVCCHead{}, ErrNotFound
+	}
+	if err != nil {
+		return MVCCHead{}, err
+	}
+	return head, nil
 }
 
 // writeEdgeMVCCHeadForFreshCreateInTxn is the edge analogue of
@@ -459,6 +499,39 @@ func (b *BadgerEngine) writeEdgeMVCCHeadWithFloorInTxn(txn *badger.Txn, id EdgeI
 		return err
 	}
 	return txn.Set(key, encoded)
+}
+
+// loadNodeMVCCHead reads the MVCC head record via a fresh read-only
+// transaction. Use this on the writer-side commit path to keep the
+// FloorVersion-carry-forward read out of the user txn's SSI read set
+// (see writeNodeMVCCHeadInTxn). Read-after-write within the SAME
+// transaction is rare for MVCC heads in practice — the user txn writes
+// the head once at materialize time — but if you need it, use
+// loadNodeMVCCHeadInTxn instead.
+func (b *BadgerEngine) loadNodeMVCCHead(id NodeID) (MVCCHead, error) {
+	key := b.mvccNodeHeadKeyStringLookup(id)
+	if key == nil {
+		return MVCCHead{}, ErrNotFound
+	}
+	var head MVCCHead
+	err := b.db.View(func(rtxn *badger.Txn) error {
+		item, err := rtxn.Get(key)
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			var decodeErr error
+			head, decodeErr = decodeMVCCHead(val)
+			return decodeErr
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return MVCCHead{}, ErrNotFound
+	}
+	if err != nil {
+		return MVCCHead{}, err
+	}
+	return head, nil
 }
 
 func (b *BadgerEngine) loadNodeMVCCHeadInTxn(txn *badger.Txn, id NodeID) (MVCCHead, error) {
@@ -1264,7 +1337,10 @@ func (b *BadgerEngine) materializeMVCCCommitInTxn(txn *badger.Txn, version MVCCV
 				continue
 			}
 			if retainsHistory && op.OldNode != nil {
-				if head, headErr := b.loadNodeMVCCHeadInTxn(txn, op.Node.ID); headErr == nil && !head.Tombstoned {
+				// Read via a separate read txn so the lookup stays out
+				// of the user txn's SSI read set — see
+				// writeNodeMVCCHeadInTxn doc.
+				if head, headErr := b.loadNodeMVCCHead(op.Node.ID); headErr == nil && !head.Tombstoned {
 					if err := b.archiveNodeBodyInTxn(txn, op.Node.ID, op.OldNode, head.Version); err != nil {
 						return err
 					}
@@ -1277,7 +1353,7 @@ func (b *BadgerEngine) materializeMVCCCommitInTxn(txn *badger.Txn, version MVCCV
 			}
 		case OpDeleteNode:
 			if retainsHistory && op.OldNode != nil {
-				if head, headErr := b.loadNodeMVCCHeadInTxn(txn, op.NodeID); headErr == nil && !head.Tombstoned {
+				if head, headErr := b.loadNodeMVCCHead(op.NodeID); headErr == nil && !head.Tombstoned {
 					if err := b.archiveNodeBodyInTxn(txn, op.NodeID, op.OldNode, head.Version); err != nil {
 						return err
 					}
@@ -1318,7 +1394,7 @@ func (b *BadgerEngine) materializeMVCCCommitInTxn(txn *badger.Txn, version MVCCV
 				continue
 			}
 			if retainsHistory && op.OldEdge != nil {
-				if head, headErr := b.loadEdgeMVCCHeadInTxn(txn, op.Edge.ID); headErr == nil && !head.Tombstoned {
+				if head, headErr := b.loadEdgeMVCCHead(op.Edge.ID); headErr == nil && !head.Tombstoned {
 					if err := b.archiveEdgeBodyInTxn(txn, op.Edge.ID, op.OldEdge, head.Version); err != nil {
 						return err
 					}
@@ -1331,7 +1407,7 @@ func (b *BadgerEngine) materializeMVCCCommitInTxn(txn *badger.Txn, version MVCCV
 			}
 		case OpDeleteEdge:
 			if retainsHistory && op.OldEdge != nil {
-				if head, headErr := b.loadEdgeMVCCHeadInTxn(txn, op.EdgeID); headErr == nil && !head.Tombstoned {
+				if head, headErr := b.loadEdgeMVCCHead(op.EdgeID); headErr == nil && !head.Tombstoned {
 					if err := b.archiveEdgeBodyInTxn(txn, op.EdgeID, op.OldEdge, head.Version); err != nil {
 						return err
 					}

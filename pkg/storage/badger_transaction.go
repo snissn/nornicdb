@@ -1885,21 +1885,37 @@ func (tx *BadgerTransaction) getCommittedNodeLocked(nodeID NodeID) (*Node, error
 	return node, err
 }
 
+// getNodeFromBadgerSnapshotLocked reads the primary nodeKey via a fresh
+// read-only Badger transaction rather than the user txn so the read does
+// NOT enter the user txn's SSI read set. Without that isolation, the
+// MERGE planning path (which probes peer-tx node IDs returned from the
+// schema's UNIQUE-constraint cache) would put the peer's nodeKey into
+// this tx's read set; when the peer commits its primary key, this tx's
+// commit collides with a "Transaction Conflict" instead of receiving
+// the consumer-pinned commit-time UNIQUE shape (see
+// docs/plans/consumer-pinned-error-contract-plan.md §2.1).
+//
+// Read-your-writes is preserved by GetNode's pendingNodes check at the
+// caller — this fallback is for legacy / pre-MVCC nodes that do not yet
+// have an MVCC head record.
 func (tx *BadgerTransaction) getNodeFromBadgerSnapshotLocked(nodeID NodeID) (*Node, error) {
 	key := nodeKey(nodeID)
-	item, err := tx.badgerTx.Get(key)
+	var nodeBytes []byte
+	err := tx.engine.db.View(func(rtxn *badger.Txn) error {
+		item, err := rtxn.Get(key)
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			nodeBytes = append([]byte{}, val...)
+			return nil
+		})
+	})
 	if err == badger.ErrKeyNotFound {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading node: %w", err)
-	}
-	var nodeBytes []byte
-	if err := item.Value(func(val []byte) error {
-		nodeBytes = append([]byte{}, val...)
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("reading node value: %w", err)
 	}
 	return tx.engine.decodeNode(namespaceForNodeID(nodeID), nodeBytes)
 }
