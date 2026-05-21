@@ -139,7 +139,25 @@ jobs:
           run_group cypher ./pkg/cypher/...
           run_group search ./pkg/search/...
           run_group bolt ./pkg/bolt/...
-          run_group storage ./pkg/storage
+
+          # pkg/storage is large (1000+ tests, BadgerDB I/O is heavy) and
+          # was OOM'ing the runner as a single job. Split by test-name
+          # prefix the same way pkg/server is split. Catch-all picks up
+          # anything not matched by a named bucket so freshly-added tests
+          # don't need the file updated.
+          STORAGE_BUCKETS_HANDLED='^(TestBadgerEngine|TestBadgerTransaction|TestBadgerCache|TestBadgerSchemaHelpers|TestBadgerConstraintValidationHelpers|TestAsyncEngine|TestAsyncEngineConfig|TestNewAsyncEngine|TestBug|TestWAL|TestAtomicWAL|TestRecoverFromWAL|TestReplayAndUndoBulkWALEntries|TestReplayAndUndoWALEntry|TestRecoveryResultSummary|TestReplayResultSummary|TestReplayResultTracking|TestReplayResultHasCriticalErrors|TestReplayWALEntry|TestNewWAL|TestNewWALSyncsDirectory|TestDefaultWALConfig|TestSaveSnapshot|TestSaveSnapshotSyncsDirectory|TestPruneOldSnapshotFiles|TestSnapshot_|TestSnapshotAndSaveSnapshot|TestCheckAtomicWALIntegrity|TestCheckWALIntegrity|TestReadWALEntriesForTruncation|TestReadWALEntriesFromDir|TestSyncDirFunction|TestSyncDirInvalidPath|TestRecoverAbortedTransaction|TestRecoverCommittedTransaction|TestRecoverIncompleteTransaction|TestRecoverMixedTransactions|TestRecoverWithTransactions|TestBuildAtomicRecordV2|TestWriteAtomicRecordV2|TestCompositeEngine|TestCompositeIndex|TestCompositeKey|TestNamespacedEngine|TestTransaction|TestBatch|TestTx|TestNewTransaction|TestUndo|TestBeginTransaction|TestSnapshotIsolationConflict)'
+
+          run_storage_group() {
+            local name="$1"; local pattern="$2"
+            run_group "storage-${name}" -run "${pattern}" ./pkg/storage
+          }
+
+          run_storage_group badger        '^(TestBadgerEngine|TestBadgerTransaction|TestBadgerCache|TestBadgerSchemaHelpers|TestBadgerConstraintValidationHelpers)'
+          run_storage_group async         '^(TestAsyncEngine|TestAsyncEngineConfig|TestNewAsyncEngine|TestBug)'
+          run_storage_group wal-recovery  '^(TestWAL|TestAtomicWAL|TestRecoverFromWAL|TestReplayAndUndoBulkWALEntries|TestReplayAndUndoWALEntry|TestRecoveryResultSummary|TestReplayResultSummary|TestReplayResultTracking|TestReplayResultHasCriticalErrors|TestReplayWALEntry|TestNewWAL|TestNewWALSyncsDirectory|TestDefaultWALConfig|TestSaveSnapshot|TestSaveSnapshotSyncsDirectory|TestPruneOldSnapshotFiles|TestSnapshot_|TestSnapshotAndSaveSnapshot|TestCheckAtomicWALIntegrity|TestCheckWALIntegrity|TestReadWALEntriesForTruncation|TestReadWALEntriesFromDir|TestSyncDirFunction|TestSyncDirInvalidPath|TestRecoverAbortedTransaction|TestRecoverCommittedTransaction|TestRecoverIncompleteTransaction|TestRecoverMixedTransactions|TestRecoverWithTransactions|TestBuildAtomicRecordV2|TestWriteAtomicRecordV2)'
+          run_storage_group composite-tx  '^(TestCompositeEngine|TestCompositeIndex|TestCompositeKey|TestNamespacedEngine|TestTransaction|TestBatch|TestTx|TestNewTransaction|TestUndo|TestBeginTransaction|TestSnapshotIsolationConflict)'
+          run_group storage-rest -skip "${STORAGE_BUCKETS_HANDLED}" ./pkg/storage
+
           run_group nornicdb ./pkg/nornicdb/...
 
           # pkg/server, split. Order is roughly cheapest-first.
@@ -247,7 +265,24 @@ jobs:
           run_cov_group cypher ./pkg/cypher/...
           run_cov_group search ./pkg/search/...
           run_cov_group bolt ./pkg/bolt/...
-          run_cov_group storage ./pkg/storage
+
+          # pkg/storage split — mirror the test job. Keep both lists in
+          # sync; if you add a bucket above, add it here too. The
+          # catch-all -skip pattern means coverage stays complete even
+          # if a new test file lands without explicit bucket assignment.
+          STORAGE_BUCKETS_HANDLED='^(TestBadgerEngine|TestBadgerTransaction|TestBadgerCache|TestBadgerSchemaHelpers|TestBadgerConstraintValidationHelpers|TestAsyncEngine|TestAsyncEngineConfig|TestNewAsyncEngine|TestBug|TestWAL|TestAtomicWAL|TestRecoverFromWAL|TestReplayAndUndoBulkWALEntries|TestReplayAndUndoWALEntry|TestRecoveryResultSummary|TestReplayResultSummary|TestReplayResultTracking|TestReplayResultHasCriticalErrors|TestReplayWALEntry|TestNewWAL|TestNewWALSyncsDirectory|TestDefaultWALConfig|TestSaveSnapshot|TestSaveSnapshotSyncsDirectory|TestPruneOldSnapshotFiles|TestSnapshot_|TestSnapshotAndSaveSnapshot|TestCheckAtomicWALIntegrity|TestCheckWALIntegrity|TestReadWALEntriesForTruncation|TestReadWALEntriesFromDir|TestSyncDirFunction|TestSyncDirInvalidPath|TestRecoverAbortedTransaction|TestRecoverCommittedTransaction|TestRecoverIncompleteTransaction|TestRecoverMixedTransactions|TestRecoverWithTransactions|TestBuildAtomicRecordV2|TestWriteAtomicRecordV2|TestCompositeEngine|TestCompositeIndex|TestCompositeKey|TestNamespacedEngine|TestTransaction|TestBatch|TestTx|TestNewTransaction|TestUndo|TestBeginTransaction|TestSnapshotIsolationConflict)'
+
+          run_cov_storage_group() {
+            local name="$1"; local pattern="$2"
+            run_cov_group "storage-${name}" -run "${pattern}" ./pkg/storage
+          }
+
+          run_cov_storage_group badger        '^(TestBadgerEngine|TestBadgerTransaction|TestBadgerCache|TestBadgerSchemaHelpers|TestBadgerConstraintValidationHelpers)'
+          run_cov_storage_group async         '^(TestAsyncEngine|TestAsyncEngineConfig|TestNewAsyncEngine|TestBug)'
+          run_cov_storage_group wal-recovery  '^(TestWAL|TestAtomicWAL|TestRecoverFromWAL|TestReplayAndUndoBulkWALEntries|TestReplayAndUndoWALEntry|TestRecoveryResultSummary|TestReplayResultSummary|TestReplayResultTracking|TestReplayResultHasCriticalErrors|TestReplayWALEntry|TestNewWAL|TestNewWALSyncsDirectory|TestDefaultWALConfig|TestSaveSnapshot|TestSaveSnapshotSyncsDirectory|TestPruneOldSnapshotFiles|TestSnapshot_|TestSnapshotAndSaveSnapshot|TestCheckAtomicWALIntegrity|TestCheckWALIntegrity|TestReadWALEntriesForTruncation|TestReadWALEntriesFromDir|TestSyncDirFunction|TestSyncDirInvalidPath|TestRecoverAbortedTransaction|TestRecoverCommittedTransaction|TestRecoverIncompleteTransaction|TestRecoverMixedTransactions|TestRecoverWithTransactions|TestBuildAtomicRecordV2|TestWriteAtomicRecordV2)'
+          run_cov_storage_group composite-tx  '^(TestCompositeEngine|TestCompositeIndex|TestCompositeKey|TestNamespacedEngine|TestTransaction|TestBatch|TestTx|TestNewTransaction|TestUndo|TestBeginTransaction|TestSnapshotIsolationConflict)'
+          run_cov_group storage-rest -skip "${STORAGE_BUCKETS_HANDLED}" ./pkg/storage
+
           run_cov_group nornicdb ./pkg/nornicdb/...
 
           run_cov_server_group core-tx       '^(TestAuth|TestGDPR|TestExplicit|TestCommit|TestRollback|TestTransaction)'
