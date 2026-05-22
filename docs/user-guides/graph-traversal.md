@@ -126,18 +126,291 @@ RETURN path LIMIT 10
 
 ---
 
+## BFS vs DFS
+
+NornicDB exposes both breadth-first and depth-first expansion, with implicit and explicit forms.
+
+### Implicit BFS — `shortestPath` / `allShortestPaths`
+
+`shortestPath()` and `allShortestPaths()` use BFS internally; the first time they reach the target node, the path is shortest by hop count. No flag required.
+
+### Implicit DFS — variable-length patterns
+
+`-[*1..N]->` patterns enumerate paths via DFS. Useful when you want every path, not just the shortest:
+
+```cypher
+MATCH path = (a:Person {name: 'Alice'})-[:KNOWS*1..4]->(b:Person {name: 'Bob'})
+RETURN path, length(path) AS hops
+ORDER BY hops
+```
+
+### Explicit BFS / DFS — `apoc.path.expandConfig`
+
+For workloads where you need a controllable spanning tree or an expansion frontier with predicate filters, use `apoc.path.expandConfig`. The `bfs` flag chooses the strategy:
+
+```cypher
+-- BFS expansion up to 5 hops, only along KNOWS / WORKS_WITH edges
+MATCH (start:Person {name: 'Alice'})
+CALL apoc.path.expandConfig(start, {
+  relationshipFilter: 'KNOWS|WORKS_WITH>',
+  minLevel: 1,
+  maxLevel: 5,
+  bfs: true,
+  uniqueness: 'NODE_GLOBAL'
+}) YIELD path
+RETURN path
+
+-- DFS spanning tree
+MATCH (root:Project {id: 'p1'})
+CALL apoc.path.spanningTree(root, {
+  relationshipFilter: 'DEPENDS_ON>',
+  bfs: false,
+  maxLevel: 10
+}) YIELD path
+RETURN path
+```
+
+`uniqueness` modes mirror Neo4j: `NODE_GLOBAL`, `RELATIONSHIP_GLOBAL`, `NODE_PATH`, `RELATIONSHIP_PATH`, `NONE`.
+
+---
+
+## Weighted Path Finding
+
+### Dijkstra (single-source weighted shortest path)
+
+When edges carry a weight property, use `apoc.algo.dijkstra` for shortest path by sum of weights:
+
+```cypher
+MATCH (start:City {name: 'San Francisco'}),
+      (end:City {name: 'New York'})
+CALL apoc.algo.dijkstra(start, end, 'CONNECTED_TO', 'distance_km')
+YIELD path, weight
+RETURN path, weight
+```
+
+Arguments:
+
+- `startNode`, `endNode` — bound from a preceding `MATCH`.
+- `relationshipTypes` — comma-separated list, or `''` for all types.
+- `weightProperty` — the edge property used as weight (omit / `''` for unit weights).
+
+Returns the path with the lowest sum of `weightProperty` across its relationships.
+
+### A* (heuristic-guided shortest path)
+
+When you have a cheap heuristic (e.g., great-circle distance for geographic routing), `apoc.algo.aStar` is faster than Dijkstra on the same input:
+
+```cypher
+MATCH (start:City {name: 'San Francisco'}),
+      (end:City {name: 'New York'})
+CALL apoc.algo.aStar(
+  start, end,
+  'CONNECTED_TO',
+  'distance_km',
+  'lat', 'lon'
+) YIELD path, weight
+RETURN path, weight
+```
+
+The last two arguments name the latitude / longitude properties used to estimate remaining distance. `aStar` falls back to Dijkstra-equivalent behavior when the heuristic is zero.
+
+### All simple paths
+
+To enumerate every simple path (no repeated nodes) between two endpoints:
+
+```cypher
+MATCH (a:Person {name: 'Alice'}),
+      (b:Person {name: 'Bob'})
+CALL apoc.algo.allSimplePaths(a, b, 'KNOWS', 6)
+YIELD path
+RETURN path, length(path) AS hops
+ORDER BY hops
+```
+
+The fourth argument bounds the maximum hop count — required, because the count of simple paths grows exponentially with depth.
+
+---
+
+## Neighborhood Queries
+
+### Hop-bounded neighbors
+
+```cypher
+-- Every node within exactly N hops
+MATCH (start:Person {name: 'Alice'})
+CALL apoc.neighbors.byhop(start, 'KNOWS>', 3)
+YIELD nodes
+RETURN nodes
+
+-- Every node within at most N hops (cumulative)
+CALL apoc.neighbors.tohop(start, 'KNOWS>', 3)
+YIELD nodes
+RETURN nodes
+```
+
+`byhop` returns one row per hop level (1, 2, 3); `tohop` returns the union.
+
+### Subgraph extraction
+
+```cypher
+-- Pull every node reachable from `start` within 4 hops
+MATCH (start:Project {id: 'p1'})
+CALL apoc.path.subgraphNodes(start, {
+  relationshipFilter: 'DEPENDS_ON>',
+  maxLevel: 4
+}) YIELD node
+RETURN node
+```
+
+---
+
+## Centrality and Community Detection
+
+These algorithms run over the full graph (or a relationship-filtered subgraph) and are useful for ranking, recommendation, and clustering workloads.
+
+### PageRank
+
+```cypher
+CALL apoc.algo.pageRank(['Person'], ['KNOWS'])
+YIELD node, score
+RETURN node.name, score
+ORDER BY score DESC
+LIMIT 20
+```
+
+### Betweenness centrality
+
+```cypher
+CALL apoc.algo.betweenness(['Person'], ['KNOWS'])
+YIELD node, score
+RETURN node.name AS broker, score
+ORDER BY score DESC
+LIMIT 10
+```
+
+### Closeness centrality
+
+```cypher
+CALL apoc.algo.closeness(['Person'], ['KNOWS'])
+YIELD node, score
+RETURN node.name, score
+ORDER BY score DESC
+```
+
+### Louvain communities
+
+```cypher
+CALL apoc.algo.louvain(['Person'], ['KNOWS'])
+YIELD node, community
+RETURN community, collect(node.name) AS members
+ORDER BY size(members) DESC
+```
+
+### Label propagation
+
+```cypher
+CALL apoc.algo.labelPropagation(['Person'], ['KNOWS'])
+YIELD node, label
+RETURN label AS community, count(node) AS size
+ORDER BY size DESC
+```
+
+### Weakly connected components
+
+```cypher
+CALL apoc.algo.wcc(['Person'], ['KNOWS'])
+YIELD node, componentId
+RETURN componentId, count(node) AS size
+ORDER BY size DESC
+```
+
+---
+
+## Link Prediction
+
+NornicDB ships GDS-style link-prediction primitives. Each one scores how likely two nodes are to form an edge based on shared neighborhood structure:
+
+```cypher
+-- Common Neighbors: count of mutual neighbors
+CALL gds.linkPrediction.commonNeighbors.stream({
+  nodeQuery: 'MATCH (n:Person) RETURN id(n) AS id',
+  relationshipQuery: 'MATCH (a)-[:KNOWS]->(b) RETURN id(a) AS source, id(b) AS target'
+}) YIELD node1, node2, score
+RETURN node1, node2, score
+ORDER BY score DESC LIMIT 50
+
+-- Adamic-Adar: weighted by inverse log of neighbor degree (rare connectors count more)
+CALL gds.linkPrediction.adamicAdar.stream({...}) YIELD node1, node2, score
+
+-- Jaccard similarity: |intersect| / |union| of neighborhoods
+CALL gds.linkPrediction.jaccard.stream({...}) YIELD node1, node2, score
+
+-- Preferential attachment: product of node degrees
+CALL gds.linkPrediction.preferentialAttachment.stream({...}) YIELD node1, node2, score
+
+-- Resource allocation: penalizes high-degree intermediaries
+CALL gds.linkPrediction.resourceAllocation.stream({...}) YIELD node1, node2, score
+
+-- Predict: combined score across the metrics above
+CALL gds.linkPrediction.predict.stream({...}) YIELD node1, node2, score
+```
+
+Use `gds.fastRP.stream` to generate node embeddings as a feature input for ML pipelines:
+
+```cypher
+CALL gds.fastRP.stream({
+  nodeProjection: 'Person',
+  relationshipProjection: 'KNOWS',
+  embeddingDimension: 128
+}) YIELD nodeId, embedding
+RETURN nodeId, embedding
+```
+
+---
+
+## Workload → Procedure Reference
+
+| Workload                                        | Use                                                |
+|-------------------------------------------------|----------------------------------------------------|
+| Find any path between two nodes                 | Variable-length pattern `-[*1..N]->`               |
+| Find shortest unweighted path                   | `shortestPath()`                                   |
+| Find all shortest unweighted paths              | `allShortestPaths()`                               |
+| Find shortest weighted path                     | `apoc.algo.dijkstra`                               |
+| Find shortest weighted path with heuristic      | `apoc.algo.aStar`                                  |
+| Enumerate every simple path (bounded)           | `apoc.algo.allSimplePaths`                         |
+| BFS from a starting node, frontier-by-frontier  | `apoc.path.expandConfig({bfs: true})`             |
+| DFS spanning tree                               | `apoc.path.spanningTree({bfs: false})`             |
+| Pull subgraph N hops out                        | `apoc.path.subgraphNodes`                          |
+| Get neighbors at exactly N hops                 | `apoc.neighbors.byhop`                             |
+| Get neighbors within N hops                     | `apoc.neighbors.tohop`                             |
+| Rank nodes by influence                         | `apoc.algo.pageRank`                               |
+| Find brokers / structural holes                 | `apoc.algo.betweenness`                            |
+| Cluster nodes into communities                  | `apoc.algo.louvain` / `apoc.algo.labelPropagation` |
+| Find disconnected sub-graphs                    | `apoc.algo.wcc`                                    |
+| Score candidate edges (link prediction)         | `gds.linkPrediction.*`                             |
+| Generate node embeddings                        | `gds.fastRP.stream`                                |
+| Detect cycles                                   | `MATCH path = (n)-[*2..]->(n)` (DFS)               |
+| Find hierarchical descendants                   | `MATCH (root)-[:CONTAINS*]->(d)`                   |
+| Friend-of-friend recommendations                | Two-hop pattern + `NOT EXISTS` exclusion           |
+
+---
+
 ## Performance Tips
 
 1. **Limit path length** - Always specify max depth (`-[*1..5]->` not `-[*]->`)
 2. **Use relationship types** - Filter by type to reduce search space
 3. **Start from selective nodes** - Begin traversal from nodes with fewer connections
 4. **Use LIMIT** - Limit results for exploratory queries
+5. **Prefer `shortestPath` over variable-length when you only need one path** — BFS terminates as soon as the target is reached; variable-length DFS enumerates every match.
+6. **Reach for `apoc.path.expandConfig` over hand-rolled traversal** — its uniqueness modes prevent revisiting nodes / relationships, which a naive variable-length match does not.
+7. **Cache embeddings** — `gds.fastRP.stream` is deterministic for a fixed seed; persist results as node properties when running link prediction repeatedly.
 
 ---
 
 ## Related Documentation
 
 - **[Cypher Queries](cypher-queries.md)** - Complete Cypher guide
+- **[Cypher RAG Procedures](cypher-rag-procedures.md)** - Vector search + LLM integration
 - **[Vector Search](vector-search.md)** - Semantic search
 - **[Complete Examples](complete-examples.md)** - Full working examples
 
