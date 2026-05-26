@@ -7,23 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Latest Changes]
 
-- See `docs/latest-untagged.md` for the full untagged changelog with rationale and file cites.
+- See `docs/latest-untagged.md` for any post-1.1.2 untagged work.
+
+## [v1.1.2] - 2026-05-26
+
+Headline release: **Bolt over WebSocket** lands end-to-end so browser-based Neo4j drivers connect to NornicDB without a proxy, and **per-database BM25 + vector index master switches** ship as a first-class memory and warmup-cost lever for multi-tenant deployments. Three independently reported Cypher correctness regressions (mcp-neo4j-memory) are fixed with deeply-asserted parity against Neo4j 5.x DDL and Lucene wildcard semantics. A profile-led overhaul of the shortestPath traversal stack drops latency ~400× on the demo workload. No on-disk format changes; existing `v1.1.x` databases upgrade transparently.
 
 ### Added
 
-- **Per-database search index master switches and warming triggers.** Four new keys configure BM25 fulltext and vector ANN behavior independently per database:
+- **Bolt over WebSocket — browser drivers connect natively.** The Bolt port (`:7687` by default) now multiplexes four wire-level transports off one listener, sniffing the first 5 bytes of every accepted connection: `bolt://` (raw TCP, today's path), `bolt+s://` (TLS), `ws://` (WebSocket over plain TCP), `wss://` (TLS + WebSocket). The architecture mirrors Neo4j's `TransportSelectionHandler`: WebSocket frames carry the same Bolt magic + version negotiation + PackStream + chunked framing that raw TCP does, so existing drivers (Go, Java, Python, JavaScript browser, .NET) speak the same protocol on either transport. Operator-configurable knobs cover origin allowlist (default `*`), max message size (default 65 536 bytes, matching Neo4j's `MAX_WEBSOCKET_FRAME_SIZE`), ping/pong cadence (default 30 s ping / 60 s pong), pre-HELLO auth deadline, transport-sniff timeout, mTLS `ClientAuthMode` (`none`/`request`/`request_verify`/`require_verify`), `RequireTLS` (rejects every plaintext upgrade with the canonical Neo4j error), `WebSocketEnabled=false` (returns HTTP 426 on real WS upgrades while still serving the discovery probe to health checks), and operator-driven cert rotation via 5-second `tls.Config.GetCertificate` re-read with atomic-rename semantics. A plain `GET /` on the Bolt port returns a Neo4j-parity discovery response (200 OK + 5 required headers; empty body for Community parity, JSON describing the OAuth provider when `NORNICDB_AUTH_PROVIDER=oauth`). Phase-3 throughput, allocation, and round-trip benchmarks ship for all four transports; ws stays within a 5 % budget vs raw tcp and ws_tls within 0.3 % of tcp_tls.
+
+  Auth: HELLO `scheme=bearer`/`basic` always wins. As a deliberate exception for first-party browser clients the WS upgrade reads the `nornicdb_token` cookie and `Authorization: Bearer …` header; either is honored as an "implicit bearer" when HELLO is `scheme=none`. Cookie wins on conflict; raw TCP has no HTTP layer so the implicit path is unreachable there.
+
+  Configuration: 13 new `NORNICDB_BOLT_*` env vars (TLS cert/key/require/CA/auth-mode, WS enabled/origins/max-message/write-buffer/ping/pong, sniff/auth timeouts) plumbed through env → CLI → YAML. Documented in `docs/operations/configuration.md` (Bolt over WebSocket + TLS section), `docs/operations/environment-variables.md`, `docs/user-guides/connecting-bolt.md` (Neo4j-compatible scheme table for every official driver), and `pkg/bolt/README.md`. Metric schema migrated: `bolt_connections_active` becomes a `GaugeVec`, `bolt_connections_total` gains a closed-enum `transport` label (cardinality 3 → 12), plus new `bolt_connections_rejected_total{reason}` and `bolt_websocket_oversized_total` counters. `dashboards`/Grafana dashboards continue to work; queries that filtered only on `result` should be updated to also project `transport`.
+
+- **NornicDB browser UI uses Bolt over WebSocket end-to-end.** The embedded admin UI swapped its HTTP `/tx/commit` Cypher transport for the official `neo4j-driver` browser build over `ws://` / `wss://`, configured automatically from the discovery response. Same-origin `nornicdb_token` cookie carries auth into every query so the UI's executeCypher path is one network round trip with no token-juggling JavaScript. Vite plugins (`neo4jBrowserChannelPlugin`, `nodeShimPlugin`) wire the driver's browser channel correctly under Vite 8 / Rolldown. The HTTP server's UI handler now serves SPA routes with trailing slashes (`/databases/`) directly instead of returning HTTP 400 — refreshing on any nested route works.
+
+- **Per-database search index master switches and warming triggers.** Four new orthogonal keys configure BM25 fulltext and vector ANN behavior independently per database:
   - `NORNICDB_SEARCH_BM25_ENABLED` (boolean, default `true`) — master switch for BM25 fulltext search.
   - `NORNICDB_SEARCH_BM25_WARMING` (enum: `startup`|`lazy`, default `startup`) — eager build at boot or deferred until first query.
   - `NORNICDB_SEARCH_VECTOR_ENABLED` (boolean, default `true`) — master switch for every vector search strategy (HNSW, IVF-HNSW, brute-force, GPU, Metal, Qdrant pass-through). When false, node embeddings are NOT iterated into the in-memory ANN substrate — the strongest available memory-pressure lever.
   - `NORNICDB_SEARCH_VECTOR_WARMING` (enum: `startup`|`lazy`, default `startup`).
 
-  Defaults reproduce today's behaviour; existing deployments need no change. Configurable via env, CLI flags (`--search-bm25-enabled`, etc.), `nornicdb.yaml` global `memory:` block, and yaml `databases:` map for per-database overrides. Runtime overrides via `PUT /admin/databases/{name}/config` always win over global defaults in **both directions** (per-DB `true` enables a globally-disabled index; per-DB `false` disables a globally-enabled one). Lazy-warming is a synchronous-wait contract: the first inbound search request from any entry point (HTTP, Bolt, GraphQL, gRPC, Cypher procedures) blocks inside `Service.EnsureWarm` until the build completes; concurrent first-readers all wait on the same `sync.Once`. The build runs in the DB's long-lived context so a request that times out during the wait does NOT abort the build.
+  Defaults reproduce today's behavior; existing deployments need no change. Configurable via env, CLI flags (`--search-bm25-enabled`, etc.), `nornicdb.yaml` global `memory:` block, and yaml `databases:` map for per-database overrides. Runtime overrides via `PUT /admin/databases/{name}/config` always win over global defaults in **both directions** (per-DB `true` enables a globally-disabled index; per-DB `false` disables a globally-enabled one). Lazy-warming is a synchronous-wait contract: the first inbound search request from any entry point (HTTP, Bolt, GraphQL, gRPC, Cypher procedures) blocks inside `Service.EnsureWarm` until the build completes; concurrent first-readers all wait on the same `sync.Once`. The build runs in the DB's long-lived context so a request that times out during the wait does NOT abort the build.
 
   Migration: zero. Documented in [`docs/operations/configuration.md#per-database-search-index-control`](docs/operations/configuration.md), [`docs/operations/low-memory-mode.md`](docs/operations/low-memory-mode.md), [`docs/user-guides/hybrid-search.md`](docs/user-guides/hybrid-search.md), and the openapi spec. See `docs/plans/per-database-search-index-flags-plan.md` for design context.
 
-- **`db.index.vector.queryNodes` returns empty results with WARN log on vector-disabled databases** instead of erroring. Composite Cypher pipelines that gracefully handle empty vector results continue to succeed; operators see the misconfiguration in `subsystem=vector_search` log lines.
+- **Lucene wildcard parity for fulltext indexes.** `db.index.fulltext.queryNodes` and `db.index.fulltext.queryRelationships` accept all three Lucene wildcard shapes:
+  - `*` — `MatchAllDocsQuery`; every document in the index.
+  - `*:*` — Solr-style equivalent of `*`.
+  - `<prop>:*` — field-presence query; every doc that has a non-empty value for the named property.
+
+  Each shape honors the index's declared scope (label list for nodes, relationship-type list for edges) and declared property allowlist. An undeclared field returns empty (matching Neo4j-Lucene posting-list semantics). The previous behavior — wildcard queries returning 0 rows or, conversely, returning every node regardless of label scope — is fixed.
+
+- **Relationship-scoped fulltext indexes.** `CREATE FULLTEXT INDEX <name> [IF NOT EXISTS] FOR ()-[r:Type]-() ON EACH [r.prop1, r.prop2]` (Neo4j 5.x DDL form) is now supported. `db.index.fulltext.queryRelationships('idx', '...')` scans only relationships whose type matches the index's declared scope, instead of every edge in the graph. Persistence is forwards/backwards compatible: the new `RelationshipTypes` schema field uses `omitempty`, so old binaries reading new files see no extra key, and new binaries reading old files see an empty slice (which falls back to the legacy unscoped behavior). No on-disk schema-version bump.
+
+- **`/cyber` demo route — cyber-physical graph visualization.** Interactive 3D visualization seeded with sectors, hyperlanes, and traversable paths against a `cyber_demo` database, exercising the same hot-path Cypher cookbook as `/demo` (UnwindSimpleMergeBatch + UnwindMultiMatchCreateBatch). Pinned for benchmark and operator-demo scenarios.
+
+### Changed
+
+- **`shortestPath` traversal latency cut ~400× on the demo workload (M3 Max, ~1 000 nodes / ~5 000 edges).** Profile-led cleanup spanning storage, Cypher, and UI:
+  - `AsyncEngine` adds a per-node inverted index over `edgeCache` so `GetOutgoingEdges` / `GetIncomingEdges` run in O(degree) instead of O(total cached edges). The BFS-frontier full-cache scan that scaled with total seeded edges is gone.
+  - `BadgerEngine` adds an edge-body cache and per-node adjacency-ID cache. BFS-style reads on a stable graph skip Badger entirely after the first visit. Cache returns shared pointers (read-only contract) so repeated hits don't pay copyEdge.
+  - New `AdjacentEdgesEngine` capability fetches both directions in a single view txn; plumbed through `AsyncEngine`, `NamespacedEngine`, and `WALEngine`.
+  - `NamespacedEngine.toUserEdge` / `toUserNode` drop a deep-copy branch; all `Get*Edges` callers treat results read-only and clone via `CopyNode`/`CopyEdge` before mutating.
+  - Cypher `shortestPath` BFS now uses parent-pointer reconstruction instead of per-neighbor `GetNode` during traversal; one `BatchGetNodes` at the end materializes the path. Calls `GetAdjacentEdges` when the storage chain supports it.
+  - Cypher `findNodeByPattern` consults `SchemaManager.PropertyIndexLookup` before falling back to a label scan (mirrors `merge.go`).
+
+  Cumulative result on the in-process bench: warm bench 14.5 ms / 156K allocs → 36 µs / 229 allocs; latency mean ~12 ms → 874 µs; latency p99 ~26 ms → 2.2 ms.
+
+- **Strict-typed property round-trip preserved end-to-end.** A long-standing widening regression — caller writes `[]float64` / `[]string` / `[]int64`, storage hands back `[]interface{}` on every read — is fixed. The msgpack property codec inspects array headers and decodes homogeneous arrays into their declared concrete slice types; mixed arrays still fall back to `[]interface{}`. Maps recurse the same way. The Cypher path's `substituteParams` short-circuits typed list parameters (`$rows = []float64`) so they stay as `$name` references through the parser instead of being stringified into Cypher list literals (which forced re-decode as `[]interface{}`). Threaded `ctx` through ~70 expression-evaluator functions across binding-where, case, comparison, operators, math, traversal, link-prediction, knowledge-policy, vector procs, and APOC helpers so `$param` references resolve at evaluate time inside `reduce()`, list comprehensions, `WHERE`, and every other expression context — no widening, no re-parse.
+
+- **`db.index.vector.queryNodes` returns empty results with a WARN log on vector-disabled databases** instead of erroring or instantiating a fresh enabled service that bypasses the operator's flag. Composite Cypher pipelines that gracefully handle empty vector results continue to succeed; operators see the misconfiguration in `subsystem=vector_search` log lines.
 
 - **Qdrant gRPC bridge honors the per-DB vector master switch.** External Qdrant clients querying a database with `NORNICDB_SEARCH_VECTOR_ENABLED=false` see a deterministic structured error rather than a service whose ANN substrate isn't populated.
+
+### Fixed
+
+- **`mcp-neo4j-memory` regressions — three independently reproducible Cypher correctness defects resolved.**
+
+  1. **Map-parameter property access stored as literal text.** `WITH $entity AS entity MERGE (e:Memory {name: entity.name})` previously stored the literal string `"{name:'Alice', type:'Person'}.name"` instead of evaluating `entity.name`. The WITH-binding substitution treated `entity.<key>` as a standalone identifier and replaced just `entity`, leaving an orphaned `.name` suffix. Fixed by expanding `<ident>.<key>` into the property's Cypher literal value before the standalone-identifier replacer runs. Token boundary checks (word / underscore / dot) keep unrelated identifiers untouched. The same pattern in `UNWIND [$r] AS r MATCH (a),(b) WHERE a.name = r.source AND b.name = r.target MERGE (a)-[:REL]->(b)` now matches and creates the expected edge.
+
+  2. **Aggregating RETURN after CALL…YIELD…WITH…WHERE returned 0 rows.** A bare `RETURN collect(...)` is required by Cypher to produce exactly one row even when the WHERE filters every input. The `MATCH-WITH-RETURN` aggregation path looked up `cr.values["entity.name"]` (a literal string keyed by alias) and silently produced an empty list when `collect(entity.name)` ran over it. New `resolveInnerForRow` evaluates each aggregate's inner expression three ways — bare alias, `alias.property` against a stored `*storage.Node`, or general expression with WITH-bound nodes as context — and applies uniformly to `count`, `sum`, and `collect`. WITH-followed-by-WHERE-followed-by-aggregating-RETURN now produces exactly one row holding the aggregation's identity value (`collect → []`, `count → 0`).
+
+  3. **`CALL dbms.components()` reported hard-coded "1.0.0".** Wired to `pkg/buildinfo.Version()` (which loads from the embedded `VERSION` file at build time). Same fix applied to `dbms.listConfig`'s `nornicdb.version` row. `cypher-shell --version`-style probes now see the actual running binary version.
+
+- **Cypher `SET` errors no longer silently swallowed.** A conflict-rejected `UpdateNode` / `UpdateEdge` previously looked like a successful SET to `ExecuteCypher` callers — the SET-RETURN row carried the pre-update state on disk while the executor reported success. Errors now propagate so MVCC commit conflicts surface as loud query failures instead of silent data loss. Paired with: `RebuildTemporalIndexes` + `RebuildMVCCHeads` moved from a background task into the synchronous tail of `Open()` so first-query writes can't race a startup head-rewrite that clears the entire `prefixMVCCNodeHead` range mid-commit.
+
+- **DROP INDEX now tears down per-property vector data.** Previously `DROP INDEX <name>` only removed the schema entry, leaving per-property vector data orphaned in the in-memory `vectorIndex` / HNSW / cluster substrates. A subsequent `CREATE VECTOR INDEX` with the same name appeared to "do nothing" because the orphaned state shadowed the new one. New `search.Service.RemovePropertyVectorIndex` tears the in-memory state down; `executeDropIndex` calls it before returning so a recreate from scratch is clean.
+
+- **WAL chunk recovery now batches snapshot restore.** `RecoverWithTransactions` and `RecoverFromWALWithResult` were calling `BulkCreateNodes` / `BulkCreateEdges` with the entire snapshot in one go, exhausting Badger's per-transaction write budget on snapshots above ~10 K nodes/edges. New `BulkCreateNodesForRecovery` / `BulkCreateEdgesForRecovery` chunk the restore into transaction-sized batches.
+
+- **Search-flag precedence honored end-to-end.** Three independent gaps in the v1.1.1 search-flag contract caused operator-set values to be silently dropped at startup:
+  1. `cmd/nornicdb/runServe` was hand-copying a subset of `cfg` fields into a fresh `nornicdb.DefaultConfig()`; the four `Search*` fields were missing from the copy block, so env+CLI values landed in `cfg` but never reached `dbConfig`. `dbConfig` is now an alias of `cfg` so any field added to `Config` flows through automatically.
+  2. `nornicdb.Open` warmed search indexes in a background goroutine that raced `server.New`'s `SetDbSearchFlagsResolver`. When the resolver was nil at warmup time, default-DB warmup fell through to global defaults instead of per-DB overrides. New `Config.DeferSearchWarmup` + `db.MarkSearchWarmupReady` gate the warmup until the resolver is installed; `pkg/server` opts in.
+  3. `applyEnvVars` unconditionally wrote `(true, "startup")` before checking the env var, breaking `LoadFromFile`'s precedence ladder — a YAML file setting `search_bm25_enabled: false` was silently overwritten when the env var was unset. The env path now only writes when the var is actually present.
+
+  Operators who set `NORNICDB_SEARCH_BM25_ENABLED=false` (or the CLI / YAML equivalents) now see the flag honored from the first warmup line in the log.
+
+- **Transactional `MATCH … MERGE` correctly routes before `CREATE`.** A regression where a `MERGE` inside a transaction containing a preceding `MATCH` was being dispatched to the `CREATE` path instead of the merge path is fixed. The dispatcher now consults `MERGE` keywords ahead of `CREATE`.
+
+### Internal
+
+- **38 deeply-asserted regression tests added** across `pkg/cypher` (13 in `mcp_memory_bugs_test.go` covering every shape from the bug report plus relationship-side parity), `pkg/storage` (6 in `schema_fulltext_relationship_test.go` proving forward + backward + idempotent persistence), `pkg/cypher/demo_shortest_path_bench_test.go` (latency distribution + three benchmarks), `pkg/storage/async_engine_edge_index_test.go` (edge-cache inverted index across CRUD + flush + bulk paths), `pkg/storage/async_engine_label_index_test.go` (labelIndex flush eviction, `GetNodesByLabel` cache+engine merge), and the search-flag suites (`pkg/search/index_flags_test.go` and `pkg/server/server_search_flags_test.go`).
+- **CI: storage tests split into smaller test groups** so the runner doesn't exceed memory limits on shared CI hardware.
+- **Bolt-side benchmarks**: `BenchmarkBolt_StreamRecords_EndToEnd_*` plus per-transport variants (`tcp`, `tcp_tls`, `ws`, `ws_tls`) ship as part of the regression suite.
+
+### Documentation
+
+- **`docs/user-guides/connecting-bolt.md`** — driver-by-driver connecting guide for the four Bolt-over-WebSocket transports plus driver-side aliases (`bolt+ssc://`, `neo4j://`, `neo4j+s://`, `neo4j+ssc://`). Per-driver code snippets (Java, Python, JavaScript browser, JavaScript Node, .NET, Go).
+- **`docs/user-guides/graph-traversal.md`** — full Memgraph-style traversal vocabulary documented with the workload→procedure reference table: BFS / DFS via `apoc.path.expandConfig`, weighted shortest path via `apoc.algo.dijkstra` and `apoc.algo.aStar`, all-simple-paths via `apoc.algo.allSimplePaths`, neighborhood queries via `apoc.neighbors.byhop`/`tohop`, subgraph extraction via `apoc.path.subgraphNodes`, centrality (PageRank, betweenness, closeness), community detection (Louvain, label propagation, weakly connected components), and the GDS link-prediction family (`commonNeighbors`, `adamicAdar`, `jaccard`, `preferentialAttachment`, `resourceAllocation`, `predict`) plus `gds.fastRP.stream` for node embeddings.
+- **`docs/plans/bolt-over-websocket-plan.md`** — full implementation plan with phasing, test coverage matrix, and Neo4j-compatibility notes for the WS transport landing.
+- **`docs/plans/operator-declared-graphql-schema-plan.md`** — design plan for operator-declared GraphQL schema (read-only with relationship traversal, SDL stored in system DB, no auto-inference). Implementation deferred; plan committed as the source of truth for the future cut.
+
+### Technical Details
+
+- **Range covered**: `v1.1.1..main` (31 commits)
+- **Primary focus areas**: Bolt-over-WebSocket transport multiplexing with full TLS / origin / mTLS / cert-rotation surface, neo4j-driver browser-build integration in the embedded UI, per-DB search index master switches with synchronous lazy-warming, mcp-neo4j-memory Cypher parity (map-param property access, fulltext label/type scope, Lucene wildcard family, post-YIELD aggregation), shortestPath traversal latency reduction via per-node edge-cache indexes and parent-pointer BFS, typed property round-trip preservation through msgpack codec + Cypher param substitution, deterministic DROP INDEX teardown of vector substrates, WAL recovery batching for large snapshots.
 
 ## [v1.1.1] - 2026-05-19
 
