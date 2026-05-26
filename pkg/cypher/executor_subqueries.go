@@ -2857,6 +2857,72 @@ func containsStandaloneIdentifier(expr, ident string) bool {
 
 // replaceStandaloneCypherIdentifier replaces identifier tokens that are not part of
 // a dotted access chain (e.g. preserves tt.translationId when replacing translationId).
+// expandMapMemberAccess rewrites every occurrence of `<ident>.<key>`
+// inside query into the Cypher literal of mapVal[key], leaving every
+// other use of <ident> alone for the caller's standalone-replacement
+// step. This is the per-token analog of property access on a bound
+// map value: WITH $m AS m ... m.name must evaluate to mapVal["name"],
+// not stringify into "{...}.name". When key is not present in mapVal,
+// the access expands to `null` (Cypher semantics for missing map keys).
+//
+// The scan respects token boundaries: a previous-character word /
+// underscore / dot disqualifies the match, so identifiers that happen
+// to share a suffix (e.g. `prefix_m.name` or `obj.m.name`) are left
+// alone.
+func expandMapMemberAccess(query, ident string, mapVal map[string]interface{}) string {
+	if ident == "" || query == "" || len(mapVal) == 0 {
+		return query
+	}
+	isWord := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+	}
+
+	var out strings.Builder
+	out.Grow(len(query))
+	i := 0
+	for i < len(query) {
+		j := strings.Index(query[i:], ident)
+		if j < 0 {
+			out.WriteString(query[i:])
+			break
+		}
+		j += i
+		k := j + len(ident)
+
+		prevWord := j > 0 && (isWord(query[j-1]) || query[j-1] == '.')
+		// Must be followed by '.' for a member-access; otherwise leave to
+		// the standalone-identifier replacer.
+		if prevWord || k >= len(query) || query[k] != '.' {
+			out.WriteString(query[i:k])
+			i = k
+			continue
+		}
+		// Read the property key (longest run of word characters after `.`).
+		keyStart := k + 1
+		keyEnd := keyStart
+		for keyEnd < len(query) && isWord(query[keyEnd]) {
+			keyEnd++
+		}
+		if keyEnd == keyStart {
+			// `.` followed by non-word: not a property access, skip.
+			out.WriteString(query[i:k])
+			i = k
+			continue
+		}
+		key := query[keyStart:keyEnd]
+		out.WriteString(query[i:j])
+		propVal, ok := mapVal[key]
+		if !ok {
+			out.WriteString("null")
+		} else {
+			out.WriteString(valueToCypherLiteral(propVal))
+		}
+		i = keyEnd
+	}
+
+	return out.String()
+}
+
 func replaceStandaloneCypherIdentifier(query, ident, replacement string) string {
 	if ident == "" || query == "" || ident == replacement {
 		return query

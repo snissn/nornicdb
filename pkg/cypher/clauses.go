@@ -160,6 +160,39 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 	if nextClauseIdx < len(cypher) {
 		remainder := strings.TrimSpace(cypher[nextClauseIdx:])
 
+		// WITH x WHERE ... RETURN ... — the WHERE filters the (single)
+		// binding row before RETURN sees it. Cypher semantics: when the
+		// WHERE evaluates to false, RETURN runs against an empty row set
+		// (so a bare aggregating RETURN like collect() still produces
+		// exactly one row holding an empty list, never zero rows).
+		whereFiltered := false
+		if strings.HasPrefix(strings.ToUpper(remainder), "WHERE ") {
+			afterWhereStart := len("WHERE ")
+			endIdx := len(remainder)
+			for _, kw := range []string{"RETURN", "WITH", "ORDER", "SKIP", "LIMIT"} {
+				if idx := findKeywordIndex(remainder[afterWhereStart:], kw); idx >= 0 {
+					if afterWhereStart+idx < endIdx {
+						endIdx = afterWhereStart + idx
+					}
+				}
+			}
+			whereExpr := strings.TrimSpace(remainder[afterWhereStart:endIdx])
+			remainder = strings.TrimSpace(remainder[endIdx:])
+			passes, err := e.evaluateWithWhere(ctx, whereExpr, boundVars)
+			if err != nil {
+				return nil, err
+			}
+			if !passes {
+				whereFiltered = true
+				// Clear bound variables so collect/count etc. operate on
+				// an empty row set. Aggregations still produce a single
+				// row; non-aggregations produce zero rows.
+				for k := range boundVars {
+					delete(boundVars, k)
+				}
+			}
+		}
+
 		// If it's a RETURN clause, evaluate it with the bound variables
 		if strings.HasPrefix(strings.ToUpper(remainder), "RETURN") {
 			returnExpr := strings.TrimSpace(remainder[6:])
@@ -169,6 +202,32 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 			returnColumns := make([]string, len(returnItems))
 			returnValues := make([]interface{}, len(returnItems))
 
+			// Build the per-row context. Pass *storage.Node and
+			// *storage.Edge bindings through the typed maps so
+			// `entity.name`, `labels(entity)`, `collect(entity.name)`
+			// resolve via the expression evaluator's normal path.
+			// Without this, a bound *storage.Node was being stringified
+			// to "%v" (the pointer address) and re-injected into the
+			// expression, producing garbage that aggregations silently
+			// dropped.
+			nodes := make(map[string]*storage.Node)
+			rels := make(map[string]*storage.Edge)
+			scalarBindings := make(map[string]interface{})
+			for varName, varVal := range boundVars {
+				switch v := varVal.(type) {
+				case *storage.Node:
+					if v != nil {
+						nodes[varName] = v
+					}
+				case *storage.Edge:
+					if v != nil {
+						rels[varName] = v
+					}
+				default:
+					scalarBindings[varName] = varVal
+				}
+			}
+
 			for i, item := range returnItems {
 				if item.alias != "" {
 					returnColumns[i] = item.alias
@@ -176,40 +235,66 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 					returnColumns[i] = item.expr
 				}
 
+				// Aggregating RETURN against an empty row set still
+				// produces a single row with the aggregation's identity
+				// value (collect → empty list, count → 0). Non-aggregating
+				// RETURN against an empty row set produces zero rows; we
+				// handle that by returning an empty rows slice below.
+				if whereFiltered {
+					if isAggregateExpression(item.expr) {
+						returnValues[i] = aggregateIdentity(item.expr)
+					} else {
+						returnValues[i] = nil
+					}
+					continue
+				}
+
 				// First check if it's a direct reference to a bound variable
 				if val, ok := boundVars[item.expr]; ok {
 					returnValues[i] = val
-				} else {
-					// Substitute bound variables in the expression
-					expr := item.expr
-					for varName, varVal := range boundVars {
-						// Replace the variable name in the expression
-						// Handle list comprehension: [x IN varName WHERE ...] -> [x IN [1,2,3] WHERE ...]
-						if strings.Contains(expr, varName) {
-							// Convert value to string representation
-							var replacement string
-							switch v := varVal.(type) {
-							case []interface{}:
-								parts := make([]string, len(v))
-								for j, elem := range v {
-									switch e := elem.(type) {
-									case string:
-										parts[j] = fmt.Sprintf("'%s'", e)
-									default:
-										parts[j] = fmt.Sprintf("%v", e)
-									}
-								}
-								replacement = "[" + strings.Join(parts, ", ") + "]"
-							case string:
-								replacement = fmt.Sprintf("'%s'", v)
-							default:
-								replacement = fmt.Sprintf("%v", v)
-							}
-							expr = strings.ReplaceAll(expr, varName, replacement)
-						}
-					}
-					returnValues[i] = e.evaluateExpressionWithContext(ctx, expr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+					continue
 				}
+
+				expr := item.expr
+				// Scalar bindings get the existing literal-substitution
+				// treatment; node/edge bindings flow through the typed
+				// maps above so the evaluator handles them natively.
+				for varName, varVal := range scalarBindings {
+					if !strings.Contains(expr, varName) {
+						continue
+					}
+					var replacement string
+					switch v := varVal.(type) {
+					case []interface{}:
+						parts := make([]string, len(v))
+						for j, elem := range v {
+							switch e := elem.(type) {
+							case string:
+								parts[j] = fmt.Sprintf("'%s'", e)
+							default:
+								parts[j] = fmt.Sprintf("%v", e)
+							}
+						}
+						replacement = "[" + strings.Join(parts, ", ") + "]"
+					case string:
+						replacement = fmt.Sprintf("'%s'", v)
+					case nil:
+						replacement = "null"
+					default:
+						replacement = fmt.Sprintf("%v", v)
+					}
+					expr = strings.ReplaceAll(expr, varName, replacement)
+				}
+				returnValues[i] = e.evaluateExpressionWithContext(ctx, expr, nodes, rels)
+			}
+
+			// Non-aggregating WHERE-filtered case: zero rows. Aggregating
+			// case (or unfiltered): one row.
+			if whereFiltered && !rowHasAggregate(returnItems) {
+				return &ExecuteResult{
+					Columns: returnColumns,
+					Rows:    [][]interface{}{},
+				}, nil
 			}
 
 			return &ExecuteResult{
@@ -222,6 +307,21 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 		// e.g., WITH [[1,2],[3,4]] AS matrix UNWIND matrix ... -> UNWIND [[1,2],[3,4]] ...
 		substitutedRemainder := remainder
 		for varName, varVal := range boundVars {
+			// Map-valued bindings: expand `m.<key>` into the property's
+			// literal value FIRST, so a downstream MATCH/CREATE/MERGE/
+			// WHERE that does m.name doesn't see the literal map text
+			// "{name:'hello'}.name". The standalone-identifier path below
+			// then handles bare uses of `m`. This is the fix for the
+			// mcp-neo4j-memory Bug 1 (May 2026): map-param property access
+			// was being stored as the literal source string instead of
+			// being evaluated.
+			switch v := varVal.(type) {
+			case map[string]interface{}:
+				substitutedRemainder = expandMapMemberAccess(substitutedRemainder, varName, v)
+			case map[interface{}]interface{}:
+				substitutedRemainder = expandMapMemberAccess(substitutedRemainder, varName, normalizeInterfaceMap(v))
+			}
+
 			switch v := varVal.(type) {
 			case []interface{}:
 				parts := make([]string, len(v))
@@ -274,6 +374,106 @@ func normalizeInterfaceMap(input map[interface{}]interface{}) map[string]interfa
 		output[key] = v
 	}
 	return output
+}
+
+// evaluateWithWhere evaluates a WHERE expression against WITH-bound
+// variables. *storage.Node / *storage.Edge bindings flow through the
+// typed maps so label predicates (entity:Memory), property access
+// (entity.name), and built-in functions (labels(entity), type(rel))
+// resolve via the expression evaluator's normal path. Scalar bindings
+// are substituted as Cypher literals before evaluation, matching the
+// behavior of bare $param references.
+//
+// Returns true when the predicate evaluates true, false otherwise.
+// A non-boolean result (e.g., null) is treated as false — Cypher's
+// three-valued-logic short-circuit.
+func (e *StorageExecutor) evaluateWithWhere(ctx context.Context, whereExpr string, boundVars map[string]interface{}) (bool, error) {
+	expr := strings.TrimSpace(whereExpr)
+	if expr == "" {
+		return true, nil
+	}
+
+	nodes := make(map[string]*storage.Node)
+	rels := make(map[string]*storage.Edge)
+	for varName, varVal := range boundVars {
+		switch v := varVal.(type) {
+		case *storage.Node:
+			if v != nil {
+				nodes[varName] = v
+			}
+		case *storage.Edge:
+			if v != nil {
+				rels[varName] = v
+			}
+		default:
+			rep := valueToCypherLiteral(varVal)
+			expr = strings.ReplaceAll(expr, varName, rep)
+		}
+	}
+
+	result := e.evaluateExpressionWithContext(ctx, expr, nodes, rels)
+	switch v := result.(type) {
+	case bool:
+		return v, nil
+	case nil:
+		return false, nil
+	default:
+		return false, nil
+	}
+}
+
+// aggregateFnNames lists the aggregating function names recognized
+// by isAggregateExpression / aggregateIdentity. The set matches what
+// the rest of the executor (functions.go) treats as aggregates.
+var aggregateFnNames = []string{"collect", "count", "sum", "avg", "min", "max", "stdev", "stdevp"}
+
+// isAggregateExpression reports whether expr is an aggregating Cypher
+// expression at the top level. Recognizes the canonical forms
+// `collect(...)`, `count(...)`, etc., case-insensitively.
+func isAggregateExpression(expr string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(expr))
+	for _, fn := range aggregateFnNames {
+		if strings.HasPrefix(trimmed, fn+"(") || strings.HasPrefix(trimmed, fn+" (") {
+			return true
+		}
+	}
+	return false
+}
+
+// aggregateIdentity returns the value an aggregating expression
+// produces when applied to an empty row set. Cypher specifies:
+//
+//	collect(...) → []
+//	count(...)   → 0
+//	sum(...)     → 0
+//	avg(...)     → null
+//	min(...)     → null
+//	max(...)     → null
+//
+// stdev / stdevp follow the avg convention (null on empty input).
+func aggregateIdentity(expr string) interface{} {
+	trimmed := strings.ToLower(strings.TrimSpace(expr))
+	switch {
+	case strings.HasPrefix(trimmed, "collect("), strings.HasPrefix(trimmed, "collect ("):
+		return []interface{}{}
+	case strings.HasPrefix(trimmed, "count("), strings.HasPrefix(trimmed, "count ("):
+		return int64(0)
+	case strings.HasPrefix(trimmed, "sum("), strings.HasPrefix(trimmed, "sum ("):
+		return int64(0)
+	}
+	return nil
+}
+
+// rowHasAggregate reports whether any return item is an aggregating
+// expression. Used to decide whether a WHERE-filtered WITH should emit
+// one row (with aggregation identity values) or zero rows.
+func rowHasAggregate(items []returnItem) bool {
+	for _, item := range items {
+		if isAggregateExpression(item.expr) {
+			return true
+		}
+	}
+	return false
 }
 
 func mapToCypherLiteral(m map[string]interface{}) string {

@@ -1559,9 +1559,39 @@ func parsePropertyType(typeName string) (storage.PropertyType, error) {
 //
 // Supported syntax:
 //
-//	CREATE FULLTEXT INDEX index_name IF NOT EXISTS
+//	CREATE FULLTEXT INDEX index_name [IF NOT EXISTS]
 //	FOR (n:Label) ON EACH [n.prop1, n.prop2]
+//
+//	CREATE FULLTEXT INDEX index_name [IF NOT EXISTS]
+//	FOR ()-[r:RelType]-() ON EACH [r.prop1, r.prop2]
+//
+// The relationship form binds an index to a relationship type (or
+// types — Neo4j allows `:R1|R2`); the runtime then scopes
+// db.index.fulltext.queryRelationships to those types instead of
+// scanning every edge.
 func (e *StorageExecutor) executeCreateFulltextIndex(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	schema := e.storage.GetSchema()
+	if schema == nil {
+		return nil, fmt.Errorf("schema manager not available")
+	}
+
+	// Relationship form first: the regex is more specific (requires the
+	// `()-[...]-()` shape), so a node-form query won't accidentally
+	// match it.
+	if matches := fulltextRelIndexPattern.FindStringSubmatch(cypher); matches != nil {
+		indexName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		propertiesStr := matches[4]
+		properties := e.parseQualifiedIndexProperties(propertiesStr)
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("no properties found in fulltext index definition")
+		}
+		if err := schema.AddFulltextRelationshipIndex(indexName, []string{relType}, properties); err != nil {
+			return nil, fmt.Errorf("failed to add fulltext relationship index: %w", err)
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
 	// Pattern: CREATE FULLTEXT INDEX name IF NOT EXISTS FOR (n:Label) ON EACH [n.prop1, n.prop2]
 	// Uses pre-compiled pattern from regex_patterns.go
 	matches := fulltextIndexPattern.FindStringSubmatch(cypher)
@@ -1582,10 +1612,6 @@ func (e *StorageExecutor) executeCreateFulltextIndex(ctx context.Context, cypher
 		if len(properties) == 0 {
 			return nil, fmt.Errorf("no properties found in fulltext index definition")
 		}
-		schema := e.storage.GetSchema()
-		if schema == nil {
-			return nil, fmt.Errorf("schema manager not available")
-		}
 		if err := schema.AddFulltextIndex(indexName, []string{label}, properties); err != nil {
 			return nil, fmt.Errorf("failed to add fulltext index: %w", err)
 		}
@@ -1601,12 +1627,6 @@ func (e *StorageExecutor) executeCreateFulltextIndex(ctx context.Context, cypher
 
 	if len(properties) == 0 {
 		return nil, fmt.Errorf("no properties found in fulltext index definition")
-	}
-
-	// Add fulltext index
-	schema := e.storage.GetSchema()
-	if schema == nil {
-		return nil, fmt.Errorf("schema manager not available")
 	}
 
 	if err := schema.AddFulltextIndex(indexName, []string{label}, properties); err != nil {

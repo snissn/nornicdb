@@ -521,6 +521,49 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 		// Single aggregated row
 		row := make([]interface{}, len(returnItems))
 
+		// resolveInnerForRow returns the value of the aggregate's inner
+		// expression for one row of computedRows. It handles three forms:
+		//   1. A bare alias (already in cr.values).
+		//   2. A property access on a node-bound alias (cr.values[alias]
+		//      is *storage.Node, expr is "alias.propname").
+		//   3. Anything else — evaluated through the expression evaluator
+		//      with the row's WITH-bound nodes/values as context.
+		// Returning (nil, false) for a missing value mirrors Cypher's
+		// "skip missing values in aggregations" semantic for collect /
+		// count(<expr>) / sum.
+		resolveInnerForRow := func(cr computedRow, expr string) (interface{}, bool) {
+			expr = strings.TrimSpace(expr)
+			if expr == "" {
+				return nil, false
+			}
+			// (1) bare alias
+			if v, ok := cr.values[expr]; ok {
+				return v, v != nil
+			}
+			// (2) alias.property
+			if dot := strings.Index(expr, "."); dot > 0 {
+				alias := expr[:dot]
+				if val, ok := cr.values[alias]; ok {
+					if node, isNode := val.(*storage.Node); isNode && node != nil {
+						propName := expr[dot+1:]
+						if pv, present := node.Properties[propName]; present {
+							return pv, pv != nil
+						}
+						return nil, false
+					}
+				}
+			}
+			// (3) general expression — feed nodes the evaluator can use.
+			nodes := make(map[string]*storage.Node)
+			for k, v := range cr.values {
+				if n, ok := v.(*storage.Node); ok && n != nil {
+					nodes[k] = n
+				}
+			}
+			result := e.evaluateExpressionWithContext(ctx, expr, nodes, nil)
+			return result, result != nil
+		}
+
 		for i, item := range returnItems {
 			inner := extractFuncInner(item.expr)
 
@@ -530,7 +573,7 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 				distinctInner := strings.TrimSpace(inner[8:]) // skip "DISTINCT"
 				seen := make(map[interface{}]bool)
 				for _, cr := range computedRows {
-					if val, ok := cr.values[distinctInner]; ok && val != nil {
+					if val, ok := resolveInnerForRow(cr, distinctInner); ok {
 						seen[fmt.Sprintf("%v", val)] = true
 					} else if cr.node != nil && distinctInner == nodePattern.variable {
 						seen[string(cr.node.ID)] = true
@@ -544,9 +587,7 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 				} else {
 					count := int64(0)
 					for _, cr := range computedRows {
-						if val, ok := cr.values[inner]; ok && val != nil {
-							count++
-						} else if cr.node != nil {
+						if _, ok := resolveInnerForRow(cr, inner); ok {
 							count++
 						}
 					}
@@ -558,18 +599,20 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 				var sumFloat float64
 				hasFloat := false
 				for _, cr := range computedRows {
-					if val, ok := cr.values[inner]; ok {
-						switch v := val.(type) {
-						case int64:
-							sumInt += v
-							sumFloat += float64(v)
-						case int:
-							sumInt += int64(v)
-							sumFloat += float64(v)
-						case float64:
-							hasFloat = true
-							sumFloat += v
-						}
+					val, ok := resolveInnerForRow(cr, inner)
+					if !ok {
+						continue
+					}
+					switch v := val.(type) {
+					case int64:
+						sumInt += v
+						sumFloat += float64(v)
+					case int:
+						sumInt += int64(v)
+						sumFloat += float64(v)
+					case float64:
+						hasFloat = true
+						sumFloat += v
 					}
 				}
 				if hasFloat {
@@ -579,12 +622,26 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 				}
 
 			case isAggregateFuncName(item.expr, "collect"):
-				var collected []interface{}
+				// collect(<expr>) accepts the full expression vocabulary:
+				// `collect(entity.name)`, `collect({name: entity.name})`,
+				// `collect(entity)`, etc. Evaluate each row's expression
+				// against the WITH-bound row context; null values are
+				// skipped per Cypher semantics. The result is always a
+				// list (never nil) so a bare aggregating RETURN against
+				// an empty input still produces one row with an empty
+				// list — never zero rows.
+				collected := []interface{}{}
 				for _, cr := range computedRows {
-					if val, ok := cr.values[inner]; ok {
+					if val, ok := resolveInnerForRow(cr, inner); ok {
 						collected = append(collected, val)
 					}
 				}
+				// Map-literal collect: collect({name: entity.name}) needs
+				// per-row evaluation of the literal because cr.values
+				// only carries scalar bindings keyed by alias. The
+				// resolveInnerForRow path above falls through to the
+				// expression evaluator, which handles the map literal
+				// correctly when the row's node is in scope.
 				row[i] = collected
 
 			default:

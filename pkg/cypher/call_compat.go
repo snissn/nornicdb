@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/orneryd/nornicdb/pkg/buildinfo"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -49,7 +50,7 @@ func (e *StorageExecutor) callDbmsListConfig() (*ExecuteResult, error) {
 	return &ExecuteResult{
 		Columns: []string{"name", "description", "value", "dynamic"},
 		Rows: [][]interface{}{
-			{"nornicdb.version", "NornicDB version", "1.0.0", false},
+			{"nornicdb.version", "NornicDB version", buildinfo.Version(), false},
 			{"nornicdb.bolt.enabled", "Bolt protocol enabled", true, false},
 			{"nornicdb.http.enabled", "HTTP API enabled", true, false},
 		},
@@ -89,51 +90,152 @@ func (e *StorageExecutor) callDbIndexFulltextListAvailableAnalyzers() (*ExecuteR
 	}, nil
 }
 
-// callDbIndexFulltextQueryRelationships searches relationships using fulltext index - Neo4j db.index.fulltext.queryRelationships()
+// callDbIndexFulltextQueryRelationships searches relationships using a
+// fulltext index — Neo4j db.index.fulltext.queryRelationships(). The
+// resolution mirrors the queryNodes path:
+//
+//   - Look up the named index in the schema.
+//   - Scope the edge scan to the index's declared RelationshipTypes
+//     (a backwards-compatible nil/empty slice means "every edge",
+//     matching pre-PR behavior so legacy databases keep working).
+//   - When the query is the Lucene match-all wildcard ("*" or "*:*"),
+//     return every in-scope edge with score 1.0.
+//   - Otherwise, substring-match the query against the index's
+//     declared Properties (or, when no properties are declared, every
+//     property — the legacy behavior).
+//
+// Returns one row per matching edge with columns [relationship, score].
 func (e *StorageExecutor) callDbIndexFulltextQueryRelationships(cypher string) (*ExecuteResult, error) {
-	// Extract query string from CALL statement
-	query := e.extractFulltextQuery(cypher)
-	if query == "" {
-		return &ExecuteResult{
-			Columns: []string{"relationship", "score"},
-			Rows:    [][]interface{}{},
-		}, nil
+	result := &ExecuteResult{
+		Columns: []string{"relationship", "score"},
+		Rows:    [][]interface{}{},
 	}
 
-	// Get all edges and search them
+	indexName, query := e.extractFulltextParams(cypher)
+	if query == "" {
+		return result, nil
+	}
+
+	// Look up the index's declared scope. Missing index, missing schema,
+	// or a node-only index (no relationship_types declared) all fall
+	// through to the unscoped scan so legacy queries keep working.
+	var targetTypes []string
+	var targetProperties []string
+	if schema := e.storage.GetSchema(); schema != nil {
+		if ftIdx, exists := schema.GetFulltextIndex(indexName); exists {
+			targetTypes = ftIdx.RelationshipTypes
+			targetProperties = ftIdx.Properties
+		}
+	}
+
 	edges, err := e.storage.AllEdges()
 	if err != nil {
 		return nil, err
 	}
 
 	lowerQuery := strings.ToLower(query)
-	results := [][]interface{}{}
+	wildcard := isFulltextWildcard(query)
+	presenceProp, isPresenceQuery := fulltextFieldPresenceQuery(query)
+
+	// If the query asks for `<prop>:*` against a field the index didn't
+	// declare, mirror Neo4j-Lucene: empty result set (no postings list).
+	if isPresenceQuery && len(targetProperties) > 0 && !containsString(targetProperties, presenceProp) {
+		return result, nil
+	}
 
 	for _, edge := range edges {
-		// Search in edge properties
-		for _, val := range edge.Properties {
-			if str, ok := val.(string); ok {
-				if strings.Contains(strings.ToLower(str), lowerQuery) {
-					results = append(results, []interface{}{
-						map[string]interface{}{
-							"_id":        string(edge.ID),
-							"_type":      edge.Type,
-							"_start":     string(edge.StartNode),
-							"_end":       string(edge.EndNode),
-							"properties": edge.Properties,
-						},
-						1.0, // score
-					})
-					break
-				}
+		if !matchesRelationshipTypes(edge, targetTypes) {
+			continue
+		}
+		if wildcard {
+			result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
+			continue
+		}
+		if isPresenceQuery {
+			if edgeHasNonEmptyProperty(edge, presenceProp) {
+				result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
 			}
+			continue
+		}
+		if edgePropertiesContain(edge, targetProperties, lowerQuery) {
+			result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
 		}
 	}
 
-	return &ExecuteResult{
-		Columns: []string{"relationship", "score"},
-		Rows:    results,
-	}, nil
+	return result, nil
+}
+
+// edgeHasNonEmptyProperty mirrors nodeHasNonEmptyProperty: the
+// `<prop>:*` Lucene field-presence query treats empty strings as
+// missing values.
+func edgeHasNonEmptyProperty(edge *storage.Edge, propName string) bool {
+	if edge == nil {
+		return false
+	}
+	val, ok := edge.Properties[propName]
+	if !ok || val == nil {
+		return false
+	}
+	if s, ok := val.(string); ok && s == "" {
+		return false
+	}
+	return true
+}
+
+// matchesRelationshipTypes reports whether edge.Type is in the
+// target list. An empty target list means "every type" — the legacy
+// behavior for indexes that don't carry a RelationshipTypes scope.
+func matchesRelationshipTypes(edge *storage.Edge, targetTypes []string) bool {
+	if len(targetTypes) == 0 {
+		return true
+	}
+	for _, t := range targetTypes {
+		if edge.Type == t {
+			return true
+		}
+	}
+	return false
+}
+
+// edgePropertiesContain reports whether any of the edge's declared
+// properties (or every property, when targetProperties is empty)
+// contains lowerQuery as a case-insensitive substring.
+func edgePropertiesContain(edge *storage.Edge, targetProperties []string, lowerQuery string) bool {
+	if len(targetProperties) > 0 {
+		for _, prop := range targetProperties {
+			val, ok := edge.Properties[prop]
+			if !ok {
+				continue
+			}
+			if str, ok := val.(string); ok {
+				if strings.Contains(strings.ToLower(str), lowerQuery) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, val := range edge.Properties {
+		if str, ok := val.(string); ok {
+			if strings.Contains(strings.ToLower(str), lowerQuery) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// edgeToMap returns the result-row map representation of an edge. Held
+// in one place so the queryRelationships scan and any future relationship
+// surface emit identical shapes.
+func edgeToMap(edge *storage.Edge) map[string]interface{} {
+	return map[string]interface{}{
+		"_id":        string(edge.ID),
+		"_type":      edge.Type,
+		"_start":     string(edge.StartNode),
+		"_end":       string(edge.EndNode),
+		"properties": edge.Properties,
+	}
 }
 
 // callDbIndexVectorQueryRelationships searches relationships using vector similarity - Neo4j db.index.vector.queryRelationships()

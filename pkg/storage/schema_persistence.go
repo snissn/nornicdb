@@ -182,12 +182,15 @@ func (sm *SchemaManager) exportDefinitionLocked() *SchemaDefinition {
 		for _, idx := range sm.fulltextIndexes {
 			labels := make([]string, len(idx.Labels))
 			copy(labels, idx.Labels)
+			relTypes := make([]string, len(idx.RelationshipTypes))
+			copy(relTypes, idx.RelationshipTypes)
 			props := make([]string, len(idx.Properties))
 			copy(props, idx.Properties)
 			def.FulltextIndexes = append(def.FulltextIndexes, FulltextIndex{
-				Name:       idx.Name,
-				Labels:     labels,
-				Properties: props,
+				Name:              idx.Name,
+				Labels:            labels,
+				RelationshipTypes: relTypes,
+				Properties:        props,
 			})
 		}
 		sort.Slice(def.FulltextIndexes, func(i, j int) bool {
@@ -412,16 +415,22 @@ func (sm *SchemaManager) replaceFromDefinitionLocked(def *SchemaDefinition) erro
 		}
 	}
 
-	// Fulltext indexes.
+	// Fulltext indexes. RelationshipTypes is omitempty in the on-disk
+	// JSON; databases written by older binaries (no relationship_types
+	// field) load with relTypes == nil, which the runtime treats as
+	// "node-scoped index" — backwards-compatible.
 	for _, idx := range def.FulltextIndexes {
 		labels := make([]string, len(idx.Labels))
 		copy(labels, idx.Labels)
+		relTypes := make([]string, len(idx.RelationshipTypes))
+		copy(relTypes, idx.RelationshipTypes)
 		props := make([]string, len(idx.Properties))
 		copy(props, idx.Properties)
 		sm.fulltextIndexes[idx.Name] = &FulltextIndex{
-			Name:       idx.Name,
-			Labels:     labels,
-			Properties: props,
+			Name:              idx.Name,
+			Labels:            labels,
+			RelationshipTypes: relTypes,
+			Properties:        props,
 		}
 	}
 

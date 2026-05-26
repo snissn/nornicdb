@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/orneryd/nornicdb/pkg/buildinfo"
 	"github.com/orneryd/nornicdb/pkg/convert"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -2974,10 +2975,15 @@ func (e *StorageExecutor) callDbConstraints() (*ExecuteResult, error) {
 }
 
 func (e *StorageExecutor) callDbmsComponents() (*ExecuteResult, error) {
+	// Wired to buildinfo so the reported version reflects the actual
+	// running binary. The previous hard-coded "1.0.0" caused
+	// CALL dbms.components() to under-report version on every release
+	// past 1.0.0 (bug reported May 2026 alongside the mcp-neo4j-memory
+	// regressions).
 	return &ExecuteResult{
 		Columns: []string{"name", "versions", "edition"},
 		Rows: [][]interface{}{
-			{"NornicDB", []string{"1.0.0"}, "community"},
+			{"NornicDB", []string{buildinfo.Version()}, "community"},
 		},
 	}, nil
 }
@@ -2985,10 +2991,14 @@ func (e *StorageExecutor) callDbmsComponents() (*ExecuteResult, error) {
 // NornicDB-specific procedures
 
 func (e *StorageExecutor) callNornicDbVersion() (*ExecuteResult, error) {
+	build := buildinfo.ShortCommit()
+	if build == "" {
+		build = "dev"
+	}
 	return &ExecuteResult{
 		Columns: []string{"version", "build", "edition"},
 		Rows: [][]interface{}{
-			{"1.0.0", "development", "community"},
+			{buildinfo.Version(), build, "community"},
 		},
 	}, nil
 }

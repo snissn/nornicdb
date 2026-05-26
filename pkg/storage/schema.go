@@ -476,10 +476,25 @@ type CompositeIndex struct {
 }
 
 // FulltextIndex represents a full-text search index.
+//
+// An index is scoped by EITHER Labels (a node-scoped index, declared
+// via CREATE FULLTEXT INDEX <name> FOR (n:Label) ON EACH [n.prop])
+// OR RelationshipTypes (a relationship-scoped index, declared via
+// CREATE FULLTEXT INDEX <name> FOR ()-[r:Type]-() ON EACH [r.prop]).
+// Exactly one of those slices is populated for any well-formed index;
+// the runtime uses the populated slice to decide which storage scan
+// to drive.
+//
+// Both Labels and RelationshipTypes use omitempty so an index that
+// only carries one kind serializes without a stray empty array for
+// the other. RelationshipTypes was added after the initial release;
+// older databases serialize without it and load cleanly because
+// JSON unmarshal treats missing fields as the zero value.
 type FulltextIndex struct {
-	Name       string
-	Labels     []string
-	Properties []string
+	Name              string   `json:"name"`
+	Labels            []string `json:"labels,omitempty"`
+	RelationshipTypes []string `json:"relationship_types,omitempty"`
+	Properties        []string `json:"properties"`
 }
 
 // VectorIndex represents a vector similarity index.
@@ -1138,7 +1153,7 @@ func removeNodeID(slice []NodeID, nodeID NodeID) []NodeID {
 	return slice
 }
 
-// AddFulltextIndex adds a full-text index.
+// AddFulltextIndex adds a node-scoped full-text index.
 func (sm *SchemaManager) AddFulltextIndex(name string, labels, properties []string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -1151,6 +1166,36 @@ func (sm *SchemaManager) AddFulltextIndex(name string, labels, properties []stri
 		Name:       name,
 		Labels:     labels,
 		Properties: properties,
+	}
+
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			delete(sm.fulltextIndexes, name)
+			return err
+		}
+	}
+
+	return nil
+}
+
+// AddFulltextRelationshipIndex adds a relationship-scoped full-text
+// index. Mirrors AddFulltextIndex but populates RelationshipTypes
+// instead of Labels. The two share the same `fulltextIndexes` map so
+// every existing get/list/remove path works for both kinds; consumers
+// that need to distinguish check which scope slice is non-empty.
+func (sm *SchemaManager) AddFulltextRelationshipIndex(name string, relTypes, properties []string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if _, exists := sm.fulltextIndexes[name]; exists {
+		return nil // Already exists
+	}
+
+	sm.fulltextIndexes[name] = &FulltextIndex{
+		Name:              name,
+		RelationshipTypes: relTypes,
+		Properties:        properties,
 	}
 
 	if sm.persist != nil {

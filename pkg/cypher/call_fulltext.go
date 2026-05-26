@@ -77,6 +77,63 @@ func (e *StorageExecutor) callDbIndexFulltextQueryNodes(cypher string) (*Execute
 		targetProperties = []string{"content", "text", "title", "name", "description", "body", "summary", "path", "workerRole", "requirements"}
 	}
 
+	// Lucene wildcard family. Three Neo4j-compatible shapes resolve here:
+	//
+	//   *        — MatchAllDocsQuery; every doc in the index.
+	//   *:*      — Solr/Lucene field-and-value wildcard; equivalent to *.
+	//   <prop>:* — Field-presence query; every doc that has a value for
+	//              <prop>. The property must be one the index declared,
+	//              otherwise the query returns nothing (matching Neo4j
+	//              behavior — an undeclared field has no postings list).
+	//
+	// All three branches still apply targetLabels — without that filter,
+	// the index ignores its declared FOR (m:Memory) scope and returns
+	// every node in the database. This was the May 2026 mcp-neo4j-memory
+	// Bug 2: fulltext index ignored its declared label scope.
+	if isFulltextWildcard(query) {
+		nodes, err := e.storage.AllNodes()
+		if err != nil {
+			return nil, err
+		}
+		for _, node := range nodes {
+			if !matchesLabels(node, targetLabels) {
+				continue
+			}
+			// Skip nodes with no content in any of the indexed properties.
+			// Without this, a wildcard query against an index declared on
+			// e.g. `m.name, m.type` would still surface unrelated labels
+			// that happen to share a property name.
+			if extractTextContent(node, targetProperties) == "" {
+				continue
+			}
+			result.Rows = append(result.Rows, []interface{}{node, 1.0})
+		}
+		return result, nil
+	}
+	if propName, ok := fulltextFieldPresenceQuery(query); ok {
+		// Reject queries that ask for a property the index didn't declare.
+		// Neo4j-Lucene treats an undeclared field as having no postings,
+		// so the result is empty. We match that by silently returning no
+		// rows when propName isn't in targetProperties.
+		if !containsString(targetProperties, propName) {
+			return result, nil
+		}
+		nodes, err := e.storage.AllNodes()
+		if err != nil {
+			return nil, err
+		}
+		for _, node := range nodes {
+			if !matchesLabels(node, targetLabels) {
+				continue
+			}
+			if !nodeHasNonEmptyProperty(node, propName) {
+				continue
+			}
+			result.Rows = append(result.Rows, []interface{}{node, 1.0})
+		}
+		return result, nil
+	}
+
 	// Parse query into terms (supports basic AND/OR/NOT)
 	queryTerms, excludeTerms, mustHaveTerms := parseFulltextQuery(query)
 	if len(queryTerms) == 0 && len(mustHaveTerms) == 0 {
@@ -287,6 +344,65 @@ func parseFulltextQuery(query string) (terms, excludeTerms, mustHaveTerms []stri
 	}
 
 	return terms, excludeTerms, mustHaveTerms
+}
+
+// isFulltextWildcard reports whether the query should be treated as
+// the Lucene "match every document" pattern — bare "*" or "*:*". An
+// empty query is handled separately by the caller (early-return with
+// no rows). Trimming + lowercasing keeps `" * "`, `*:*`, and `*` all
+// canonical.
+func isFulltextWildcard(query string) bool {
+	q := strings.ToLower(strings.TrimSpace(query))
+	return q == "*" || q == "*:*"
+}
+
+// fulltextFieldPresenceQuery recognizes the Lucene field-presence
+// shorthand `<prop>:*` (every document that has a non-empty value for
+// the named property). Returns the property name and true on a match.
+// The property name is preserved case-as-written so the caller can
+// look it up in node.Properties without lowercasing.
+//
+// The full wildcard form ("*", "*:*") is recognized by isFulltextWildcard
+// and short-circuited before this function is reached.
+func fulltextFieldPresenceQuery(query string) (string, bool) {
+	q := strings.TrimSpace(query)
+	colon := strings.Index(q, ":")
+	if colon <= 0 || colon == len(q)-1 {
+		return "", false
+	}
+	name := strings.TrimSpace(q[:colon])
+	value := strings.TrimSpace(q[colon+1:])
+	if name == "" || value != "*" {
+		return "", false
+	}
+	// Reject names that contain whitespace or operator characters; that
+	// would mean the query is something like `name OR foo:*` (a more
+	// complex Lucene expression that needs the BM25 path).
+	for _, r := range name {
+		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return "", false
+		}
+	}
+	return name, true
+}
+
+// nodeHasNonEmptyProperty reports whether node carries a property
+// named propName whose stringified value is non-empty. The "non-empty"
+// check matches Neo4j-Lucene behavior: a field with an empty string
+// value is treated as having no posting and is excluded from
+// `<field>:*` queries.
+func nodeHasNonEmptyProperty(node *storage.Node, propName string) bool {
+	if node == nil {
+		return false
+	}
+	val, ok := node.Properties[propName]
+	if !ok || val == nil {
+		return false
+	}
+	if s, ok := val.(string); ok && s == "" {
+		return false
+	}
+	return true
 }
 
 // matchesLabels checks if a node has any of the target labels (empty = all match)
