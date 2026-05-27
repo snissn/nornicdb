@@ -2,7 +2,17 @@
 
 Changes that have landed on `main` since the last tagged release. Promoted into a versioned section of `CHANGELOG.md` when the next tag cuts.
 
-## MVCC counter sharded per database; transactions pinned to one namespace
+## Label-index startup self-heal (#183)
+
+Fixes the v1.1.1 / v1.1.2 regression where `MATCH (n:Label)` returned 0 rows for pre-existing nodes after a server restart against a restored or carried-over store. Root cause: the label-lookup index (Badger prefix 0x03) is written transactionally with every live `CreateNode`/`BulkCreateNodes`/`UpdateNode`, but stores carried over from older binaries — or reconstructed via file-level copy of a Badger directory — could have node bodies present and the corresponding label-index keys absent. `labels(n)` and property-based selection still worked because they decode each node's authoritative label slice; only the index-driven `MATCH (n:Label)` selection silently dropped every entry whose numID didn't resolve.
+
+Closed with a marker-gated, one-time, background backfill on engine open — same shape as the edge-between rebuild from #125. New on-disk marker `[prefixMVCCMeta, prefixMVCCMetaLabelIndexReady]` (0x05 subkey) records completion; absence of the marker on a non-empty store triggers `rebuildLabelIndex`, which drops the prefix-0x03 range, walks every node body, and re-emits `(label, nodeNumID)` entries from the node's authoritative `Labels` slice in 50k-write Badger transactions. The rebuild runs in the background so non-empty stores don't block startup; reads fall through the on-disk index as it advances and converge to fully-correct results once the marker lands. Empty stores mark the backfill ready synchronously — no goroutine. Cancelled cleanly on `Close`.
+
+Pinned with deterministic regression tests:
+- `pkg/storage/badger_label_index_backfill_test.go` — 7 tests covering (a) the canonical bug repro: 250 nodes, wipe prefix-0x03 plus marker, reopen, `GetNodesByLabel` recovers the full 250; (b) multi-label nodes (`:Aprodan:Academic:Concept` shape) re-emit one entry per label per node; (c) empty stores skip the goroutine and mark synchronously; (d) idempotency across restarts — second open does not relaunch the backfill goroutine; (e) `Close()` cancels and waits for the goroutine within 10s; (f) rebuild drops stale entries (a planted `(ghost, fake-numID)` row) rather than merging; (g) NamespacedEngine reads after rebuild see every namespace-scoped node.
+- `pkg/storage/label_index_restart_test.go` — 8 supporting tests pin the live write path's persistence contract end-to-end so a future regression (e.g. moving the label index back into RAM or splitting writes) trips here before shipping.
+
+
 
 The MVCC commit-sequence counter and high-water timestamp clamp moved off `BadgerEngine` (engine-global) onto a per-namespace `namespaceMVCCState` map keyed by database name. Each transaction is pinned to a single namespace at the first prefixed write (or eagerly via `BadgerTransaction.SetNamespace`); cross-namespace writes return the new sentinel `ErrCrossNamespaceTransaction`. Snapshot-isolation conflict detection compares `CommitSequence` values that now share a namespace by construction, so noisy tenants can no longer interleave version numbers with quiet ones, and a `DROP DATABASE` drops its counter alongside its keys.
 

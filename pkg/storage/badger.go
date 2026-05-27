@@ -70,6 +70,15 @@ const (
 	// global counter. The legacy key is left in place for older binaries
 	// that may still read it; new commits no longer write it.
 	prefixMVCCMetaNamespaceSeq = byte(0x04)
+
+	// prefixMVCCMetaLabelIndexReady marks completion of the one-time
+	// label-index startup backfill (see badger_label_index_backfill.go).
+	// Older stores carried over from binaries that wrote node bodies
+	// without the corresponding label-index keys — or from mid-write
+	// file-level copies — return zero rows from MATCH (n:Label) until
+	// this marker is present and the rebuild has run. Same shape as
+	// prefixMVCCMetaEdgeBetweenIndexReady.
+	prefixMVCCMetaLabelIndexReady = byte(0x05)
 )
 
 // maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)
@@ -221,6 +230,13 @@ type BadgerEngine struct {
 	edgeBetweenIndexBackfillMu     sync.Mutex
 	edgeBetweenIndexBackfillCancel context.CancelFunc
 	edgeBetweenIndexBackfillDone   chan struct{}
+
+	// labelIndexBackfill* mirrors the edge-between backfill state for
+	// the (label, nodeNumID) index rebuild. See
+	// badger_label_index_backfill.go for the rebuild contract.
+	labelIndexBackfillMu     sync.Mutex
+	labelIndexBackfillCancel context.CancelFunc
+	labelIndexBackfillDone   chan struct{}
 
 	// idDict assigns compact 8-byte numeric IDs to string node/edge IDs
 	// so secondary indexes (edge-between, outgoing/incoming, edge-type,
@@ -816,6 +832,17 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	if err := engine.ensureEdgeBetweenIndex(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize edge-between index: %w", err)
+	}
+
+	// Label-index backfill: rebuilds (label, nodeNumID) entries from
+	// node bodies for stores carried over from binaries that didn't
+	// maintain the index, or restored via file-level copy. Marker-gated
+	// so the walk runs at most once per store. Same non-fatal stance as
+	// the edge-between backfill — MATCH (n:Label) on an unrebuilt store
+	// reads the partial on-disk index until the goroutine finishes.
+	if err := engine.ensureLabelIndex(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize label index: %w", err)
 	}
 
 	return engine, nil

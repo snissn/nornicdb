@@ -176,6 +176,7 @@ func (b *BadgerEngine) GetSchema() *SchemaManager {
 // Close closes the BadgerDB database.
 func (b *BadgerEngine) Close() error {
 	b.stopEdgeBetweenIndexBackfill()
+	b.stopLabelIndexBackfill()
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
