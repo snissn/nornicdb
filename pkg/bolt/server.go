@@ -565,6 +565,15 @@ type Config struct {
 	// BoltAuthTimeout bounds the pre-HELLO handshake/auth window after
 	// transport selection (default 30s, matches Neo4j).
 	BoltAuthTimeout time.Duration
+	// BoltStatementTimeout bounds the wall-clock duration of a single RUN
+	// when the client did not supply tx_timeout in the RUN/BEGIN extras.
+	// Zero (the default) disables the server-side cap and matches the
+	// historical behavior. The Bolt driver's per-call tx_timeout, when
+	// present, takes precedence (Neo4j semantics: client-supplied
+	// timeout wins; server cap is the fallback). The cancellation
+	// propagates via context to the Cypher executor, which honors
+	// ctx.Err() at every traversal/match boundary.
+	BoltStatementTimeout time.Duration
 	// WebSocketEnabled controls whether WebSocket transport is accepted on
 	// the Bolt port. When false, the server returns the discovery response
 	// for plain GET / and HTTP 426 for actual WS upgrade attempts.
@@ -1158,6 +1167,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 		writeBufSize = s.config.WebSocketWriteBufferSize
 	}
 
+	connCtx, connCancel := context.WithCancel(sessionCtx)
+	// Cancel the connection-scoped context the moment handleConnection
+	// returns. This is the load-bearing signal that propagates client
+	// disconnects to in-flight RUN handlers — see Session.connCtx for
+	// the full bug context.
+	defer connCancel()
+
 	session := &Session{
 		conn:           sniffedConn,
 		reader:         br, // load-bearing: holds peeked bytes from peekTransport
@@ -1166,7 +1182,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 		baseExec:       s.executor,
 		executor:       s.executor,
 		messageBuf:     make([]byte, 0, 4096),
+		messageQueue:   make(chan *boltMessage, 16),
+		readErrQueue:   make(chan error, 1),
 		spanCtx:        sessionCtx,
+		connCtx:        connCtx,
+		connCancel:     connCancel,
 		implicitBearer: implicitBearer,
 	}
 	if factory, ok := s.executor.(SessionExecutorFactory); ok {
@@ -1220,13 +1240,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 	if authTimeout > 0 {
 		_ = sniffedConn.SetReadDeadline(time.Time{})
 	}
+	session.startMessageReader()
 
 	keepaliveStarted := false
 	for {
 		if s.closed.Load() {
 			return
 		}
-		if err := session.handleMessage(); err != nil {
+		if err := session.handleQueuedMessage(); err != nil {
 			if err == io.EOF {
 				return
 			}
@@ -1339,6 +1360,17 @@ type Session struct {
 	// TRC-13: session span context for parenting per-message spans.
 	spanCtx context.Context
 
+	// connCtx is a cancellable context derived from spanCtx whose lifetime
+	// matches the connection handler. handleConnection installs a
+	// `defer connCancel()` so the context cancels the moment the read
+	// loop exits — for any reason: client disconnect, RESET, EOF,
+	// transport error, panic-recover, or graceful shutdown. Per-RUN
+	// contexts derive from this so a long-running Cypher query
+	// terminates promptly when the connection drops, instead of pinning
+	// a CPU core indefinitely (the v1.1.2 #184 bug).
+	connCtx    context.Context
+	connCancel context.CancelFunc
+
 	// Database context (from HELLO message)
 	database string // Database name for this session (defaults to default database)
 
@@ -1381,7 +1413,11 @@ type Session struct {
 
 	// Async message processing (Neo4j-style batching)
 	messageQueue chan *boltMessage // Incoming messages queue
+	readErrQueue chan error        // Terminal read errors from the reader loop
 	writeMu      sync.Mutex        // Protects writer for concurrent access
+	activeRunMu  sync.Mutex
+	activeRun    context.CancelFunc
+	activeReason byte
 
 	// implicitBearer carries a JWT pulled from the WS-upgrade cookie
 	// (nornicdb_token / token). It is set by acceptWebSocket BEFORE the
@@ -1497,6 +1533,81 @@ func (s *Session) readMessage() (*boltMessage, error) {
 func (s *Session) processMessage(msg *boltMessage) error {
 	// No mutex needed - messages are processed sequentially from the queue
 	return s.dispatchMessage(msg.msgType, msg.data)
+}
+
+func (s *Session) startMessageReader() {
+	if s.reader == nil || s.messageQueue == nil || s.readErrQueue == nil {
+		return
+	}
+
+	go func() {
+		for {
+			msg, err := s.readMessage()
+			if err != nil {
+				s.cancelActiveRun(0)
+				select {
+				case s.readErrQueue <- err:
+				default:
+				}
+				return
+			}
+			if msg == nil {
+				continue
+			}
+			if msg.msgType == MsgReset || msg.msgType == MsgGoodbye {
+				s.cancelActiveRun(msg.msgType)
+			}
+			s.messageQueue <- msg
+		}
+	}()
+}
+
+func (s *Session) handleQueuedMessage() error {
+	if s.messageQueue == nil || s.readErrQueue == nil {
+		return s.handleMessage()
+	}
+
+	select {
+	case msg := <-s.messageQueue:
+		if msg == nil {
+			return io.EOF
+		}
+		return s.processMessage(msg)
+	case err := <-s.readErrQueue:
+		return err
+	}
+}
+
+func (s *Session) setActiveRun(cancel context.CancelFunc) {
+	s.activeRunMu.Lock()
+	defer s.activeRunMu.Unlock()
+	s.activeRun = cancel
+	s.activeReason = 0
+}
+
+func (s *Session) clearActiveRun() {
+	s.activeRunMu.Lock()
+	defer s.activeRunMu.Unlock()
+	s.activeRun = nil
+	s.activeReason = 0
+}
+
+func (s *Session) cancelActiveRun(reason byte) {
+	s.activeRunMu.Lock()
+	cancel := s.activeRun
+	if cancel != nil && reason != 0 {
+		s.activeReason = reason
+	}
+	s.activeRunMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *Session) activeRunReason() byte {
+	s.activeRunMu.Lock()
+	defer s.activeRunMu.Unlock()
+	return s.activeReason
 }
 
 // handleMessage handles a single Bolt message synchronously (for compatibility).
@@ -1946,16 +2057,52 @@ func (s *Session) handleRun(data []byte) error {
 		}
 	}
 
-	// Create context with timeout if tx_timeout is specified.
-	// TRC-14: extract nornicdb.traceparent from metadata for distributed tracing.
-	ctx := extractTraceparent(s.spanCtx, metadata)
-	if txTimeout, ok := metadata["tx_timeout"].(int64); ok && txTimeout > 0 {
-		// tx_timeout is in milliseconds, convert to time.Duration
-		timeout := time.Duration(txTimeout) * time.Millisecond
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel() // Ensure context is cancelled when function returns
+	// Build the per-RUN context. Lifetime hierarchy (outermost → innermost):
+	//
+	//   connCtx                  cancels when the connection handler exits
+	//     └── traceparent        carries W3C tracing headers (TRC-14)
+	//           └── runCtx       cancels on connection close, RESET, RUN
+	//                            timeout, or successful return
+	//
+	// Rooting at connCtx — not spanCtx (which is rooted at
+	// context.Background) — closes the v1.1.2 #184 bug where a
+	// long-running Cypher pinned a CPU core for ~34 minutes after the
+	// client disconnected. Now: handleConnection's defer connCancel()
+	// propagates here, the Cypher executor sees ctx.Err() at the next
+	// traversal/match boundary, and the RUN goroutine returns.
+	parentCtx := s.connCtx
+	if parentCtx == nil {
+		// Defensive fallback for tests that construct a Session by hand
+		// without going through handleConnection. Production always sets
+		// connCtx in handleConnection.
+		parentCtx = s.spanCtx
+		if parentCtx == nil {
+			parentCtx = context.Background()
+		}
 	}
+	parentCtx = extractTraceparent(parentCtx, metadata)
+
+	// Pick the effective timeout: client tx_timeout wins over
+	// server-side BoltStatementTimeout (Neo4j semantics — the driver's
+	// per-call cap is authoritative; the server cap is the fallback
+	// for clients that didn't set one).
+	var runTimeout time.Duration
+	if txTimeout, ok := metadata["tx_timeout"].(int64); ok && txTimeout > 0 {
+		runTimeout = time.Duration(txTimeout) * time.Millisecond
+	} else if s.server != nil && s.server.config.BoltStatementTimeout > 0 {
+		runTimeout = s.server.config.BoltStatementTimeout
+	}
+
+	var ctx context.Context
+	var runCancel context.CancelFunc
+	if runTimeout > 0 {
+		ctx, runCancel = context.WithTimeout(parentCtx, runTimeout)
+	} else {
+		ctx, runCancel = context.WithCancel(parentCtx)
+	}
+	defer runCancel() // always release the timer / cancel funnel
+	s.setActiveRun(runCancel)
+	defer s.clearActiveRun()
 	ctx = cypher.WithAuthToken(ctx, s.forwardedAuthHeader)
 
 	// Classify query type once (used for auth and deferred flush)
@@ -2085,10 +2232,15 @@ func (s *Session) handleRun(data []byte) error {
 		executor = dbExecutor
 	}
 
-	// Execute query (ctx may have timeout from tx_timeout metadata)
 	runStart := time.Now()
 	result, err := executor.Execute(ctx, query, params)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			switch s.activeRunReason() {
+			case MsgReset, MsgGoodbye:
+				return nil
+			}
+		}
 		s.logRunTiming("ERROR", dbName, query, time.Since(runStart), 0, err)
 		if s.server != nil && s.server.config.LogQueries {
 			s.server.logger().Warn("query error", slog.Any("error", err))

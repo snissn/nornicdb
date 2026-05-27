@@ -60,6 +60,11 @@ server:
   # Env: NORNICDB_BOLT_SERVER_ANNOUNCEMENT
   bolt_server_announcement: ""
 
+  # Optional fallback timeout for a Bolt RUN when the client does not send
+  # tx_timeout metadata. Zero or empty keeps the historical unlimited behavior.
+  # Env: NORNICDB_BOLT_STATEMENT_TIMEOUT
+  bolt_statement_timeout: ""
+
   # Enable HTTP API server
   # Env: NORNICDB_HTTP_ENABLED
   http_enabled: true

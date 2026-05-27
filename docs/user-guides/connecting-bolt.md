@@ -200,6 +200,7 @@ For cross-origin browser clients (e.g. a UI on `https://app.example.com` connect
 | `NORNICDB_BOLT_WEBSOCKET_PONG_TIMEOUT`     | `60s`   | Pong arrival deadline.                                           |
 | `NORNICDB_BOLT_SNIFF_TIMEOUT`              | `5s`    | Bound on the transport-sniff peek.                               |
 | `NORNICDB_BOLT_AUTH_TIMEOUT`               | `30s`   | Bound on the pre-HELLO handshake/auth window.                    |
+| `NORNICDB_BOLT_STATEMENT_TIMEOUT`          | disabled | Fallback server-side `RUN` timeout when the driver sends no `tx_timeout`. |
 
 See `docs/operations/configuration.md` for the YAML and CLI equivalents.
 

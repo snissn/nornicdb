@@ -614,7 +614,6 @@ func TestHandleConnection(t *testing.T) {
 		server := New(nil, &mockExecutor{})
 
 		clientConn, serverConn := net.Pipe()
-
 		done := make(chan struct{})
 		go func() {
 			server.handleConnection(serverConn)
@@ -726,6 +725,87 @@ func TestHandleConnection(t *testing.T) {
 			clientConn.Close()
 		}
 	})
+}
+
+func TestHandleConnection_CancelsBlockingRunOnClientDisconnect(t *testing.T) {
+	queryStarted := make(chan struct{})
+	queryCanceled := make(chan struct{})
+	serverDone := make(chan struct{})
+
+	server := New(nil, &mockExecutor{executeFunc: func(ctx context.Context, query string, params map[string]any) (*QueryResult, error) {
+		close(queryStarted)
+		<-ctx.Done()
+		close(queryCanceled)
+		return nil, ctx.Err()
+	}})
+
+	clientConn, serverConn := net.Pipe()
+	go func() {
+		server.handleConnection(serverConn)
+		close(serverDone)
+	}()
+
+	requireNoError(t, PerformHandshakeWithTesting(t, clientConn))
+	requireNoError(t, SendHello(t, clientConn, nil))
+	requireNoError(t, ReadSuccess(t, clientConn))
+	requireNoError(t, SendRun(t, clientConn, "RETURN 1 AS x", nil, nil))
+
+	select {
+	case <-queryStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("query did not start")
+	}
+
+	requireNoError(t, clientConn.Close())
+
+	select {
+	case <-queryCanceled:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("blocking RUN was not canceled after client disconnect")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("connection handler did not exit after client disconnect")
+	}
+}
+
+func TestHandleConnection_ResetCancelsBlockingRun(t *testing.T) {
+	queryStarted := make(chan struct{})
+	queryCanceled := make(chan struct{})
+
+	server := New(nil, &mockExecutor{executeFunc: func(ctx context.Context, query string, params map[string]any) (*QueryResult, error) {
+		close(queryStarted)
+		<-ctx.Done()
+		close(queryCanceled)
+		return nil, ctx.Err()
+	}})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	go server.handleConnection(serverConn)
+
+	requireNoError(t, PerformHandshakeWithTesting(t, clientConn))
+	requireNoError(t, SendHello(t, clientConn, nil))
+	requireNoError(t, ReadSuccess(t, clientConn))
+	requireNoError(t, SendRun(t, clientConn, "RETURN 1 AS x", nil, nil))
+
+	select {
+	case <-queryStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("query did not start")
+	}
+
+	requireNoError(t, SendReset(t, clientConn))
+
+	select {
+	case <-queryCanceled:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("blocking RUN was not canceled after RESET")
+	}
+
+	requireNoError(t, ReadSuccess(t, clientConn))
 }
 
 func TestIsClosed(t *testing.T) {

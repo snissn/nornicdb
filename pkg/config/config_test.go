@@ -1176,6 +1176,24 @@ plugins:
 	require.Equal(t, "/plugins/heim", cfg.Server.HeimdallPluginsDir)
 }
 
+func TestLoadFromFile_BoltStatementTimeoutAndEnvOverride(t *testing.T) {
+	clearEnvVars(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte("server:\n  bolt_statement_timeout: \"45s\"\n"), 0o644)
+	require.NoError(t, err)
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	require.Equal(t, 45*time.Second, cfg.Server.BoltStatementTimeout)
+
+	t.Setenv("NORNICDB_BOLT_STATEMENT_TIMEOUT", "90s")
+	cfg, err = LoadFromFile(path)
+	require.NoError(t, err)
+	require.Equal(t, 90*time.Second, cfg.Server.BoltStatementTimeout)
+}
+
 func TestLoadFromFile_MissingFileReturnsDefaults(t *testing.T) {
 	clearEnvVars(t)
 

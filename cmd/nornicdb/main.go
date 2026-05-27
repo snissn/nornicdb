@@ -792,6 +792,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if cfg.Server.BoltAuthTimeout > 0 {
 		boltConfig.BoltAuthTimeout = cfg.Server.BoltAuthTimeout
 	}
+	if cfg.Server.BoltStatementTimeout > 0 {
+		boltConfig.BoltStatementTimeout = cfg.Server.BoltStatementTimeout
+	}
 	boltConfig.WebSocketEnabled = cfg.Server.BoltWebSocketEnabled
 	if cfg.Server.BoltWebSocketAllowedOrigins != "" {
 		boltConfig.WebSocketAllowedOrigins = cfg.Server.BoltWebSocketAllowedOrigins

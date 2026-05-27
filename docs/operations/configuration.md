@@ -297,13 +297,13 @@ NornicDB multiplexes four wire-level transports on the Bolt port (`:7687` by def
 
 How clients reach each wire transport:
 
-| Client                                                  | URL the client uses                                | Wire bytes    | Resulting metric label |
-| ------------------------------------------------------- | -------------------------------------------------- | ------------- | ---------------------- |
-| Official Neo4j driver (Node, JVM, Python, .NET)         | `bolt://host:7687`                                 | Bolt magic    | `tcp`                  |
-| Official Neo4j driver (browser build of `neo4j-driver`) | `bolt://host:7687`                                 | `GET ` upgrade| `ws`                   |
-| Same drivers with TLS                                   | `bolt+s://host:7687` (or `bolt+ssc://`)            | TLS first     | `tcp_tls` / `ws_tls`   |
-| Routing wrappers                                        | `neo4j://`, `neo4j+s://`, `neo4j+ssc://`           | Same as above | Same as above          |
-| Custom tool speaking raw WebSockets                     | `ws://host:7687/`, `wss://host:7687/`              | `GET ` upgrade| `ws` / `ws_tls`        |
+| Client                                                  | URL the client uses                      | Wire bytes     | Resulting metric label |
+| ------------------------------------------------------- | ---------------------------------------- | -------------- | ---------------------- |
+| Official Neo4j driver (Node, JVM, Python, .NET)         | `bolt://host:7687`                       | Bolt magic     | `tcp`                  |
+| Official Neo4j driver (browser build of `neo4j-driver`) | `bolt://host:7687`                       | `GET ` upgrade | `ws`                   |
+| Same drivers with TLS                                   | `bolt+s://host:7687` (or `bolt+ssc://`)  | TLS first      | `tcp_tls` / `ws_tls`   |
+| Routing wrappers                                        | `neo4j://`, `neo4j+s://`, `neo4j+ssc://` | Same as above  | Same as above          |
+| Custom tool speaking raw WebSockets                     | `ws://host:7687/`, `wss://host:7687/`    | `GET ` upgrade | `ws` / `ws_tls`        |
 
 The official drivers' URL parsers reject `ws://` / `wss://` — the WebSocket transport is selected automatically by the browser build and produces a `GET ` upgrade on the wire from a `bolt://` URL. The `ws://` / `wss://` rows in the second table are for third-party clients that do their own WebSocket dial and write Bolt frames into BinaryMessage payloads.
 
@@ -319,6 +319,7 @@ server:
   bolt_tls_client_auth_mode: none # none | request | request_verify | require_verify
   bolt_sniff_timeout: 5s
   bolt_auth_timeout: 30s
+  bolt_statement_timeout: 2m # optional fallback when RUN metadata has no tx_timeout; 0/omitted disables
   bolt_websocket_enabled: true # false ⇒ 426 Upgrade Required on WS attempts
   bolt_websocket_allowed_origins: "*" # or "https://app.example.com,https://admin.example.com"
   bolt_websocket_max_message_size: 65536
@@ -329,22 +330,23 @@ server:
 
 #### Environment variables
 
-| Key                                         | Default  | Notes                                                    |
-| ------------------------------------------- | -------- | -------------------------------------------------------- |
-| `NORNICDB_BOLT_TLS_ENABLED`                 | `false`  | enables TLS-on-first-byte sniffing                       |
-| `NORNICDB_BOLT_TLS_CERT`                    |          | path to cert PEM                                         |
-| `NORNICDB_BOLT_TLS_KEY`                     |          | path to key PEM                                          |
-| `NORNICDB_BOLT_TLS_REQUIRE`                 | `false`  | reject plaintext (raw OR ws)                             |
-| `NORNICDB_BOLT_TLS_CLIENT_CA`               |          | path to CA bundle for mTLS                               |
-| `NORNICDB_BOLT_TLS_CLIENT_AUTH_MODE`        | `none`   | `none` / `request` / `request_verify` / `require_verify` |
-| `NORNICDB_BOLT_SNIFF_TIMEOUT`               | `5s`     | bound on transport-sniff peek                            |
-| `NORNICDB_BOLT_AUTH_TIMEOUT`                | `30s`    | bound on pre-HELLO handshake/auth                        |
-| `NORNICDB_BOLT_WEBSOCKET_ENABLED`           | `true`   | set `false` for purely-TCP deployments                   |
-| `NORNICDB_BOLT_WEBSOCKET_ALLOWED_ORIGINS`   | `*`      | comma-separated; `*` = any                               |
-| `NORNICDB_BOLT_WEBSOCKET_MAX_MESSAGE_SIZE`  | `65536`  | bytes; matches Neo4j `MAX_WEBSOCKET_FRAME_SIZE`          |
-| `NORNICDB_BOLT_WEBSOCKET_WRITE_BUFFER_SIZE` | `262144` | bufio writer size for WS sessions                        |
-| `NORNICDB_BOLT_WEBSOCKET_PING_INTERVAL`     | `30s`    | server WS ping cadence                                   |
-| `NORNICDB_BOLT_WEBSOCKET_PONG_TIMEOUT`      | `60s`    | pong arrival deadline                                    |
+| Key                                         | Default  | Notes                                                     |
+| ------------------------------------------- | -------- | --------------------------------------------------------- |
+| `NORNICDB_BOLT_TLS_ENABLED`                 | `false`  | enables TLS-on-first-byte sniffing                        |
+| `NORNICDB_BOLT_TLS_CERT`                    |          | path to cert PEM                                          |
+| `NORNICDB_BOLT_TLS_KEY`                     |          | path to key PEM                                           |
+| `NORNICDB_BOLT_TLS_REQUIRE`                 | `false`  | reject plaintext (raw OR ws)                              |
+| `NORNICDB_BOLT_TLS_CLIENT_CA`               |          | path to CA bundle for mTLS                                |
+| `NORNICDB_BOLT_TLS_CLIENT_AUTH_MODE`        | `none`   | `none` / `request` / `request_verify` / `require_verify`  |
+| `NORNICDB_BOLT_SNIFF_TIMEOUT`               | `5s`     | bound on transport-sniff peek                             |
+| `NORNICDB_BOLT_AUTH_TIMEOUT`                | `30s`    | bound on pre-HELLO handshake/auth                         |
+| `NORNICDB_BOLT_STATEMENT_TIMEOUT`           | disabled | fallback cap for a Bolt `RUN` without client `tx_timeout` |
+| `NORNICDB_BOLT_WEBSOCKET_ENABLED`           | `true`   | set `false` for purely-TCP deployments                    |
+| `NORNICDB_BOLT_WEBSOCKET_ALLOWED_ORIGINS`   | `*`      | comma-separated; `*` = any                                |
+| `NORNICDB_BOLT_WEBSOCKET_MAX_MESSAGE_SIZE`  | `65536`  | bytes; matches Neo4j `MAX_WEBSOCKET_FRAME_SIZE`           |
+| `NORNICDB_BOLT_WEBSOCKET_WRITE_BUFFER_SIZE` | `262144` | bufio writer size for WS sessions                         |
+| `NORNICDB_BOLT_WEBSOCKET_PING_INTERVAL`     | `30s`    | server WS ping cadence                                    |
+| `NORNICDB_BOLT_WEBSOCKET_PONG_TIMEOUT`      | `60s`    | pong arrival deadline                                     |
 
 #### Discovery probe
 

@@ -442,6 +442,10 @@ type ServerConfig struct {
 	// BoltAuthTimeout bounds pre-HELLO handshake/auth (default 30s).
 	// Env: NORNICDB_BOLT_AUTH_TIMEOUT
 	BoltAuthTimeout time.Duration
+	// BoltStatementTimeout bounds a single Bolt RUN when the client did
+	// not supply tx_timeout. Zero disables the server-side fallback cap.
+	// Env: NORNICDB_BOLT_STATEMENT_TIMEOUT
+	BoltStatementTimeout time.Duration
 
 	// BoltWebSocketEnabled allows WebSocket transport on the Bolt port
 	// (default true). Env: NORNICDB_BOLT_WEBSOCKET_ENABLED
@@ -1292,6 +1296,7 @@ type YAMLConfig struct {
 		BoltEnabled            bool   `yaml:"bolt_enabled"`             // Enable Bolt protocol
 		HTTPEnabled            bool   `yaml:"http_enabled"`             // Enable HTTP API
 		BoltServerAnnouncement string `yaml:"bolt_server_announcement"` // Override Bolt HELLO server metadata
+		BoltStatementTimeout   string `yaml:"bolt_statement_timeout"`
 		TLS                    struct {
 			Enabled  bool   `yaml:"enabled"`
 			CertFile string `yaml:"cert_file"`
@@ -1706,6 +1711,7 @@ func LoadDefaults() *Config {
 	config.Server.BoltTLSClientAuthMode = "none"
 	config.Server.BoltSniffTimeout = 5 * time.Second
 	config.Server.BoltAuthTimeout = 30 * time.Second
+	config.Server.BoltStatementTimeout = 0
 	config.Server.BoltWebSocketEnabled = true
 	config.Server.BoltWebSocketAllowedOrigins = "*"
 	config.Server.BoltWebSocketMaxMessageSize = 65536
@@ -2059,6 +2065,9 @@ func applyEnvVars(config *Config) error {
 	}
 	if v := getEnvDuration("NORNICDB_BOLT_AUTH_TIMEOUT", 0); v > 0 {
 		config.Server.BoltAuthTimeout = v
+	}
+	if v := getEnvDuration("NORNICDB_BOLT_STATEMENT_TIMEOUT", 0); v > 0 {
+		config.Server.BoltStatementTimeout = v
 	}
 	if v, ok := envutil.LookupBoolLoose("NORNICDB_BOLT_WEBSOCKET_ENABLED"); ok {
 		config.Server.BoltWebSocketEnabled = v
@@ -2732,6 +2741,11 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 	if yamlCfg.Server.BoltServerAnnouncement != "" {
 		config.Server.BoltServerAnnouncement = yamlCfg.Server.BoltServerAnnouncement
+	}
+	if yamlCfg.Server.BoltStatementTimeout != "" {
+		if d, err := time.ParseDuration(yamlCfg.Server.BoltStatementTimeout); err == nil {
+			config.Server.BoltStatementTimeout = d
+		}
 	}
 	if yamlCfg.Server.DataDir != "" {
 		config.Database.DataDir = yamlCfg.Server.DataDir
