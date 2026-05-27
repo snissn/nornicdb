@@ -338,7 +338,8 @@
   - added explicit hot-path trace coverage so the executor can report when the new structured matchers are used.
 
 - **Parser comparison reporting**:
-  - added an integrated Nornic-vs-ANTLR comparison harness that prints per-query timing ratios and an overall summary.
+  - added an integrated Nornic-vs-ANTLR executor-flow comparison harness that prints per-query timing ratios and an overall summary.
+  - added dedicated parser-only validation and full-parse reports so parser timings are no longer conflated with executor work.
   - stabilized the comparison output so users and maintainers can trust the speedup numbers instead of single-run noise.
 
 ### Changed

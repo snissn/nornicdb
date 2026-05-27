@@ -187,9 +187,15 @@ curl -O https://www.antlr.org/download/antlr-4.13.1-complete.jar
 # Run ANTLR parser tests
 go test -v ./pkg/cypher/antlr/
 
-# Run parser comparison (A/B test)
+# Run integrated executor-flow comparison (A/B test)
 go test -v -run TestParserComparison ./pkg/cypher/
 
-# Benchmark both parsers
+# Benchmark integrated executor-flow comparison
 go test -bench=BenchmarkParserComparison ./pkg/cypher/
+
+# Run parser-only validation report
+NORNIC_RUN_PARSER_REPORTS=1 go test -v -run TestParserValidationBenchmarkReport ./pkg/cypher/ -count=1
+
+# Run parser-only full parse report
+NORNIC_RUN_PARSER_REPORTS=1 go test -v -run TestParserParseBenchmarkReport ./pkg/cypher/ -count=1
 ```

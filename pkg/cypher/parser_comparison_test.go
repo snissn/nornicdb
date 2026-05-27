@@ -1,4 +1,9 @@
-// Package cypher provides parser comparison tests between Nornic and ANTLR parsers.
+// Package cypher provides integrated executor-flow comparisons between the
+// Nornic and ANTLR parser paths.
+//
+// These tests intentionally measure full executor entry through execution, not
+// parser-only validation or AST construction. For parser-only reporting, use
+// parser_benchmark_report_test.go.
 //
 // Run with: go test -v -run TestParserComparison ./pkg/cypher/
 //
@@ -161,9 +166,9 @@ func BenchmarkParserValidationIsolation(b *testing.B) {
 	benchmarkParserValidationIsolation(b, "ANTLR", antlrparser.Validate)
 }
 
-// TestParserComparison runs A/B tests between Nornic and ANTLR parsers
-// using the integrated executor flow with config switching.
-// Prints a timing comparison report at the end.
+// TestParserComparison runs A/B tests between the Nornic and ANTLR executor
+// paths using config switching.
+// Prints an integrated-flow timing comparison report at the end.
 func TestParserComparison(t *testing.T) {
 	type result struct {
 		name       string
@@ -236,9 +241,9 @@ func TestParserComparison(t *testing.T) {
 		})
 	}
 
-	// Print timing comparison report
+	// Print timing comparison report for the integrated executor path.
 	fmt.Println("\n" + strings.Repeat("=", 80))
-	fmt.Println("PARSER COMPARISON REPORT")
+	fmt.Println("INTEGRATED EXECUTOR COMPARISON REPORT")
 	fmt.Println(strings.Repeat("=", 80))
 	fmt.Printf("\n%-30s | %-12s | %-12s | %-8s | %s\n",
 		"Query", "Nornic", "ANTLR", "Ratio", "Status")
@@ -274,10 +279,11 @@ func TestParserComparison(t *testing.T) {
 	fmt.Printf("%-30s | %12s | %12s | %7.1fx |\n",
 		"TOTAL", totalNornic, totalANTLR, avgRatio)
 	fmt.Println(strings.Repeat("=", 80))
-	fmt.Printf("\nSummary: Nornic parser is %.1fx faster than ANTLR on average\n\n", avgRatio)
+	fmt.Printf("\nSummary: Nornic integrated executor path is %.1fx faster than ANTLR on average\n\n", avgRatio)
 }
 
-// BenchmarkParserComparison benchmarks both parsers using the integrated executor flow.
+// BenchmarkParserComparison benchmarks both executor paths using the integrated
+// flow. It is not a parser-only benchmark.
 func BenchmarkParserComparison(b *testing.B) {
 	queries := []struct {
 		name  string
@@ -315,8 +321,8 @@ func BenchmarkParserComparison(b *testing.B) {
 	config.SetParserType(config.ParserTypeNornic)
 }
 
-// TestParserPerformanceComparison runs a detailed performance comparison
-// using the integrated executor flow with config switching.
+// TestParserPerformanceComparison runs a detailed integrated executor-flow
+// comparison with config switching. It is not a parser-only benchmark.
 func TestParserPerformanceComparison(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping performance comparison in short mode")
@@ -338,7 +344,7 @@ func TestParserPerformanceComparison(t *testing.T) {
 
 	iterations := 1000
 
-	fmt.Println("\n=== Parser Performance Comparison (Integrated Flow) ===")
+	fmt.Println("\n=== Integrated Executor Performance Comparison ===")
 	fmt.Printf("Iterations: %d\n\n", iterations)
 	fmt.Printf("%-15s | %-15s | %-15s | %-10s\n", "Query Type", "Nornic (avg)", "ANTLR (avg)", "Ratio")
 	fmt.Println(strings.Repeat("-", 60))
