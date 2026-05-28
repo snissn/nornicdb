@@ -503,6 +503,113 @@ func TestDropPromotionPolicy(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestDropPromotionPolicy_MissingBranches(t *testing.T) {
+	sm := NewSchemaManager()
+
+	err := sm.DropPromotionPolicy("missing")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+	require.NoError(t, sm.DropPromotionPolicy("missing", true))
+
+	require.NoError(t, sm.CreatePromotionProfile(validPromoProfile("profile")))
+	require.NoError(t, sm.CreatePromotionPolicy(knowledgepolicy.PromotionPolicyDef{
+		Name:         "one_policy",
+		TargetLabels: []string{"Fact"},
+		Enabled:      true,
+		WhenClauses: []knowledgepolicy.PromotionPolicyWhenClause{
+			{ProfileRef: "profile", Predicate: "accessCount > 1"},
+		},
+	}))
+	require.NoError(t, sm.DropPromotionPolicy("one_policy"))
+	err = sm.DropPromotionPolicy("still_missing")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "still_missing")
+	require.NoError(t, sm.DropPromotionPolicy("still_missing", true))
+}
+
+func TestDropPromotionProfile_MissingBranches(t *testing.T) {
+	sm := NewSchemaManager()
+
+	err := sm.DropPromotionProfile("missing")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+	require.NoError(t, sm.DropPromotionProfile("missing", true))
+
+	require.NoError(t, sm.CreatePromotionProfile(validPromoProfile("profile")))
+	err = sm.DropPromotionProfile("other")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "other")
+	require.NoError(t, sm.DropPromotionProfile("other", true))
+}
+
+func TestSchemaManager_KnowledgePolicyPersistenceHook(t *testing.T) {
+	sm := NewSchemaManager()
+	sm.mu.Lock()
+	require.NoError(t, sm.persistIfSet())
+	sm.mu.Unlock()
+
+	var persisted *SchemaDefinition
+	sm.persist = func(def *SchemaDefinition) error {
+		persisted = def
+		return nil
+	}
+	sm.mu.Lock()
+	require.NoError(t, sm.persistIfSet())
+	sm.mu.Unlock()
+	require.NotNil(t, persisted)
+}
+
+func TestKnowledgePolicyUpdateConversionsAndErrors(t *testing.T) {
+	sm := NewSchemaManager()
+	require.NoError(t, sm.CreateDecayProfileBundle(validBundle("decay")))
+	require.NoError(t, sm.AlterDecayProfile("decay", map[string]interface{}{
+		"halfLifeSeconds":     int(120),
+		"visibilityThreshold": int64(1),
+		"scoreFloor":          float64(0.25),
+		"function":            string(knowledgepolicy.DecayFunctionLinear),
+		"decayEnabled":        false,
+		"enabled":             false,
+		"scoreFrom":           string(knowledgepolicy.ScoreFromCustom),
+		"scoreFromProperty":   "freshness",
+	}))
+	bundles, _ := sm.ShowDecayProfiles()
+	require.Len(t, bundles, 1)
+	assert.EqualValues(t, 120, bundles[0].HalfLifeSeconds)
+	assert.Equal(t, 1.0, bundles[0].VisibilityThreshold)
+	assert.Equal(t, 0.25, bundles[0].ScoreFloor)
+	assert.Equal(t, knowledgepolicy.DecayFunctionLinear, bundles[0].Function)
+	assert.False(t, bundles[0].DecayEnabled)
+	assert.False(t, bundles[0].Enabled)
+	assert.Equal(t, knowledgepolicy.ScoreFromCustom, bundles[0].ScoreFrom)
+	assert.Equal(t, "freshness", bundles[0].ScoreFromProperty)
+
+	require.Error(t, sm.AlterDecayProfile("decay", map[string]interface{}{"function": "bogus"}))
+	require.Error(t, sm.AlterDecayProfile("decay", map[string]interface{}{"scoreFrom": "bogus"}))
+	require.Error(t, sm.AlterDecayProfile("decay", map[string]interface{}{"unknown": true}))
+
+	require.NoError(t, sm.CreatePromotionProfile(validPromoProfile("promo")))
+	require.NoError(t, sm.AlterPromotionProfile("promo", map[string]interface{}{
+		"multiplier": int64(2),
+		"scoreFloor": int(0),
+		"scoreCap":   float64(0.75),
+		"enabled":    false,
+	}))
+	profiles := sm.ShowPromotionProfiles()
+	require.Len(t, profiles, 1)
+	assert.Equal(t, 2.0, profiles[0].Multiplier)
+	assert.Equal(t, 0.0, profiles[0].ScoreFloor)
+	assert.Equal(t, 0.75, profiles[0].ScoreCap)
+	assert.False(t, profiles[0].Enabled)
+	require.Error(t, sm.AlterPromotionProfile("promo", map[string]interface{}{"unknown": true}))
+
+	gotInt, ok := toInt64("nope")
+	assert.False(t, ok)
+	assert.Zero(t, gotInt)
+	gotFloat, ok := toFloat64("nope")
+	assert.False(t, ok)
+	assert.Zero(t, gotFloat)
+}
+
 // TestShowPromotionPolicies_Sorted verifies alphabetical ordering.
 func TestShowPromotionPolicies_Sorted(t *testing.T) {
 	sm := NewSchemaManager()

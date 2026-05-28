@@ -50,6 +50,19 @@ func TestBoltDatabaseManagerAdapter_ValidAndInvalidConversions(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid limits type")
 
 	require.NoError(t, adapter.SetDatabaseLimits("db1", &multidb.Limits{}))
+	limits, err := adapter.GetDatabaseLimits("db1")
+	require.NoError(t, err)
+	assert.IsType(t, &multidb.Limits{}, limits)
+
+	require.NoError(t, adapter.CreateDatabase("db5"))
+	assert.True(t, adapter.Exists("db5"))
+	require.NoError(t, adapter.DropDatabase("db5"))
+	assert.False(t, adapter.Exists("db5"))
+
+	require.NoError(t, adapter.CreateAlias("db1_alias", "db1"))
+	aliases := adapter.ListAliases("db1")
+	assert.Equal(t, "db1", aliases["db1_alias"])
+	require.NoError(t, adapter.DropAlias("db1_alias"))
 
 	_, err = adapter.GetStorageForUse("db1", "")
 	require.NoError(t, err)
@@ -93,6 +106,12 @@ func TestBoltDatabaseManagerAdapter_ValidAndInvalidConversions(t *testing.T) {
 	consecutive, err = adapter.GetCompositeConstituents("composite2")
 	require.NoError(t, err)
 	require.Len(t, consecutive, 4)
+	require.NoError(t, adapter.RemoveConstituent("composite2", "db4a"))
+	consecutive, err = adapter.GetCompositeConstituents("composite2")
+	require.NoError(t, err)
+	require.Len(t, consecutive, 3)
+	require.NoError(t, adapter.DropCompositeDatabase("composite2"))
+	assert.False(t, adapter.IsCompositeDatabase("composite2"))
 
 	assert.ErrorContains(t, adapter.CreateCompositeDatabase("broken", []interface{}{123}), "invalid constituent type at index 0")
 	assert.ErrorContains(t, adapter.AddConstituent("composite2", 123), "invalid constituent type")

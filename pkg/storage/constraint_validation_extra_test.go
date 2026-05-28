@@ -149,3 +149,70 @@ func TestValidateCardinalityOnCreationForEngine(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+func TestValidatePolicyOnCreationForEngine(t *testing.T) {
+	e := NewMemoryEngine()
+	t.Cleanup(func() { _ = e.Close() })
+
+	for _, node := range []*Node{
+		{ID: "test:user", Labels: []string{"User"}, Properties: map[string]any{}},
+		{ID: "test:secret", Labels: []string{"Secret"}, Properties: map[string]any{}},
+		{ID: "test:report", Labels: []string{"Report"}, Properties: map[string]any{}},
+	} {
+		_, err := e.CreateNode(node)
+		require.NoError(t, err)
+	}
+	require.NoError(t, e.CreateEdge(&Edge{ID: "test:e1", StartNode: "test:user", EndNode: "test:secret", Type: "READS"}))
+	require.NoError(t, e.CreateEdge(&Edge{ID: "test:e2", StartNode: "test:user", EndNode: "test:report", Type: "READS"}))
+
+	edges, err := e.AllEdges()
+	require.NoError(t, err)
+	err = validatePolicyOnCreationForEngine(e, edges, Constraint{
+		Type: ConstraintPolicy, Label: "READS", PolicyMode: "DISALLOWED", SourceLabel: "User", TargetLabel: "Secret",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "DISALLOWED policy")
+
+	require.NoError(t, e.GetSchema().AddConstraint(Constraint{
+		Name: "allow_reports", Type: ConstraintPolicy, Label: "READS", PolicyMode: "ALLOWED", SourceLabel: "User", TargetLabel: "Report",
+	}))
+	err = validatePolicyOnCreationForEngine(e, edges, Constraint{
+		Type: ConstraintPolicy, Label: "READS", PolicyMode: "ALLOWED", SourceLabel: "User", TargetLabel: "Secret",
+	})
+	require.NoError(t, err)
+
+	err = validatePolicyOnCreationForEngine(e, edges, Constraint{
+		Type: ConstraintPolicy, Label: "READS", PolicyMode: "ALLOWED", SourceLabel: "Admin", TargetLabel: "Secret",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ALLOWED policy")
+}
+
+func TestValidateRelPropertyTypeOnCreationForEngine(t *testing.T) {
+	e := NewMemoryEngine()
+	t.Cleanup(func() { _ = e.Close() })
+
+	for _, n := range []NodeID{"test:a", "test:b"} {
+		_, err := e.CreateNode(&Node{ID: n, Labels: []string{"Endpoint"}, Properties: map[string]any{}})
+		require.NoError(t, err)
+	}
+	require.NoError(t, e.CreateEdge(&Edge{ID: "test:ok", StartNode: "test:a", EndNode: "test:b", Type: "SCORED", Properties: map[string]any{"score": int64(10)}}))
+	require.NoError(t, e.CreateEdge(&Edge{ID: "test:ignored", StartNode: "test:a", EndNode: "test:b", Type: "OTHER", Properties: map[string]any{"score": "bad"}}))
+
+	require.NoError(t, validateRelPropertyTypeOnCreationForEngine(e, PropertyTypeConstraint{
+		EntityType:   ConstraintEntityRelationship,
+		Label:        "SCORED",
+		Property:     "score",
+		ExpectedType: PropertyTypeInteger,
+	}))
+
+	require.NoError(t, e.CreateEdge(&Edge{ID: "test:bad", StartNode: "test:a", EndNode: "test:b", Type: "SCORED", Properties: map[string]any{"score": "bad"}}))
+	err := validateRelPropertyTypeOnCreationForEngine(e, PropertyTypeConstraint{
+		EntityType:   ConstraintEntityRelationship,
+		Label:        "SCORED",
+		Property:     "score",
+		ExpectedType: PropertyTypeInteger,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "relationship test:bad property score")
+}
