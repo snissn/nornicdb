@@ -169,6 +169,33 @@ type coverageSearcher struct {
 	nodes         map[string]*NodeData
 }
 
+type coverageEmbedder struct {
+	chunks   []string
+	chunkErr error
+	embeds   map[string][]float32
+	embedErr error
+}
+
+func (e *coverageEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if e.embedErr != nil {
+		return nil, e.embedErr
+	}
+	if e.embeds != nil {
+		return e.embeds[text], nil
+	}
+	return []float32{1, 2, 3}, nil
+}
+
+func (e *coverageEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	if e.chunkErr != nil {
+		return nil, e.chunkErr
+	}
+	if e.chunks != nil {
+		return e.chunks, nil
+	}
+	return []string{text}, nil
+}
+
 func (s *coverageSearcher) HybridSearch(ctx context.Context, query string, queryEmbedding []float32, labels []string, limit int) ([]*SemanticSearchResult, error) {
 	return s.searchResults, nil
 }
@@ -200,6 +227,22 @@ type coverageToolGenerator struct {
 	err       error
 	called    bool
 }
+
+type coverageGPUGenerator struct {
+	*MockGenerator
+}
+
+func (g *coverageGPUGenerator) UsingGPU() bool { return true }
+func (g *coverageGPUGenerator) GPULayers() int { return 4 }
+
+type coverageFailingResponseWriter struct{}
+
+func (w *coverageFailingResponseWriter) Header() http.Header { return http.Header{} }
+func (w *coverageFailingResponseWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+func (w *coverageFailingResponseWriter) WriteHeader(statusCode int) {}
+func (w *coverageFailingResponseWriter) Flush()                     {}
 
 func (g *coverageToolGenerator) GenerateWithTools(ctx context.Context, messages []ToolRoundMessage, tools []MCPTool, params GenerateParams) (string, []ParsedToolCall, error) {
 	g.called = true
@@ -617,6 +660,235 @@ func TestHeimdallCoverage_QueryExecutorAndLoggerHelpers(t *testing.T) {
 	logger.Info("info")
 	logger.Warn("warn")
 	logger.Error("error")
+}
+
+func TestHeimdallCoverage_VLLMGeneratorBranches(t *testing.T) {
+	_, err := newVLLMGenerator(Config{})
+	require.ErrorContains(t, err, "vllm provider requires")
+
+	gen, err := newVLLMGenerator(Config{Model: "mistral"})
+	require.NoError(t, err)
+	oag := gen.(*openAIGenerator)
+	assert.Equal(t, defaultVLLMBaseURL, oag.baseURL)
+	assert.Equal(t, "EMPTY", oag.apiKey)
+	assert.Equal(t, "mistral", oag.model)
+	assert.Equal(t, "openai:mistral", gen.ModelPath())
+
+	gen, err = newVLLMGenerator(Config{Model: "mixtral", APIURL: "http://vllm.local:9000/", APIKey: "sk-test"})
+	require.NoError(t, err)
+	oag = gen.(*openAIGenerator)
+	assert.Equal(t, "http://vllm.local:9000", oag.baseURL)
+	assert.Equal(t, "sk-test", oag.apiKey)
+	assert.Equal(t, "mixtral", oag.model)
+}
+
+func TestHeimdallCoverage_OrderPluginsCycleAndSelfLoop(t *testing.T) {
+	selfLoop := NewOrderedMockPlugin("solo", 5, []string{"solo"}, []string{"solo"})
+	ordered := orderPlugins(map[string]*LoadedHeimdallPlugin{
+		"solo": {Plugin: selfLoop, Builtin: true},
+	})
+	require.Len(t, ordered, 1)
+	assert.Equal(t, "solo", ordered[0].Plugin.Name())
+
+	alpha := NewOrderedMockPlugin("alpha", 10, []string{"beta"}, nil)
+	beta := NewOrderedMockPlugin("beta", 5, []string{"alpha"}, nil)
+	ordered = orderPlugins(map[string]*LoadedHeimdallPlugin{
+		"alpha": {Plugin: alpha, Builtin: true},
+		"beta":  {Plugin: beta, Builtin: true},
+	})
+	require.Len(t, ordered, 2)
+	assert.Equal(t, "alpha", ordered[0].Plugin.Name())
+	assert.Equal(t, "beta", ordered[1].Plugin.Name())
+
+	assert.Nil(t, orderPlugins(nil))
+}
+
+func TestHeimdallCoverage_ModelsEndpointDefaults(t *testing.T) {
+	manager := newTestManager(NewMockGenerator("/tmp/model.gguf"))
+	handler := NewHandler(manager, Config{Enabled: true}, &mockDBRouter{}, &mockMetricsReader{})
+	require.NotNil(t, handler)
+	assert.Equal(t, "nornicdb-heimdall", handler.announcedModel())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	data := payload["data"].([]interface{})
+	require.Len(t, data, 1)
+	model := data[0].(map[string]interface{})
+	assert.Equal(t, "nornicdb-heimdall", model["id"])
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/models", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestHeimdallCoverage_PromptToolBudgetBranches(t *testing.T) {
+	ctx := &PromptContext{
+		ActionPrompt: strings.Repeat("x", MaxSystemPromptTokens()*8),
+		UserMessage:  "test",
+	}
+	prompt := ctx.BuildFinalPromptForTools()
+	assert.Contains(t, prompt, "ACTIONS:")
+	assert.NotContains(t, prompt, "RESPONSE RULES:")
+
+	toolCtx := &PromptContext{ExternalTools: []MCPTool{
+		{Name: "", Description: "skip me"},
+		{Name: "real_tool"},
+		{Name: "schema_tool", Description: "schema desc", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}}
+	toolsPrompt := toolCtx.externalToolsPrompt()
+	assert.NotContains(t, toolsPrompt, "skip me")
+	assert.Contains(t, toolsPrompt, "real_tool: No description provided")
+	assert.Contains(t, toolsPrompt, "schema_tool: schema desc")
+	assert.Contains(t, toolsPrompt, `inputSchema: {"type":"object"}`)
+
+	originalBudget := tokenBudget
+	t.Cleanup(func() { tokenBudget = originalBudget })
+	budgetCtx := &PromptContext{
+		ActionPrompt: "act",
+		UserMessage:  strings.Repeat("u", 800),
+	}
+	systemTokens := budgetCtx.EstimatedSystemTokens()
+	tokenBudget = TokenBudget{
+		MaxContext: systemTokens + 10,
+		MaxSystem:  systemTokens + 100,
+		MaxUser:    MaxUserMessageTokens(),
+	}
+	err := budgetCtx.ValidateTokenBudget()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "total prompt too large")
+}
+
+func TestHeimdallCoverage_LocalGeneratorFallbackAndManagerReset(t *testing.T) {
+	ResetSubsystemManagerForTests()
+	first := GetSubsystemManager()
+	RegisterBuiltinAction(ActionFunc{Name: "heimdall_reset_probe", Description: "probe", Handler: func(ctx ActionContext) (*ActionResult, error) {
+		return &ActionResult{Success: true}, nil
+	}})
+	ResetSubsystemManagerForTests()
+	second := GetSubsystemManager()
+	assert.NotSame(t, first, second)
+	_, ok := GetHeimdallAction("heimdall_reset_probe")
+	assert.False(t, ok)
+
+	tmpDir := t.TempDir()
+	modelPath := filepath.Join(tmpDir, "custom.gguf")
+	require.NoError(t, os.WriteFile(modelPath, []byte("model"), 0o600))
+
+	var calls []int
+	previous := SetGeneratorLoader(func(modelPath string, gpuLayers, contextSize, batchSize int) (Generator, error) {
+		calls = append(calls, gpuLayers)
+		assert.Equal(t, 8192, contextSize)
+		assert.Equal(t, 2048, batchSize)
+		if gpuLayers != 0 {
+			return nil, errors.New("gpu unavailable")
+		}
+		return NewMockGenerator(modelPath), nil
+	})
+	t.Cleanup(func() { SetGeneratorLoader(previous) })
+
+	gen, resolvedPath, err := loadLocalGenerator(Config{Model: "custom", ModelsDir: tmpDir, GPULayers: 7})
+	require.NoError(t, err)
+	assert.Equal(t, modelPath, resolvedPath)
+	assert.Equal(t, []int{7, 0}, calls)
+	assert.Equal(t, modelPath, gen.ModelPath())
+
+	_, _, err = loadLocalGenerator(Config{Model: "missing", ModelsDir: tmpDir})
+	require.ErrorContains(t, err, "Heimdall model not found")
+}
+
+func TestHeimdallCoverage_PostExecuteAndEventQueueBranches(t *testing.T) {
+	postCalled := make(chan string, 1)
+	hook := &coverageLifecyclePlugin{
+		coverageMinimalPlugin: newCoverageMinimalPlugin("post-hook"),
+		postExecuteFn: func(ctx *PostExecuteContext) {
+			postCalled <- ctx.Action
+		},
+	}
+	pool := &postExecuteWorkerPool{workers: 1}
+	pool.enqueue(postExecuteJob{pluginName: "post-hook", hook: hook, ctx: &PostExecuteContext{Action: "act"}})
+	require.Eventually(t, func() bool {
+		select {
+		case got := <-postCalled:
+			return got == "act"
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	close(pool.jobs)
+
+	dropPool := &postExecuteWorkerPool{jobs: make(chan postExecuteJob)}
+	require.NotPanics(t, func() {
+		dropPool.enqueue(postExecuteJob{pluginName: "drop", hook: hook, ctx: &PostExecuteContext{Action: "drop"}})
+	})
+
+	dispatcher := &dbEventDispatcher{pluginQueues: make(map[string]*pluginEventQueue)}
+	dispatcher.ensurePluginQueueForPlugin(nil)
+	dispatcher.ensurePluginQueueForPlugin(&LoadedHeimdallPlugin{Plugin: newCoverageMinimalPlugin("plain")})
+	require.Empty(t, dispatcher.pluginQueues)
+
+	eventCalls := make(chan *DatabaseEvent, 2)
+	eventer := &coverageEventPlugin{coverageMinimalPlugin: newCoverageMinimalPlugin("eventer-extra"), events: eventCalls}
+	dispatcher.ensurePluginQueueForPlugin(&LoadedHeimdallPlugin{Plugin: eventer})
+	dispatcher.ensurePluginQueueForPlugin(&LoadedHeimdallPlugin{Plugin: eventer})
+	require.Len(t, dispatcher.pluginQueues, 1)
+	dispatcher.enqueueEvent("eventer-extra", eventer, &DatabaseEvent{Type: EventNodeUpdated})
+	require.Eventually(t, func() bool {
+		select {
+		case evt := <-eventCalls:
+			return evt.Type == EventNodeUpdated
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	dispatcher.mu.Lock()
+	for _, queue := range dispatcher.pluginQueues {
+		close(queue.ch)
+	}
+	dispatcher.mu.Unlock()
+}
+
+func TestHeimdallCoverage_BifrostConfirmationNoClients(t *testing.T) {
+	b := NewBifrost(Config{BifrostEnabled: true})
+	confirmed, err := b.RequestConfirmation("dangerous action")
+	require.NoError(t, err)
+	assert.False(t, confirmed)
+	assert.False(t, b.IsConnected())
+	assert.Zero(t, b.ConnectionCount())
+}
+
+func TestHeimdallCoverage_BifrostBroadcastClientBranches(t *testing.T) {
+	b := NewBifrost(Config{BifrostEnabled: true})
+	recorder := httptest.NewRecorder()
+	b.RegisterClient("client-1", recorder, recorder)
+	require.True(t, b.IsConnected())
+	require.Equal(t, 1, b.ConnectionCount())
+
+	require.NoError(t, b.SendMessage("hello"))
+	require.Contains(t, recorder.Body.String(), `"type":"message"`)
+	require.Contains(t, recorder.Body.String(), `"content":"hello"`)
+
+	confirmed, err := b.RequestConfirmation("drop index")
+	require.NoError(t, err)
+	require.False(t, confirmed)
+	require.Contains(t, recorder.Body.String(), `"type":"confirmation_request"`)
+
+	stats := b.Stats()
+	require.Equal(t, true, stats["enabled"])
+	require.Equal(t, 1, stats["connection_count"])
+
+	err = b.broadcast(BifrostMessage{Type: "bad", Data: map[string]interface{}{"bad": make(chan int)}})
+	require.ErrorContains(t, err, "failed to marshal message")
+
+	b.RegisterClient("client-2", &coverageFailingResponseWriter{}, &coverageFailingResponseWriter{})
+	b.UnregisterClient("client-1")
+	err = b.Broadcast("will fail")
+	require.ErrorContains(t, err, "write failed")
 }
 
 func TestHeimdallCoverage_HandlerAutocompleteAndHelpers(t *testing.T) {
@@ -1617,4 +1889,242 @@ func TestCoverageExtra_NoOpAsyncAndDefaultLogger(t *testing.T) {
 	logger.Info("info")
 	logger.Warn("warn")
 	logger.Error("error")
+}
+
+func TestHeimdallCoverage_HandlerToolAndPromptHelpers(t *testing.T) {
+	sanitized := sanitizeAssistantResponse(" answer <|im_start|>assistant leak")
+	require.Equal(t, "answer\n", sanitized)
+	require.Empty(t, sanitizeAssistantResponse("   "))
+	require.Equal(t, "answer\n", sanitizeAssistantResponse("answer<|start_of_turn|>model"))
+
+	require.True(t, looksLikeActionEnvelopePrefix(`{"action":"heimdall_status","params":{}}`))
+	require.True(t, looksLikeActionEnvelopePrefix(`prefix {"action":"heimdall_status"`))
+	require.False(t, looksLikeActionEnvelopePrefix(""))
+	require.False(t, looksLikeActionEnvelopePrefix("plain text"))
+
+	schema := json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)
+	converted := chatRequestToolsToMCPTools([]ChatToolDefinition{
+		{Type: "function", Function: ChatToolDefinitionFunction{Name: "lookup", Description: " Lookup ", Parameters: schema}},
+		{Type: "", Function: ChatToolDefinitionFunction{Name: "fallback"}},
+		{Type: "custom", Function: ChatToolDefinitionFunction{Name: "skip"}},
+		{Type: "function", Function: ChatToolDefinitionFunction{Name: "   "}},
+	})
+	require.Len(t, converted, 2)
+	require.Equal(t, "lookup", converted[0].Name)
+	require.Equal(t, "Lookup", converted[0].Description)
+	require.Equal(t, schema, converted[0].InputSchema)
+	require.Equal(t, "fallback", converted[1].Name)
+	require.JSONEq(t, string(DefaultActionInputSchema), string(converted[1].InputSchema))
+	require.Nil(t, chatRequestToolsToMCPTools(nil))
+
+	merged := mergeMCPTools(
+		[]MCPTool{{Name: " a ", Description: "first"}, {Name: "", Description: "skip"}},
+		[]MCPTool{{Name: "a", Description: "duplicate"}, {Name: "b", Description: "second"}},
+	)
+	require.Len(t, merged, 2)
+	require.Equal(t, " a ", merged[0].Name)
+	require.Equal(t, "b", merged[1].Name)
+
+	handler := &Handler{}
+	require.Equal(t, "No results available.", handler.defaultFormatResponse(nil))
+	require.Equal(t, "Action failed: nope", handler.defaultFormatResponse(&ActionResult{Success: false, Message: "nope"}))
+	require.Equal(t, "ok", handler.defaultFormatResponse(&ActionResult{Success: true, Message: "ok"}))
+	formatted := handler.defaultFormatResponse(&ActionResult{Success: true, Message: "ok", Data: map[string]interface{}{"count": 2}})
+	require.Contains(t, formatted, "```json")
+	require.Contains(t, formatted, `"count": 2`)
+
+	prompt := &PromptContext{
+		ActionPrompt: "- heimdall_status: status",
+		UserMessage:  "What is status?",
+		ExternalTools: []MCPTool{
+			{Name: "external_lookup", Description: " Lookup external ", InputSchema: schema},
+			{Name: "   ", Description: "skip"},
+			{Name: "external_empty"},
+		},
+	}
+	require.Contains(t, prompt.externalToolsPrompt(), "external_lookup: Lookup external")
+	require.Contains(t, prompt.externalToolsPrompt(), "external_empty: No description provided")
+	fullPrompt := prompt.buildFullPromptForTools()
+	require.Contains(t, fullPrompt, "AVAILABLE ACTIONS")
+	require.Contains(t, fullPrompt, "EXTERNAL CLIENT TOOLS")
+}
+
+func TestHeimdallCoverage_OpenAITrimAndTruncateHelpers(t *testing.T) {
+	short := []ToolRoundMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
+	require.Equal(t, short, trimMessagesForContext(short, 1))
+
+	longTool := strings.Repeat("tool-result ", openAIMaxTokensPerToolResult*2)
+	messages := []ToolRoundMessage{
+		{Role: "system", Content: "system"},
+		{Role: "user", Content: "user"},
+		{Role: "assistant", Content: strings.Repeat("old assistant ", 200)},
+		{Role: "tool", Content: longTool},
+		{Role: "assistant", Content: "recent"},
+	}
+	trimmed := trimMessagesForContext(messages, 128)
+	require.Equal(t, "system", trimmed[0].Content)
+	require.Equal(t, "user", trimmed[1].Content)
+	require.NotContains(t, fmt.Sprint(trimmed), "old assistant")
+
+	toolOnly := []ToolRoundMessage{
+		{Role: "system", Content: "system"},
+		{Role: "user", Content: "user"},
+		{Role: "tool", Content: longTool},
+	}
+	trimmedToolOnly := trimMessagesForContext(toolOnly, 1)
+	require.Len(t, trimmedToolOnly, 3)
+	require.Contains(t, trimmedToolOnly[2].Content, "[Truncated for context limit.]")
+
+	underLimit := "small"
+	require.Equal(t, underLimit, truncateForOpenAI(underLimit))
+	overLimit := strings.Repeat("a", openAIMaxContentPerMessage+128)
+	truncated := truncateForOpenAI(overLimit)
+	require.LessOrEqual(t, len(truncated), openAIMaxContentPerMessage)
+	require.Contains(t, truncated, "[Content truncated for API limit;")
+}
+
+func TestHeimdallCoverage_QueryExecutorDiscoverBranches(t *testing.T) {
+	executor := NewQueryExecutorWithSearch(&coverageQueryDB{}, nil, nil, time.Second)
+	_, err := executor.Discover(context.Background(), "graph", nil, 5, 1)
+	require.ErrorContains(t, err, "semantic search not available")
+
+	searcher := &coverageSearcher{
+		searchResults: []*SemanticSearchResult{{
+			ID:     "doc-1",
+			Labels: []string{"Document"},
+			Properties: map[string]interface{}{
+				"title":   "Doc One",
+				"content": strings.Repeat("content ", 40),
+			},
+			Score: 0.7,
+		}},
+		edges: map[string][]*GraphEdge{
+			"doc-1": {{SourceID: "doc-1", TargetID: "doc-2", Type: "LINKS"}},
+			"doc-2": {{SourceID: "doc-3", TargetID: "doc-2", Type: "MENTIONS"}},
+		},
+		nodes: map[string]*NodeData{
+			"doc-2": {ID: "doc-2", Labels: []string{"File"}, Properties: map[string]interface{}{"title": "Doc Two"}},
+			"doc-3": {ID: "doc-3", Labels: []string{"Person"}, Properties: map[string]interface{}{"title": "Doc Three"}},
+		},
+	}
+
+	executor = NewQueryExecutorWithSearch(&coverageQueryDB{nodeCount: 2, edgeCount: 1}, searcher, nil, time.Second)
+	stats := executor.Stats()
+	require.Equal(t, int64(2), stats.NodeCount)
+	require.Equal(t, int64(1), stats.RelationshipCount)
+	result, err := executor.Discover(context.Background(), "graph", []string{"Document"}, 3, 2)
+	require.NoError(t, err)
+	require.Equal(t, "keyword", result.Method)
+	require.Equal(t, 1, result.Total)
+	require.Equal(t, "Document", result.Results[0].Type)
+	require.Equal(t, "Doc One", result.Results[0].Title)
+	require.Contains(t, result.Results[0].ContentPreview, "...")
+	require.Len(t, result.Results[0].Related, 2)
+	require.Equal(t, "outgoing", result.Results[0].Related[0].Direction)
+	require.Equal(t, "incoming", result.Results[0].Related[1].Direction)
+
+	chunkErrExecutor := NewQueryExecutorWithSearch(&coverageQueryDB{}, searcher, &coverageEmbedder{chunkErr: errors.New("chunk failed")}, time.Second)
+	_, err = chunkErrExecutor.Discover(context.Background(), "graph", nil, 3, 1)
+	require.ErrorContains(t, err, "chunk failed")
+
+	vectorExecutor := NewQueryExecutorWithSearch(&coverageQueryDB{}, searcher, &coverageEmbedder{
+		chunks: []string{"chunk one", "chunk two"},
+		embeds: map[string][]float32{"chunk one": {1}, "chunk two": {2}},
+	}, time.Second)
+	vectorResult, err := vectorExecutor.Discover(context.Background(), "graph", nil, 1, 1)
+	require.NoError(t, err)
+	require.Equal(t, "vector", vectorResult.Method)
+	require.Equal(t, 1, vectorResult.Total)
+	require.Equal(t, 0.7, vectorResult.Results[0].Similarity)
+
+	fallbackExecutor := NewQueryExecutorWithSearch(&coverageQueryDB{}, searcher, &coverageEmbedder{embedErr: errors.New("embed failed")}, time.Second)
+	fallbackResult, err := fallbackExecutor.Discover(context.Background(), "graph", nil, 3, 0)
+	require.NoError(t, err)
+	require.Equal(t, "keyword", fallbackResult.Method)
+
+	errorSearcher := &coverageSearcher{searchErr: errors.New("search failed")}
+	errorExecutor := NewQueryExecutorWithSearch(&coverageQueryDB{}, errorSearcher, nil, time.Second)
+	_, err = errorExecutor.Discover(context.Background(), "graph", nil, 3, 0)
+	require.ErrorContains(t, err, "search failed")
+}
+
+func TestHeimdallCoverage_NewManagerProviderBranches(t *testing.T) {
+	disabled, err := NewManager(Config{Enabled: false})
+	require.NoError(t, err)
+	require.Nil(t, disabled)
+
+	providerName := "coverage-provider"
+	oldFactory, hadFactory := heimdallProviderFactories[providerName]
+	RegisterHeimdallProvider(providerName, func(cfg Config) (Generator, error) {
+		return &coverageGPUGenerator{MockGenerator: NewMockGenerator("provider:model")}, nil
+	})
+	t.Cleanup(func() {
+		if hadFactory {
+			heimdallProviderFactories[providerName] = oldFactory
+		} else {
+			delete(heimdallProviderFactories, providerName)
+		}
+	})
+
+	manager, err := NewManager(Config{Enabled: true, Provider: "  COVERAGE-PROVIDER  ", MaxTokens: 128})
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+	require.Equal(t, "provider:model", manager.ModelPath())
+	require.True(t, manager.lastUsed.After(time.Time{}))
+
+	errorProvider := "coverage-provider-error"
+	oldErrorFactory, hadErrorFactory := heimdallProviderFactories[errorProvider]
+	RegisterHeimdallProvider(errorProvider, func(cfg Config) (Generator, error) {
+		return nil, errors.New("provider failed")
+	})
+	t.Cleanup(func() {
+		if hadErrorFactory {
+			heimdallProviderFactories[errorProvider] = oldErrorFactory
+		} else {
+			delete(heimdallProviderFactories, errorProvider)
+		}
+	})
+	_, err = NewManager(Config{Enabled: true, Provider: errorProvider})
+	require.ErrorContains(t, err, "provider failed")
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "unknown.gguf"), []byte("model"), 0o600))
+	previous := SetGeneratorLoader(func(modelPath string, gpuLayers, contextSize, batchSize int) (Generator, error) {
+		return NewMockGenerator(modelPath), nil
+	})
+	t.Cleanup(func() { SetGeneratorLoader(previous) })
+	manager, err = NewManager(Config{Enabled: true, Provider: "unknown-provider", Model: "unknown", ModelsDir: tmpDir})
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(tmpDir, "unknown.gguf"), manager.ModelPath())
+}
+
+func TestHeimdallCoverage_LoadLocalGeneratorDefaultDiscovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	modelsDir := filepath.Join(tmpDir, "models")
+	require.NoError(t, os.MkdirAll(modelsDir, 0o755))
+	modelPath := filepath.Join(modelsDir, "qwen3-0.6b-instruct.gguf")
+	require.NoError(t, os.WriteFile(modelPath, []byte("model"), 0o600))
+	t.Chdir(tmpDir)
+
+	var capturedModelPath string
+	var capturedGPULayers int
+	var capturedContextSize int
+	var capturedBatchSize int
+	previous := SetGeneratorLoader(func(modelPath string, gpuLayers, contextSize, batchSize int) (Generator, error) {
+		capturedModelPath = modelPath
+		capturedGPULayers = gpuLayers
+		capturedContextSize = contextSize
+		capturedBatchSize = batchSize
+		return &coverageGPUGenerator{MockGenerator: NewMockGenerator(modelPath)}, nil
+	})
+	t.Cleanup(func() { SetGeneratorLoader(previous) })
+
+	gen, resolvedPath, err := loadLocalGenerator(Config{GPULayers: 5, ContextSize: 4096, BatchSize: 1024})
+	require.NoError(t, err)
+	require.True(t, strings.HasSuffix(resolvedPath, "qwen3-0.6b-instruct.gguf"))
+	require.Equal(t, resolvedPath, capturedModelPath)
+	require.Equal(t, 5, capturedGPULayers)
+	require.Equal(t, 4096, capturedContextSize)
+	require.Equal(t, 1024, capturedBatchSize)
+	require.True(t, gen.(*coverageGPUGenerator).UsingGPU())
 }

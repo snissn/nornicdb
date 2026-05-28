@@ -510,6 +510,78 @@ func TestBruteVectorIndex_SearchBranches(t *testing.T) {
 	require.Nil(t, cos.search(cancelCtx, []float32{1, 1}, 1, -1, 0))
 }
 
+func TestVectorIndexCacheExtraBranches(t *testing.T) {
+	t.Parallel()
+
+	var nilCache *vectorIndexCache
+	require.Nil(t, nilCache.search(context.Background(), "c", 2, qpb.Distance_Dot, "", []float32{1, 0}, 1, -1, 0))
+	require.NoError(t, nilCache.replacePoint("c", 2, qpb.Distance_Dot, "p", nil, nil, nil))
+	nilCache.deletePoint("c", "p", nil)
+
+	cache := newVectorIndexCache()
+	require.NoError(t, cache.replacePoint("c", 2, qpb.Distance_Dot, "qdrant:point:p1", nil, []string{""}, [][]float32{{1, 0}}))
+	results := cache.search(context.Background(), "c", 2, qpb.Distance_Dot, "", []float32{1, 0}, 5, -1, 0)
+	require.Len(t, results, 1)
+	require.Equal(t, "p1", results[0].ID)
+
+	cache.deletePoint("c", "qdrant:point:p1", nil)
+	require.Empty(t, cache.search(context.Background(), "c", 2, qpb.Distance_Dot, "", []float32{1, 0}, 5, -1, 0))
+
+	require.ErrorContains(t, cache.replacePoint("c", 2, qpb.Distance_Dot, "p2", nil, []string{""}, [][]float32{{1, 0, 0}}), "vector dim mismatch")
+
+	first := cache.getOrCreate("c", "named", 2, qpb.Distance_Euclid)
+	second := cache.getOrCreate("c", "named", 3, qpb.Distance_Euclid)
+	require.NotSame(t, first, second)
+	cache.deleteCollection("c")
+	require.Empty(t, cache.indexes)
+
+	require.Equal(t, "abc", compactPointID("c", "qdrant:point:abc"))
+	require.Equal(t, "raw", compactPointID("c", "raw"))
+	require.Equal(t, "qdrant:point:raw", expandPointID("raw"))
+	require.Equal(t, "qdrant:custom", expandPointID("qdrant:custom"))
+}
+
+func TestCollectionStorePointCountBranches(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestCollectionStore(t)
+	dbStore := store.(*databaseCollectionStore)
+
+	require.NoError(t, store.Create(ctx, "counted", 2, qpb.Distance_Cosine))
+	engine, _, err := store.Open(ctx, "counted")
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "qdrant:point:a", Labels: []string{QdrantPointLabel}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "not-a-point", Labels: []string{"Other"}})
+	require.NoError(t, err)
+
+	count, err := store.PointCount(ctx, "counted")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
+
+	require.False(t, dbStore.Exists(""))
+	require.False(t, dbStore.Exists("missing"))
+	_, err = dbStore.PointCount(ctx, "missing")
+	require.ErrorIs(t, err, ErrCollectionNotFound)
+}
+
+func TestFilterMatchRangeExtraBranches(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, matchesMatch("anything", nil))
+	require.False(t, matchesMatch("tag", &qpb.Match{MatchValue: &qpb.Match_Keyword{Keyword: "other"}}))
+	require.False(t, matchesMatch(int64(5), &qpb.Match{MatchValue: &qpb.Match_Integer{Integer: 6}}))
+	require.False(t, matchesMatch(false, &qpb.Match{MatchValue: &qpb.Match_Boolean{Boolean: true}}))
+	require.False(t, matchesMatch("x", &qpb.Match{}))
+
+	require.True(t, matchesRange(3, nil))
+	require.True(t, matchesRange(float64(3), &qpb.Range{Gte: ptrF64(3), Lte: ptrF64(3)}))
+	require.False(t, matchesFieldCondition(&storage.Node{Properties: map[string]interface{}{"k": "v"}}, &qpb.FieldCondition{
+		Key:   "k",
+		Match: &qpb.Match{MatchValue: &qpb.Match_Keyword{Keyword: "v"}},
+		Range: &qpb.Range{Gt: ptrF64(1)},
+	}))
+}
+
 func TestPointsService_ScrollBatchAndGroupsBranches(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := setupExtendedPointsService(t)

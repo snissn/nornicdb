@@ -9,6 +9,7 @@ import (
 
 	kmsapi "cloud.google.com/go/kms/apiv1"
 	kmspb "cloud.google.com/go/kms/apiv1/kmspb"
+	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/option"
 )
 
@@ -21,8 +22,19 @@ type GCPProviderConfig struct {
 }
 
 type GCPProvider struct {
-	client      *kmsapi.KeyManagementClient
+	client      gcpKMSClient
 	cryptoKeyID string
+}
+
+type gcpKMSClient interface {
+	Encrypt(context.Context, *kmspb.EncryptRequest, ...gax.CallOption) (*kmspb.EncryptResponse, error)
+	Decrypt(context.Context, *kmspb.DecryptRequest, ...gax.CallOption) (*kmspb.DecryptResponse, error)
+	GetCryptoKey(context.Context, *kmspb.GetCryptoKeyRequest, ...gax.CallOption) (*kmspb.CryptoKey, error)
+	Close() error
+}
+
+var newGCPKMSClient = func(ctx context.Context, opts ...option.ClientOption) (gcpKMSClient, error) {
+	return kmsapi.NewKeyManagementClient(ctx, opts...)
 }
 
 func NewGCPProvider(ctx context.Context, cfg GCPProviderConfig) (KeyProvider, error) {
@@ -33,7 +45,7 @@ func NewGCPProvider(ctx context.Context, cfg GCPProviderConfig) (KeyProvider, er
 	if cfg.CredentialsFile != "" {
 		opts = append(opts, option.WithCredentialsFile(cfg.CredentialsFile))
 	}
-	client, err := kmsapi.NewKeyManagementClient(ctx, opts...)
+	client, err := newGCPKMSClient(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}

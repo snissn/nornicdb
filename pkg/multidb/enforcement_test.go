@@ -1043,6 +1043,16 @@ func TestConnectionTracker_DecrementConnection(t *testing.T) {
 	assert.Equal(t, 0, tracker.GetConnectionCount("db1"))
 }
 
+func TestConnectionTracker_TryIncrementConnectionNoLimit(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	tracker := NewConnectionTracker()
+
+	require.NoError(t, tracker.TryIncrementConnection(manager, dbName))
+	assert.Equal(t, 1, tracker.GetConnectionCount(dbName))
+	require.NoError(t, tracker.TryIncrementConnection(manager, dbName))
+	assert.Equal(t, 2, tracker.GetConnectionCount(dbName))
+}
+
 func TestConnectionTracker_DecrementConnection_DoesNotGoNegative(t *testing.T) {
 	tracker := NewConnectionTracker()
 
