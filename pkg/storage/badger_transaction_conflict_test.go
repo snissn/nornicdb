@@ -211,3 +211,93 @@ func TestGetCommittedEdgeLocked_SnapshotRead(t *testing.T) {
 	require.Equal(t, "REL", got.Type)
 	require.Equal(t, "v", got.Properties["k"])
 }
+
+func TestCheckEdgeEndpointConflicts_TombstonedEndpointBranches(t *testing.T) {
+	t.Run("endpoint deleted after transaction start returns conflict", func(t *testing.T) {
+		engine, err := NewBadgerEngine(t.TempDir())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = engine.Close() })
+
+		_, err = engine.CreateNode(&Node{ID: "test:start", Labels: []string{"L"}})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "test:target", Labels: []string{"L"}})
+		require.NoError(t, err)
+
+		tx, err := engine.BeginTransaction()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = tx.Rollback() })
+
+		require.NoError(t, engine.DeleteNode("test:target"))
+
+		err = tx.checkEdgeEndpointConflicts(&Edge{ID: "test:e1", StartNode: "test:start", EndNode: "test:target", Type: "REL"})
+		require.ErrorIs(t, err, ErrConflict)
+		require.Contains(t, err.Error(), "deleted after transaction start")
+	})
+
+	t.Run("missing endpoint returns invalid edge", func(t *testing.T) {
+		engine, err := NewBadgerEngine(t.TempDir())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = engine.Close() })
+
+		_, err = engine.CreateNode(&Node{ID: "test:start", Labels: []string{"L"}})
+		require.NoError(t, err)
+
+		tx, err := engine.BeginTransaction()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = tx.Rollback() })
+
+		err = tx.checkEdgeEndpointConflicts(&Edge{ID: "test:e2", StartNode: "test:start", EndNode: "test:target", Type: "REL"})
+		require.ErrorIs(t, err, ErrInvalidEdge)
+	})
+}
+
+func TestClassifyUpdateConflictAsUniqueViolation(t *testing.T) {
+	engine, err := NewBadgerEngine(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = engine.Close() })
+
+	schema := engine.GetSchemaForNamespace("test")
+	require.NoError(t, schema.AddConstraint(Constraint{
+		Name:       "unique_name",
+		Type:       ConstraintUnique,
+		Label:      "Person",
+		Properties: []string{"name"},
+	}))
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+
+	nodeID := NodeID("test:peer-owned")
+	_, err = engine.CreateNode(&Node{
+		ID:         nodeID,
+		Labels:     []string{"Person"},
+		Properties: map[string]any{"name": "Alice"},
+	})
+	require.NoError(t, err)
+	constraint := schema.uniqueConstraints["Person:name"]
+	require.NotNil(t, constraint)
+	constraint.mu.Lock()
+	constraint.valuesCacheComplete = true
+	constraint.mu.Unlock()
+
+	tx.namespace = "test"
+	tx.pendingNodes[nodeID] = &Node{
+		ID:         nodeID,
+		Labels:     []string{"Person"},
+		Properties: map[string]any{"name": "Alice"},
+	}
+
+	err = tx.classifyUpdateConflictAsUniqueViolation(nodeID)
+	require.Error(t, err)
+	var cve *ConstraintViolationError
+	require.ErrorAs(t, err, &cve)
+	require.Equal(t, ConstraintUnique, cve.Type)
+	require.Equal(t, "Person", cve.Label)
+	require.Equal(t, []string{"name"}, cve.Properties)
+	require.Contains(t, cve.Message, "claimed by concurrent commit")
+	require.ErrorIs(t, cve.Cause, ErrConflict)
+
+	schema.UnregisterUniqueValue("Person", "name", "Alice")
+	require.Nil(t, tx.classifyUpdateConflictAsUniqueViolation(nodeID))
+}

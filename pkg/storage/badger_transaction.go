@@ -559,6 +559,9 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 		}
 		tx.bufferSet(indexKey, []byte{})
 	}
+	if err := tx.bufferAdjustNodeLabelCounts(tx.namespace, nil, node.Labels); err != nil {
+		return "", err
+	}
 
 	// Add to pending embeddings index if needed
 	if tx.engine.shouldIndexPendingEmbed(node) {
@@ -670,6 +673,9 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 			tx.bufferDelete(indexKey)
 		}
 	}
+	if err := tx.bufferAdjustNodeLabelCounts(tx.namespace, oldNode.Labels, node.Labels); err != nil {
+		return err
+	}
 
 	// Track for read-your-writes
 	nodeCopy := copyNode(node)
@@ -774,6 +780,9 @@ func (tx *BadgerTransaction) deleteNodeBuffered(nodeID NodeID, oldNode *Node) (e
 		if lblKey := tx.engine.labelIndexKeyStringLookup(label, nodeID); lblKey != nil {
 			tx.bufferDelete(lblKey)
 		}
+	}
+	if err := tx.bufferAdjustNodeLabelCounts(tx.namespace, deletedNode.Labels, nil); err != nil {
+		return 0, nil, err
 	}
 
 	// Delete outgoing edges (and track count). Lookup-only prefix — a

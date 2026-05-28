@@ -84,6 +84,9 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 				return fmt.Errorf("failed to write label index: %w", err)
 			}
 		}
+		if err := b.adjustNodeLabelCountsInTxn(txn, dbName, nil, node.Labels); err != nil {
+			return err
+		}
 		if err := putIndexEntryCatalogInTxn(txn, string(node.ID), &IndexEntryCatalog{
 			TargetID:    string(node.ID),
 			TargetScope: "NODE",
@@ -250,6 +253,9 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 					return err
 				}
 			}
+			if err := b.adjustNodeLabelCountsInTxn(txn, dbName, nil, node.Labels); err != nil {
+				return err
+			}
 			// Add to pending embeddings index if needed (same as CreateNode)
 			if b.shouldIndexPendingEmbed(node) {
 				if err := txn.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
@@ -341,6 +347,9 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			if err := txn.Set(lblKey, []byte{}); err != nil {
 				return err
 			}
+		}
+		if err := b.adjustNodeLabelCountsInTxn(txn, dbName, existingNode.Labels, node.Labels); err != nil {
+			return err
 		}
 		if err := putIndexEntryCatalogInTxn(txn, string(node.ID), &IndexEntryCatalog{
 			TargetID:    string(node.ID),
@@ -672,6 +681,9 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 		}
 		schema := b.GetSchemaForNamespace(dbName)
 		if err := b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, deletedNode, nil); err != nil {
+			return err
+		}
+		if err := b.adjustNodeLabelCountsInTxn(txn, dbName, deletedNode.Labels, nil); err != nil {
 			return err
 		}
 		// Tombstone markers (tiny, no body) preserve delete semantics

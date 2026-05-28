@@ -2092,6 +2092,20 @@ func (ae *AsyncEngine) NodeCountByPrefix(prefix string) (int64, error) {
 	return count, nil
 }
 
+func (ae *AsyncEngine) NodeCountByLabel(label string) (int64, error) {
+	if stats, ok := ae.engine.(LabelStatsEngine); ok {
+		return stats.NodeCountByLabel(label)
+	}
+	return CountNodesWithLabel(context.Background(), ae, label)
+}
+
+func (ae *AsyncEngine) NodeCountByLabelInNamespace(namespace, label string) (int64, error) {
+	if stats, ok := ae.engine.(NamespaceLabelStatsProvider); ok {
+		return stats.NodeCountByLabelInNamespace(namespace, label)
+	}
+	return CountNodesWithLabel(context.Background(), NewNamespacedEngine(ae, namespace), label)
+}
+
 func (ae *AsyncEngine) EdgeCountByPrefix(prefix string) (int64, error) {
 	locked := ae.flushMu.TryRLock()
 	if locked {

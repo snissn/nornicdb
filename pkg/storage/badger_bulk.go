@@ -101,6 +101,9 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 					return err
 				}
 			}
+			if err := b.adjustNodeLabelCountsInTxn(txn, dbName, nil, node.Labels); err != nil {
+				return err
+			}
 			// Create-only path: the primary key (nodeKey) IS the current
 			// head body. No version-record write — that halves write
 			// amplification on the hot path.

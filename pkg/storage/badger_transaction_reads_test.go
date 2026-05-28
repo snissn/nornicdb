@@ -401,6 +401,86 @@ func TestTxReads_AllNodesAndGetAllNodes(t *testing.T) {
 	}, nodeIDs(all))
 }
 
+func TestTxReads_MergePendingNodesLocked(t *testing.T) {
+	committedNode := &Node{ID: "test:alice", Labels: []string{"Person"}, Properties: map[string]any{"name": "Alice"}}
+	deletedNode := &Node{ID: "test:bob", Labels: []string{"Person"}, Properties: map[string]any{"name": "Bob"}}
+	otherNode := &Node{ID: "test:doc", Labels: []string{"Document"}, Properties: map[string]any{"title": "Spec"}}
+	pendingReplacement := &Node{ID: "test:alice", Labels: []string{"Person", "Engineer"}, Properties: map[string]any{"name": "Alice v2"}}
+	pendingIncluded := &Node{ID: "test:carol", Labels: []string{"Person"}, Properties: map[string]any{"name": "Carol"}}
+	pendingExcluded := &Node{ID: "test:draft", Labels: []string{"Draft"}, Properties: map[string]any{"name": "Draft"}}
+
+	tx := &BadgerTransaction{
+		Status: TxStatusActive,
+		pendingNodes: map[NodeID]*Node{
+			pendingReplacement.ID: pendingReplacement,
+			pendingIncluded.ID:    pendingIncluded,
+			pendingExcluded.ID:    pendingExcluded,
+		},
+		deletedNodes: map[NodeID]struct{}{
+			deletedNode.ID: {},
+		},
+	}
+
+	merged := tx.mergePendingNodesLocked([]*Node{nil, committedNode, deletedNode, otherNode}, func(node *Node) bool {
+		if node == nil {
+			return false
+		}
+		for _, label := range node.Labels {
+			if label == "Person" {
+				return true
+			}
+		}
+		return false
+	})
+
+	require.Equal(t, []string{"test:alice", "test:carol"}, nodeIDs(merged))
+	require.Equal(t, []string{"Person", "Engineer"}, merged[0].Labels)
+	require.Equal(t, "Alice v2", merged[0].Properties["name"])
+
+	merged[0].Labels[0] = "Mutated"
+	merged[0].Properties["name"] = "mutated"
+	require.Equal(t, []string{"Person", "Engineer"}, pendingReplacement.Labels)
+	require.Equal(t, "Alice v2", pendingReplacement.Properties["name"])
+	require.Equal(t, []string{"Person"}, committedNode.Labels)
+	require.Equal(t, "Alice", committedNode.Properties["name"])
+}
+
+func TestTxReads_MergePendingEdgesLocked(t *testing.T) {
+	committedEdge := &Edge{ID: "test:e1", StartNode: "test:alice", EndNode: "test:bob", Type: "KNOWS", Properties: map[string]any{"since": int64(2020)}}
+	deletedEdge := &Edge{ID: "test:e2", StartNode: "test:alice", EndNode: "test:carol", Type: "KNOWS", Properties: map[string]any{"since": int64(2021)}}
+	pendingReplacement := &Edge{ID: "test:e1", StartNode: "test:alice", EndNode: "test:bob", Type: "KNOWS", Properties: map[string]any{"since": int64(2024)}}
+	pendingIncluded := &Edge{ID: "test:e3", StartNode: "test:bob", EndNode: "test:dave", Type: "KNOWS", Properties: map[string]any{"since": int64(2025)}}
+	pendingExcluded := &Edge{ID: "test:e4", StartNode: "test:bob", EndNode: "test:dave", Type: "FOLLOWS", Properties: map[string]any{"since": int64(2026)}}
+
+	tx := &BadgerTransaction{
+		Status: TxStatusActive,
+		pendingEdges: map[EdgeID]*Edge{
+			pendingReplacement.ID: pendingReplacement,
+			pendingIncluded.ID:    pendingIncluded,
+			pendingExcluded.ID:    pendingExcluded,
+		},
+		deletedEdges: map[EdgeID]struct{}{
+			deletedEdge.ID: {},
+		},
+	}
+
+	merged := tx.mergePendingEdgesLocked([]*Edge{nil, committedEdge, deletedEdge}, func(edge *Edge) bool {
+		return edge != nil && edge.Type == "KNOWS"
+	})
+
+	require.Equal(t, []string{"test:e1", "test:e3"}, edgeIDs(merged))
+	require.Equal(t, int64(2024), merged[0].Properties["since"])
+
+	merged[0].Properties["since"] = int64(9999)
+	require.Equal(t, int64(2024), pendingReplacement.Properties["since"])
+	require.Equal(t, int64(2020), committedEdge.Properties["since"])
+}
+
+func TestTxReads_GetAllNodes_ClosedTransactionReturnsNil(t *testing.T) {
+	tx := &BadgerTransaction{Status: TxStatusCommitted}
+	require.Nil(t, tx.GetAllNodes())
+}
+
 func TestTxReads_BulkCreateEdges_Success(t *testing.T) {
 	engine := txReadFixture(t)
 	tx, err := engine.BeginTransaction()

@@ -3,6 +3,7 @@ package gpu
 
 import (
 	"math"
+	"math/rand"
 	"sync"
 	"testing"
 )
@@ -713,6 +714,201 @@ func TestSquaredEuclidean(t *testing.T) {
 			t.Errorf("squaredEuclidean(%v, %v) = %f, want %f",
 				tt.a, tt.b, got, tt.want)
 		}
+	}
+}
+
+func TestInitCentroidsKMeansPlusPlusSeededFromVectors(t *testing.T) {
+	vectors := []float32{
+		10, 0,
+		0, 10,
+		5, 5,
+		1, 1,
+	}
+
+	rand.Seed(1)
+	centroids, err := initCentroidsKMeansPlusPlusSeededFromVectors(vectors, 4, 2, 1, []int{-1, 2, 99})
+	if err != nil {
+		t.Fatalf("initCentroidsKMeansPlusPlusSeededFromVectors() error = %v", err)
+	}
+	if len(centroids) != 1 {
+		t.Fatalf("expected 1 centroid, got %d", len(centroids))
+	}
+	if len(centroids[0]) != 2 || centroids[0][0] != 5 || centroids[0][1] != 5 {
+		t.Fatalf("first centroid = %v, want preferred seed [5 5]", centroids[0])
+	}
+}
+
+func TestInitCentroidsRandomFromVectorsUniqueSelection(t *testing.T) {
+	vectors := []float32{
+		1, 0,
+		0, 1,
+		2, 2,
+		3, 3,
+	}
+
+	rand.Seed(2)
+	centroids, err := initCentroidsRandomFromVectors(vectors, 4, 2, 3)
+	if err != nil {
+		t.Fatalf("initCentroidsRandomFromVectors() error = %v", err)
+	}
+	if len(centroids) != 3 {
+		t.Fatalf("expected 3 centroids, got %d", len(centroids))
+	}
+
+	seen := make(map[[2]float32]bool, len(centroids))
+	valid := map[[2]float32]bool{
+		{1, 0}: true,
+		{0, 1}: true,
+		{2, 2}: true,
+		{3, 3}: true,
+	}
+	for _, centroid := range centroids {
+		key := [2]float32{centroid[0], centroid[1]}
+		if !valid[key] {
+			t.Fatalf("centroid %v was not copied from input vectors", centroid)
+		}
+		if seen[key] {
+			t.Fatalf("centroid %v was selected more than once", centroid)
+		}
+		seen[key] = true
+	}
+}
+
+func TestAssignAndUpdateCentroidsFromVectors(t *testing.T) {
+	vectors := []float32{
+		0, 0,
+		0, 2,
+		10, 10,
+		10, 12,
+	}
+	centroids := [][]float32{{0, 1}, {10, 11}}
+	assignments := []int{-1, -1, -1, -1}
+
+	changed := assignToCentroidsFromVectors(vectors, centroids, assignments, 4, 2, 2)
+	if changed != 4 {
+		t.Fatalf("assignToCentroidsFromVectors() changed = %d, want 4", changed)
+	}
+	for i, want := range []int{0, 0, 1, 1} {
+		if assignments[i] != want {
+			t.Fatalf("assignment[%d] = %d, want %d", i, assignments[i], want)
+		}
+	}
+
+	sums := [][]float64{{0, 0}, {0, 0}}
+	counts := []int{0, 0}
+	updateCentroidsFromVectors(vectors, assignments, centroids, sums, counts, 4, 2, 2)
+	if counts[0] != 2 || counts[1] != 2 {
+		t.Fatalf("counts = %v, want [2 2]", counts)
+	}
+	if math.Abs(float64(centroids[0][0]-0)) > 1e-6 || math.Abs(float64(centroids[0][1]-1)) > 1e-6 {
+		t.Fatalf("centroid 0 = %v, want [0 1]", centroids[0])
+	}
+	if math.Abs(float64(centroids[1][0]-10)) > 1e-6 || math.Abs(float64(centroids[1][1]-11)) > 1e-6 {
+		t.Fatalf("centroid 1 = %v, want [10 11]", centroids[1])
+	}
+
+	changed = assignToCentroidsFromVectors(vectors, centroids, assignments, 4, 2, 2)
+	if changed != 0 {
+		t.Fatalf("second assignToCentroidsFromVectors() changed = %d, want 0", changed)
+	}
+}
+
+func TestClusterIndexSeedAndIndexHelpers(t *testing.T) {
+	ci := NewClusterIndex(testManager(), embConfig(2), &KMeansConfig{NumClusters: 2})
+	if err := ci.Add("node-a", []float32{1, 0}); err != nil {
+		t.Fatalf("Add(node-a) error = %v", err)
+	}
+	if err := ci.Add("node-b", []float32{0, 1}); err != nil {
+		t.Fatalf("Add(node-b) error = %v", err)
+	}
+
+	seeds := []int{1, 0}
+	ci.SetPreferredSeedIndices(seeds)
+	seeds[0] = 99
+	if len(ci.preferredSeedIndices) != 2 || ci.preferredSeedIndices[0] != 1 || ci.preferredSeedIndices[1] != 0 {
+		t.Fatalf("preferredSeedIndices = %v, want copied [1 0]", ci.preferredSeedIndices)
+	}
+
+	indices := ci.GetIndicesForNodeIDs([]string{"node-b", "missing", "node-a"})
+	if len(indices) != 2 || indices[0] != 1 || indices[1] != 0 {
+		t.Fatalf("GetIndicesForNodeIDs() = %v, want [1 0]", indices)
+	}
+
+	ci.SetPreferredSeedIndices(nil)
+	if ci.preferredSeedIndices != nil {
+		t.Fatalf("preferredSeedIndices after reset = %v, want nil", ci.preferredSeedIndices)
+	}
+	if ci.GetIndicesForNodeIDs(nil) != nil {
+		t.Fatal("GetIndicesForNodeIDs(nil) should return nil")
+	}
+}
+
+func TestBuildClusterMapAndNearestCentroidHelpers(t *testing.T) {
+	clusterMap := buildClusterMapFromAssignments([]int{2, 1, 2, 1, 2})
+	if len(clusterMap) != 2 {
+		t.Fatalf("buildClusterMapFromAssignments() produced %d clusters, want 2", len(clusterMap))
+	}
+	for cluster, want := range map[int][]int{1: {1, 3}, 2: {0, 2, 4}} {
+		got := clusterMap[cluster]
+		if len(got) != len(want) {
+			t.Fatalf("cluster %d indices = %v, want %v", cluster, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("cluster %d indices = %v, want %v", cluster, got, want)
+			}
+		}
+	}
+
+	if got := nearestCentroidFromList([]float32{0.2, 0.1}, [][]float32{{0, 0}, {5, 5}}); got != 0 {
+		t.Fatalf("nearestCentroidFromList() = %d, want 0", got)
+	}
+	if got := nearestCentroidFromList([]float32{4.8, 5.1}, [][]float32{{0, 0}, {5, 5}}); got != 1 {
+		t.Fatalf("nearestCentroidFromList() = %d, want 1", got)
+	}
+	if got := nearestCentroidFromList([]float32{1, 1}, nil); got != -1 {
+		t.Fatalf("nearestCentroidFromList(nil) = %d, want -1", got)
+	}
+}
+
+func TestClusterIndexCentroidInitializers(t *testing.T) {
+	ci := NewClusterIndex(testManager(), embConfig(2), &KMeansConfig{NumClusters: 2})
+	for _, tc := range []struct {
+		id  string
+		vec []float32
+	}{
+		{id: "a", vec: []float32{0, 0}},
+		{id: "b", vec: []float32{0, 2}},
+		{id: "c", vec: []float32{10, 10}},
+		{id: "d", vec: []float32{10, 12}},
+	} {
+		if err := ci.Add(tc.id, tc.vec); err != nil {
+			t.Fatalf("Add(%s) error = %v", tc.id, err)
+		}
+	}
+
+	rand.Seed(3)
+	randomCentroids, err := ci.initCentroidsRandom(2)
+	if err != nil {
+		t.Fatalf("initCentroidsRandom() error = %v", err)
+	}
+	if len(randomCentroids) != 2 {
+		t.Fatalf("initCentroidsRandom() produced %d centroids, want 2", len(randomCentroids))
+	}
+	if randomCentroids[0][0] == randomCentroids[1][0] && randomCentroids[0][1] == randomCentroids[1][1] {
+		t.Fatalf("initCentroidsRandom() selected duplicate centroids: %v", randomCentroids)
+	}
+
+	rand.Seed(4)
+	plusPlusCentroids, err := ci.initCentroidsKMeansPlusPlus(2)
+	if err != nil {
+		t.Fatalf("initCentroidsKMeansPlusPlus() error = %v", err)
+	}
+	if len(plusPlusCentroids) != 2 {
+		t.Fatalf("initCentroidsKMeansPlusPlus() produced %d centroids, want 2", len(plusPlusCentroids))
+	}
+	if squaredEuclidean(plusPlusCentroids[0], plusPlusCentroids[1]) == 0 {
+		t.Fatalf("initCentroidsKMeansPlusPlus() selected duplicate centroids: %v", plusPlusCentroids)
 	}
 }
 

@@ -956,9 +956,10 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 							setNodeProperty(node, k, v)
 							result.Stats.PropertiesSet++
 						}
-						if err := store.UpdateNode(node); err == nil {
-							e.notifyNodeMutated(string(node.ID))
+						if err := store.UpdateNode(node); err != nil {
+							return nil, fmt.Errorf("SET %s +=: %w", leftVar, err)
 						}
+						e.notifyNodeMutated(string(node.ID))
 						updated = true
 					}
 				}
@@ -975,9 +976,10 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 						setNodeProperty(node, k, v)
 						result.Stats.PropertiesSet++
 					}
-					if err := store.UpdateNode(node); err == nil {
-						e.notifyNodeMutated(string(node.ID))
+					if err := store.UpdateNode(node); err != nil {
+						return nil, fmt.Errorf("SET %s +=: %w", leftVar, err)
 					}
+					e.notifyNodeMutated(string(node.ID))
 				}
 			}
 			continue
@@ -1131,18 +1133,20 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 							continue
 						}
 						entity.Properties = cloneStringAnyMap(props)
-						if err := store.UpdateNode(entity); err == nil {
-							result.Stats.PropertiesSet++
-							e.notifyNodeMutated(string(entity.ID))
+						if err := store.UpdateNode(entity); err != nil {
+							return nil, fmt.Errorf("SET %s =: %w", variable, err)
 						}
+						result.Stats.PropertiesSet++
+						e.notifyNodeMutated(string(entity.ID))
 					case *storage.Edge:
 						if entity == nil {
 							continue
 						}
 						entity.Properties = cloneStringAnyMap(props)
-						if err := store.UpdateEdge(entity); err == nil {
-							result.Stats.PropertiesSet++
+						if err := store.UpdateEdge(entity); err != nil {
+							return nil, fmt.Errorf("SET %s =: %w", variable, err)
 						}
+						result.Stats.PropertiesSet++
 					}
 				}
 			}

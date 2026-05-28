@@ -497,6 +497,18 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 			if inner == "*" || !strings.Contains(inner, ".") {
 				var count int64
 				var err error
+				if len(nodePattern.labels) == 1 {
+					if viewport, ok := TemporalViewportFromContext(ctx); !ok || !viewport.Enabled() {
+						if stats, ok := e.storage.(interface{ NodeCountByLabel(string) (int64, error) }); ok {
+							count, err = stats.NodeCountByLabel(nodePattern.labels[0])
+							if err != nil {
+								return nil, fmt.Errorf("storage error: %w", err)
+							}
+							result.Rows = [][]interface{}{{count}}
+							return result, nil
+						}
+					}
+				}
 				if len(nodePattern.labels) > 0 {
 					// Count nodes with specific label
 					nodes, err := e.loadNodesWithTemporalViewport(ctx, nodePattern.labels)

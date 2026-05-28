@@ -79,6 +79,12 @@ const (
 	// this marker is present and the rebuild has run. Same shape as
 	// prefixMVCCMetaEdgeBetweenIndexReady.
 	prefixMVCCMetaLabelIndexReady = byte(0x05)
+	// prefixMVCCMetaLabelCountReady marks completion of the label-count
+	// verification/rebuild pass at engine open.
+	prefixMVCCMetaLabelCountReady = byte(0x06)
+	// prefixMVCCMetaLabelCount stores one namespace-scoped label count as:
+	//   [prefixMVCCMeta, prefixMVCCMetaLabelCount, namespace bytes..., 0x00, lower(label)] -> uint64 count
+	prefixMVCCMetaLabelCount = byte(0x07)
 )
 
 // maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)
@@ -843,6 +849,11 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	if err := engine.ensureLabelIndex(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize label index: %w", err)
+	}
+
+	if err := engine.ensureLabelCounts(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize label counts: %w", err)
 	}
 
 	return engine, nil

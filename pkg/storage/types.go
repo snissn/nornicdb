@@ -448,6 +448,18 @@ type PrefixStatsEngine interface {
 	EdgeCountByPrefix(prefix string) (int64, error)
 }
 
+// LabelStatsEngine is an optional extension interface for fast label-cardinality
+// lookups without materializing rows.
+type LabelStatsEngine interface {
+	NodeCountByLabel(label string) (int64, error)
+}
+
+// NamespaceLabelStatsProvider is an optional extension interface for fast
+// namespace-scoped label-cardinality lookups.
+type NamespaceLabelStatsProvider interface {
+	NodeCountByLabelInNamespace(namespace, label string) (int64, error)
+}
+
 // AdjacentEdgesEngine is an optional extension interface for fetching both
 // directions of edges incident to a node in a single underlying transaction.
 //
@@ -1292,6 +1304,10 @@ func NodeNeedsEmbedding(node *Node) bool {
 
 // CountNodesWithLabel counts nodes with a specific label using streaming.
 func CountNodesWithLabel(ctx context.Context, engine Engine, label string) (int64, error) {
+	if stats, ok := engine.(LabelStatsEngine); ok {
+		return stats.NodeCountByLabel(label)
+	}
+
 	var count int64
 
 	err := StreamNodesWithFallback(ctx, engine, 1000, func(node *Node) error {

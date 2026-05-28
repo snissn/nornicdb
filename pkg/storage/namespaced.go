@@ -901,6 +901,46 @@ func (n *NamespacedEngine) NodeCount() (int64, error) {
 	return int64(len(nodes)), nil
 }
 
+func (n *NamespacedEngine) NodeCountByLabel(label string) (int64, error) {
+	if stats, ok := n.inner.(NamespaceLabelStatsProvider); ok {
+		return stats.NodeCountByLabelInNamespace(n.namespace, label)
+	}
+
+	var count int64
+	if streamer, ok := n.inner.(StreamingEngine); ok {
+		err := streamer.StreamNodes(context.Background(), func(node *Node) error {
+			if !n.hasNodePrefix(node.ID) {
+				return nil
+			}
+			for _, existingLabel := range node.Labels {
+				if strings.EqualFold(existingLabel, label) {
+					count++
+					break
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return 0, err
+		}
+		return count, nil
+	}
+
+	nodes, err := n.AllNodes()
+	if err != nil {
+		return 0, err
+	}
+	for _, node := range nodes {
+		for _, existingLabel := range node.Labels {
+			if strings.EqualFold(existingLabel, label) {
+				count++
+				break
+			}
+		}
+	}
+	return count, nil
+}
+
 func (n *NamespacedEngine) EdgeCount() (int64, error) {
 	// Prefer a prefix-scoped count from the inner engine.
 	if stats, ok := n.inner.(PrefixStatsEngine); ok {
