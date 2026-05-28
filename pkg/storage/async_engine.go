@@ -2093,17 +2093,26 @@ func (ae *AsyncEngine) NodeCountByPrefix(prefix string) (int64, error) {
 }
 
 func (ae *AsyncEngine) NodeCountByLabel(label string) (int64, error) {
-	if stats, ok := ae.engine.(LabelStatsEngine); ok {
-		return stats.NodeCountByLabel(label)
+	nodes, err := ae.GetNodesByLabel(label)
+	if err != nil {
+		return 0, err
 	}
-	return CountNodesWithLabel(context.Background(), ae, label)
+	return int64(len(nodes)), nil
 }
 
 func (ae *AsyncEngine) NodeCountByLabelInNamespace(namespace, label string) (int64, error) {
-	if stats, ok := ae.engine.(NamespaceLabelStatsProvider); ok {
-		return stats.NodeCountByLabelInNamespace(namespace, label)
+	nodes, err := ae.GetNodesByLabel(label)
+	if err != nil {
+		return 0, err
 	}
-	return CountNodesWithLabel(context.Background(), NewNamespacedEngine(ae, namespace), label)
+	prefix := namespace + ":"
+	var count int64
+	for _, node := range nodes {
+		if strings.HasPrefix(string(node.ID), prefix) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (ae *AsyncEngine) EdgeCountByPrefix(prefix string) (int64, error) {

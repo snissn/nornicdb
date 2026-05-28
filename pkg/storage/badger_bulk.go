@@ -42,6 +42,7 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 	if err != nil {
 		return err
 	}
+	b.labelCountWriteMu.Lock()
 	err = b.withUpdate(func(txn *badger.Txn) error {
 		version, err := b.allocateMVCCVersion(txn, ns, time.Now())
 		if err != nil {
@@ -114,6 +115,7 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 
 		return nil
 	})
+	b.labelCountWriteMu.Unlock()
 
 	// Register unique constraint values after successful bulk insert
 	if err == nil {

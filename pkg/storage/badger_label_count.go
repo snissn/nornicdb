@@ -273,10 +273,17 @@ func sameLabelCounts(actual, persisted map[string]int64) bool {
 }
 
 func (b *BadgerEngine) rebuildLabelCounts(counts map[string]int64) error {
-	if err := b.db.DropPrefix(labelCountPrefix()); err != nil {
-		return fmt.Errorf("clear label counts before rebuild: %w", err)
-	}
 	return b.withUpdate(func(txn *badger.Txn) error {
+		prefix := labelCountPrefix()
+		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
+		for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
+			key := it.Item().KeyCopy(nil)
+			if err := txn.Delete(key); err != nil {
+				it.Close()
+				return fmt.Errorf("clear label count %q before rebuild: %w", key, err)
+			}
+		}
+		it.Close()
 		for composite, count := range counts {
 			parts := strings.SplitN(composite, "\x00", 2)
 			if len(parts) != 2 {

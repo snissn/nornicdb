@@ -124,6 +124,27 @@ func compareForSort(a, b interface{}) bool {
 	return fmt.Sprintf("%v", a) < fmt.Sprintf("%v", b)
 }
 
+func storageHasDecayFiltering(engine storage.Engine) bool {
+	visited := make(map[storage.Engine]bool)
+	for engine != nil && !visited[engine] {
+		visited[engine] = true
+		if decay, ok := engine.(interface{ IsDecayEnabled() bool }); ok && decay.IsDecayEnabled() {
+			return true
+		}
+		switch wrapper := engine.(type) {
+		case interface{ GetUnderlying() storage.Engine }:
+			engine = wrapper.GetUnderlying()
+		case interface{ GetEngine() storage.Engine }:
+			engine = wrapper.GetEngine()
+		case interface{ GetInnerEngine() storage.Engine }:
+			engine = wrapper.GetInnerEngine()
+		default:
+			engine = nil
+		}
+	}
+	return false
+}
+
 func extractMatchWhereClause(cypher string, whereIdx, returnIdx int) string {
 	if whereIdx <= 0 || returnIdx <= whereIdx+5 || returnIdx > len(cypher) {
 		return ""
@@ -497,7 +518,7 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 			if inner == "*" || !strings.Contains(inner, ".") {
 				var count int64
 				var err error
-				if len(nodePattern.labels) == 1 {
+				if len(nodePattern.labels) == 1 && !storageHasDecayFiltering(e.storage) {
 					if viewport, ok := TemporalViewportFromContext(ctx); !ok || !viewport.Enabled() {
 						if stats, ok := e.storage.(interface{ NodeCountByLabel(string) (int64, error) }); ok {
 							count, err = stats.NodeCountByLabel(nodePattern.labels[0])

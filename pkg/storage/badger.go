@@ -279,6 +279,12 @@ type BadgerEngine struct {
 	revealAll     atomic.Bool
 	revealQueryMu sync.RWMutex
 
+	// labelCountWriteMu serializes transactions that mutate namespace label-count
+	// metadata. The metadata is intentionally one key per namespace+label, so
+	// concurrent same-label writes would otherwise conflict in Badger even when
+	// the node IDs themselves are independent.
+	labelCountWriteMu sync.Mutex
+
 	// embeddingsEnabled gates the pending-embed index write on node creates.
 	// When false, new nodes skip the pendingEmbed marker since no embed worker
 	// will consume it — saves one Badger Set per user node on hot-path writes.
@@ -832,6 +838,11 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 		return nil, fmt.Errorf("failed to load persisted schema: %w", err)
 	}
 
+	if err := engine.ensureLabelCounts(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize label counts: %w", err)
+	}
+
 	// Edge-between index backfill runs only after migrations have
 	// settled the body format. Failure here is non-fatal at open
 	// time — the index self-heals from the outgoing index on read.
@@ -847,13 +858,10 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	// the edge-between backfill — MATCH (n:Label) on an unrebuilt store
 	// reads the partial on-disk index until the goroutine finishes.
 	if err := engine.ensureLabelIndex(); err != nil {
+		engine.stopEdgeBetweenIndexBackfill()
+		engine.stopLabelIndexBackfill()
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize label index: %w", err)
-	}
-
-	if err := engine.ensureLabelCounts(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to initialize label counts: %w", err)
 	}
 
 	return engine, nil

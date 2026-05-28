@@ -145,10 +145,16 @@ func (b *BadgerEngine) rebuildEdgeBetweenIndex(ctx context.Context) (int, error)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := b.db.DropPrefix([]byte{prefixEdgeBetweenIndex}); err != nil {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := recoverBadgerClosedPanic(func() error { return b.db.DropPrefix([]byte{prefixEdgeBetweenIndex}) }); err != nil {
 		return 0, fmt.Errorf("clear edge-between set index before rebuild: %w", err)
 	}
-	if err := b.db.DropPrefix([]byte{prefixEdgeBetweenHead}); err != nil {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := recoverBadgerClosedPanic(func() error { return b.db.DropPrefix([]byte{prefixEdgeBetweenHead}) }); err != nil {
 		return 0, fmt.Errorf("clear edge-between head index before rebuild: %w", err)
 	}
 

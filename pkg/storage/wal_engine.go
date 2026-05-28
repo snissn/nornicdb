@@ -908,14 +908,29 @@ func (w *WALEngine) NodeCountByLabel(label string) (int64, error) {
 	if stats, ok := w.engine.(LabelStatsEngine); ok {
 		return stats.NodeCountByLabel(label)
 	}
-	return CountNodesWithLabel(context.Background(), w.engine, label)
+	nodes, err := w.engine.GetNodesByLabel(label)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(nodes)), nil
 }
 
 func (w *WALEngine) NodeCountByLabelInNamespace(namespace, label string) (int64, error) {
 	if stats, ok := w.engine.(NamespaceLabelStatsProvider); ok {
 		return stats.NodeCountByLabelInNamespace(namespace, label)
 	}
-	return CountNodesWithLabel(context.Background(), NewNamespacedEngine(w, namespace), label)
+	nodes, err := w.engine.GetNodesByLabel(label)
+	if err != nil {
+		return 0, err
+	}
+	prefix := namespace + ":"
+	var count int64
+	for _, node := range nodes {
+		if strings.HasPrefix(string(node.ID), prefix) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // EdgeCount delegates to underlying engine.

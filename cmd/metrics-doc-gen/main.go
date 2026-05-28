@@ -19,13 +19,15 @@ type metricEntry struct {
 }
 
 var (
-	nameRe   = regexp.MustCompile(`Name:\s*"([^"]+)"`)
-	helpRe   = regexp.MustCompile(`Help:\s*"([^"]*)"`)
-	helpMore = regexp.MustCompile(`^\s*"([^"]*)"`)
-	typeRe   = regexp.MustCompile(`New(CounterVec|HistogramVec|GaugeVec|Counter|Histogram|Gauge|SummaryVec|Summary)`)
-	labelRe  = regexp.MustCompile(`Labels:\s*\[\]string\{([^}]+)\}`)
-	nsRe     = regexp.MustCompile(`Namespace:\s*"([^"]+)"`)
-	subsRe   = regexp.MustCompile(`Subsystem:\s*"([^"]+)"`)
+	nameRe    = regexp.MustCompile(`Name:\s*"([^"]+)"`)
+	helpRe    = regexp.MustCompile(`Help:\s*"([^"]*)"`)
+	helpMore  = regexp.MustCompile(`^\s*"([^"]*)"`)
+	typeRe    = regexp.MustCompile(`New(CounterVec|HistogramVec|GaugeVec|Counter|Histogram|Gauge|SummaryVec|Summary)`)
+	labelRe   = regexp.MustCompile(`Labels:\s*\[\]string\{([^}]+)\}`)
+	listRe    = regexp.MustCompile(`\[\]string\{([^}]*)\}`)
+	varListRe = regexp.MustCompile(`\b(?:var\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*\[\]string\{([^}]*)\}`)
+	nsRe      = regexp.MustCompile(`Namespace:\s*"([^"]+)"`)
+	subsRe    = regexp.MustCompile(`Subsystem:\s*"([^"]+)"`)
 )
 
 func main() {
@@ -101,63 +103,64 @@ func scanFile(path string) ([]metricEntry, error) {
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
 
-	namespace := "nornicdb"
-	currentSub := ""
+	labelVars := collectLabelVars(lines)
 
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
-
-		if m := nsRe.FindStringSubmatch(line); m != nil {
-			namespace = m[1]
-		}
-		if m := subsRe.FindStringSubmatch(line); m != nil {
-			currentSub = m[1]
-		}
 
 		typeMatch := typeRe.FindStringSubmatch(line)
 		if typeMatch == nil {
 			continue
 		}
+		block, end := metricConstructorBlock(lines, i)
+		if end > i {
+			i = end
+		}
 
 		metricType := normalizeType(typeMatch[1])
+		namespace := "nornicdb"
+		currentSub := ""
+		hasNamespace := false
+		hasSubsystem := false
 		name := ""
 		help := ""
 		var labels []string
 
-		// Scan forward in a window to find Name, Help, Labels
-		for j := i; j < i+15 && j < len(lines); j++ {
-			if m := nameRe.FindStringSubmatch(lines[j]); m != nil && name == "" {
+		for j := 0; j < len(block); j++ {
+			if m := nsRe.FindStringSubmatch(block[j]); m != nil {
+				namespace = m[1]
+				hasNamespace = true
+			}
+			if m := subsRe.FindStringSubmatch(block[j]); m != nil {
+				currentSub = m[1]
+				hasSubsystem = true
+			}
+			if m := nameRe.FindStringSubmatch(block[j]); m != nil && name == "" {
 				name = m[1]
 			}
-			if m := helpRe.FindStringSubmatch(lines[j]); m != nil && help == "" {
+			if m := helpRe.FindStringSubmatch(block[j]); m != nil && help == "" {
 				help = m[1]
-				// Check for continued help string on next line
-				for k := j + 1; k < j+5 && k < len(lines); k++ {
-					if m2 := helpMore.FindStringSubmatch(lines[k]); m2 != nil {
+				for k := j + 1; k < j+5 && k < len(block); k++ {
+					if m2 := helpMore.FindStringSubmatch(block[k]); m2 != nil {
 						help += m2[1]
 					} else {
 						break
 					}
 				}
 			}
-			if m := labelRe.FindStringSubmatch(lines[j]); m != nil {
-				raw := m[1]
-				for _, l := range strings.Split(raw, ",") {
-					l = strings.Trim(strings.TrimSpace(l), `"`)
-					if l != "" {
-						labels = append(labels, l)
-					}
-				}
-			}
 		}
+		labels = labelsFromConstructor(block, labelVars)
 
 		if name == "" {
 			continue
 		}
 
 		fullName := name
-		if !strings.HasPrefix(name, namespace) {
+		if !strings.HasPrefix(name, namespace) && (hasNamespace || hasSubsystem) {
 			if currentSub != "" {
 				fullName = namespace + "_" + currentSub + "_" + name
 			} else {
@@ -175,6 +178,75 @@ func scanFile(path string) ([]metricEntry, error) {
 	}
 
 	return entries, nil
+}
+
+func collectLabelVars(lines []string) map[string][]string {
+	vars := make(map[string][]string)
+	for _, line := range lines {
+		if m := varListRe.FindStringSubmatch(line); m != nil {
+			vars[m[1]] = parseStringList(m[2])
+		}
+	}
+	return vars
+}
+
+func metricConstructorBlock(lines []string, start int) ([]string, int) {
+	depth := 0
+	started := false
+	block := make([]string, 0, 8)
+	for i := start; i < len(lines); i++ {
+		line := lines[i]
+		block = append(block, line)
+		for _, r := range line {
+			switch r {
+			case '(':
+				depth++
+				started = true
+			case ')':
+				if started {
+					depth--
+				}
+			}
+		}
+		if started && depth <= 0 {
+			return block, i
+		}
+	}
+	return block, len(lines) - 1
+}
+
+func labelsFromConstructor(block []string, labelVars map[string][]string) []string {
+	for _, line := range block {
+		if m := labelRe.FindStringSubmatch(line); m != nil {
+			return parseStringList(m[1])
+		}
+	}
+	for _, line := range block {
+		if m := listRe.FindStringSubmatch(line); m != nil {
+			return parseStringList(m[1])
+		}
+	}
+	for i := len(block) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(block[i])
+		candidate = strings.TrimSuffix(candidate, ",")
+		candidate = strings.TrimSuffix(candidate, ")")
+		candidate = strings.TrimSpace(candidate)
+		if labels, ok := labelVars[candidate]; ok {
+			return labels
+		}
+	}
+	return nil
+}
+
+func parseStringList(raw string) []string {
+	var labels []string
+	for _, label := range strings.Split(raw, ",") {
+		label = strings.Trim(strings.TrimSpace(label), `"`)
+		if label != "" {
+			labels = append(labels, label)
+		}
+	}
+	return labels
 }
 
 func normalizeType(raw string) string {
