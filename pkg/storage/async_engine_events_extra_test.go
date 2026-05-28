@@ -318,6 +318,60 @@ func TestAsyncEngine_OptionalDelegates_DefaultFallbacks(t *testing.T) {
 	assert.Equal(t, edgeID, edgeLatest.ID)
 }
 
+func TestAsyncEngine_AdjacentAndLabelCountBranches(t *testing.T) {
+	base := NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	for _, id := range []NodeID{"tenant:n1", "tenant:n2", "tenant:n3", "tenant:n4", "tenant:n5"} {
+		_, err := base.CreateNode(&Node{ID: id, Labels: []string{"Endpoint"}})
+		require.NoError(t, err)
+	}
+	require.NoError(t, base.CreateEdge(&Edge{ID: "tenant:base-out", StartNode: "tenant:n1", EndNode: "tenant:n2", Type: "R"}))
+	require.NoError(t, base.CreateEdge(&Edge{ID: "tenant:base-in", StartNode: "tenant:n3", EndNode: "tenant:n1", Type: "R"}))
+	_, err := base.CreateNode(&Node{ID: "tenant:base", Labels: []string{"Person"}})
+	require.NoError(t, err)
+
+	ae := NewAsyncEngine(base, &AsyncEngineConfig{FlushInterval: time.Hour, MinFlushInterval: time.Hour, MaxFlushInterval: time.Hour})
+	t.Cleanup(func() { _ = ae.Close() })
+	require.NoError(t, ae.CreateEdge(&Edge{ID: "tenant:cache-out", StartNode: "tenant:n1", EndNode: "tenant:n4", Type: "R"}))
+	require.NoError(t, ae.CreateEdge(&Edge{ID: "tenant:cache-in", StartNode: "tenant:n5", EndNode: "tenant:n1", Type: "R"}))
+	_, err = ae.CreateNode(&Node{ID: "tenant:cached", Labels: []string{"person"}})
+	require.NoError(t, err)
+	_, err = ae.CreateNode(&Node{ID: "other:cached", Labels: []string{"Person"}})
+	require.NoError(t, err)
+
+	out, in, err := ae.GetAdjacentEdges("tenant:n1")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"tenant:cache-out", "tenant:base-out"}, []EdgeID{out[0].ID, out[1].ID})
+	require.ElementsMatch(t, []EdgeID{"tenant:cache-in", "tenant:base-in"}, []EdgeID{in[0].ID, in[1].ID})
+
+	count, err := ae.NodeCountByLabel("Person")
+	require.NoError(t, err)
+	require.EqualValues(t, 3, count)
+	count, err = ae.NodeCountByLabelInNamespace("tenant", "Person")
+	require.NoError(t, err)
+	require.EqualValues(t, 2, count)
+	ae.RecordMaterializedAccess("tenant:cached")
+
+	fallback := &adjacentFallbackEngine{Engine: NewMemoryEngine(), outErr: errors.New("out failed")}
+	fallbackAE := NewAsyncEngine(fallback, &AsyncEngineConfig{FlushInterval: time.Hour, MinFlushInterval: time.Hour, MaxFlushInterval: time.Hour})
+	t.Cleanup(func() { _ = fallbackAE.Close() })
+	_, err = fallback.CreateNode(&Node{ID: "tenant:n1", Labels: []string{"Endpoint"}})
+	require.NoError(t, err)
+	_, err = fallback.CreateNode(&Node{ID: "tenant:n2", Labels: []string{"Endpoint"}})
+	require.NoError(t, err)
+	require.NoError(t, fallbackAE.CreateEdge(&Edge{ID: "tenant:cache-only", StartNode: "tenant:n1", EndNode: "tenant:n2", Type: "R"}))
+	out, in, err = fallbackAE.GetAdjacentEdges("tenant:n1")
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Empty(t, in)
+
+	recorder := &namespaceLifecycleRecorder{Engine: NewMemoryEngine()}
+	recorderAE := NewAsyncEngine(recorder, &AsyncEngineConfig{FlushInterval: time.Hour, MinFlushInterval: time.Hour, MaxFlushInterval: time.Hour})
+	t.Cleanup(func() { _ = recorderAE.Close() })
+	recorderAE.RecordMaterializedAccess("tenant:recorded")
+	require.Equal(t, []string{"tenant:recorded"}, recorder.accesses)
+}
+
 func TestAsyncEngine_OptionalDelegates_ForwardToWrappedEngine(t *testing.T) {
 	inner := &asyncOptionalDelegationEngine{
 		MemoryEngine:       NewMemoryEngine(),

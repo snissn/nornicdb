@@ -1113,3 +1113,48 @@ func TestRemoteEngineHTTPExplicitTxRollbackLifecycle(t *testing.T) {
 		t.Fatalf("unexpected lifecycle flags opened=%v executed=%v committed=%v rolledBack=%v", opened, executed, committed, rolledBack)
 	}
 }
+
+func TestRemoteEngineQueryCypherAndHTTPClosedBranches(t *testing.T) {
+	engine := makeEngineWithTransport(t, "http://remote.example", func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx/commit"):
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(
+				`{"results":[{"columns":["n"],"data":[{"row":[42]}]}],"errors":[]}`,
+			))}, nil
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx"):
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(
+				`{"results":[],"errors":[],"commit":"http://remote.example/db/remote_db/tx/3/commit"}`,
+			))}, nil
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx/3/commit"):
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`))}, nil
+		default:
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`))}, nil
+		}
+	})
+
+	var nilCtx context.Context
+	cols, rows, err := engine.QueryCypher(nilCtx, "RETURN 42 AS n", nil)
+	if err != nil {
+		t.Fatalf("QueryCypher with nil context failed: %v", err)
+	}
+	if len(cols) != 1 || cols[0] != "n" || len(rows) != 1 || rows[0][0].(float64) != 42 {
+		t.Fatalf("unexpected query result cols=%v rows=%v", cols, rows)
+	}
+
+	tx, err := engine.BeginCypherTx(nilCtx)
+	if err != nil {
+		t.Fatalf("BeginCypherTx with nil context failed: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("closed Commit should be a no-op: %v", err)
+	}
+	if err := tx.Rollback(context.Background()); err != nil {
+		t.Fatalf("closed Rollback should be a no-op: %v", err)
+	}
+	if _, _, err := tx.QueryCypher(context.Background(), "RETURN 1", nil); err == nil {
+		t.Fatalf("expected QueryCypher on closed transaction to fail")
+	}
+}

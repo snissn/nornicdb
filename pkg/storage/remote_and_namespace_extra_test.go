@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
 	"github.com/stretchr/testify/require"
@@ -35,6 +36,29 @@ type adjacentDirectEngine struct {
 	adjOut []*Edge
 	adjIn  []*Edge
 	adjErr error
+}
+
+type namespaceLifecycleRecorder struct {
+	Engine
+	scheduledInterval time.Duration
+	scheduleErr       error
+	debtLimit         int
+	debtKeys          []MVCCLifecycleDebtKey
+	accesses          []string
+}
+
+func (e *namespaceLifecycleRecorder) SetLifecycleSchedule(interval time.Duration) error {
+	e.scheduledInterval = interval
+	return e.scheduleErr
+}
+
+func (e *namespaceLifecycleRecorder) TopLifecycleDebtKeys(limit int) []MVCCLifecycleDebtKey {
+	e.debtLimit = limit
+	return e.debtKeys
+}
+
+func (e *namespaceLifecycleRecorder) RecordMaterializedAccess(entityID string) {
+	e.accesses = append(e.accesses, entityID)
 }
 
 func (e *adjacentDirectEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error) {
@@ -115,4 +139,39 @@ func TestNamespacedExtraAdjacentEdgesBranches(t *testing.T) {
 	fallback.inErr = wantErr
 	_, _, err = ns.GetAdjacentEdges("n1")
 	require.ErrorIs(t, err, wantErr)
+}
+
+func TestNamespacedExtraLifecycleLabelAndAccessBranches(t *testing.T) {
+	base := NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	recorder := &namespaceLifecycleRecorder{
+		Engine:   base,
+		debtKeys: []MVCCLifecycleDebtKey{{LogicalKey: "tenant:n1", DebtBytes: 42}},
+	}
+	ns := NewNamespacedEngine(recorder, "tenant")
+
+	_, err := base.CreateNode(&Node{ID: "tenant:n1", Labels: []string{"Person", "User"}})
+	require.NoError(t, err)
+	_, err = base.CreateNode(&Node{ID: "tenant:n2", Labels: []string{"person"}})
+	require.NoError(t, err)
+	_, err = base.CreateNode(&Node{ID: "other:n3", Labels: []string{"Person"}})
+	require.NoError(t, err)
+
+	count, err := ns.NodeCountByLabel("PERSON")
+	require.NoError(t, err)
+	require.EqualValues(t, 2, count)
+
+	require.NoError(t, ns.SetLifecycleSchedule(2*time.Minute))
+	require.Equal(t, 2*time.Minute, recorder.scheduledInterval)
+	require.Equal(t, recorder.debtKeys, ns.TopLifecycleDebtKeys(7))
+	require.Equal(t, 7, recorder.debtLimit)
+
+	ns.RecordMaterializedAccess("n1")
+	ns.RecordMaterializedAccess("tenant:n2")
+	require.Equal(t, []string{"tenant:n1", "tenant:n2"}, recorder.accesses)
+
+	plain := NewNamespacedEngine(base, "tenant")
+	require.NoError(t, plain.SetLifecycleSchedule(time.Second))
+	require.Nil(t, plain.TopLifecycleDebtKeys(1))
+	plain.RecordMaterializedAccess("n1")
 }

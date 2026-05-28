@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -122,4 +123,32 @@ func TestAsyncEngine_StreamNodesByPrefix_DelegatesAndMergesCache(t *testing.T) {
 	require.True(t, seen[NodeID("tenant_a:cached1")])
 	require.False(t, seen[NodeID("tenant_b:base2")])
 	require.False(t, seen[NodeID("tenant_b:cached2")])
+}
+
+func TestAsyncEngine_StreamNodesByPrefix_AllNodesFallbackBranches(t *testing.T) {
+	base := NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	_, err := base.CreateNode(&Node{ID: "tenant_a:base", Labels: []string{"L"}})
+	require.NoError(t, err)
+	_, err = base.CreateNode(&Node{ID: "tenant_b:base", Labels: []string{"L"}})
+	require.NoError(t, err)
+
+	ae := NewAsyncEngine(base, &AsyncEngineConfig{FlushInterval: time.Hour, MinFlushInterval: time.Hour, MaxFlushInterval: time.Hour})
+	t.Cleanup(func() { _ = ae.Close() })
+	_, err = ae.CreateNode(&Node{ID: "tenant_a:cached", Labels: []string{"L"}})
+	require.NoError(t, err)
+	require.NoError(t, ae.DeleteNode("tenant_a:base"))
+
+	var seen []NodeID
+	err = ae.StreamNodesByPrefix(context.Background(), "tenant_a:", func(node *Node) error {
+		seen = append(seen, node.ID)
+		return ErrIterationStopped
+	})
+	require.NoError(t, err)
+	require.Equal(t, []NodeID{"tenant_a:cached"}, seen)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = ae.StreamNodesByPrefix(ctx, "tenant_a:", func(node *Node) error { return nil })
+	require.ErrorIs(t, err, context.Canceled)
 }
