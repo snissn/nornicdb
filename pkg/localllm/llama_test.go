@@ -2,6 +2,7 @@ package localllm
 
 import (
 	"context"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -219,6 +220,145 @@ func TestResolveGenerationContextAndBatch(t *testing.T) {
 				t.Fatalf("batch=%d want=%d", gotBatch, tt.wantBatch)
 			}
 		})
+	}
+}
+
+func TestModelMethodsThatDoNotRequireLoadedNativeModel(t *testing.T) {
+	model := &Model{dims: 3, maxTokens: 0, modelDesc: "fixture.gguf"}
+	ctx := context.Background()
+
+	vec, err := model.Embed(ctx, "")
+	if err != nil {
+		t.Fatalf("Embed empty returned error: %v", err)
+	}
+	if vec != nil {
+		t.Fatalf("Embed empty = %v, want nil", vec)
+	}
+
+	raw, err := model.EmbedRaw(ctx, "")
+	if err != nil {
+		t.Fatalf("EmbedRaw empty returned error: %v", err)
+	}
+	if raw != nil {
+		t.Fatalf("EmbedRaw empty = %v, want nil", raw)
+	}
+
+	count, err := model.CountTokens("")
+	if err != nil {
+		t.Fatalf("CountTokens empty returned error: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("CountTokens empty = %d, want 0", count)
+	}
+
+	chunks, err := model.ChunkText("", 10, 2)
+	if err != nil {
+		t.Fatalf("ChunkText empty returned error: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0] != "" {
+		t.Fatalf("ChunkText empty = %#v, want single empty chunk", chunks)
+	}
+
+	batch, err := model.EmbedBatch(ctx, []string{""})
+	if err != nil {
+		t.Fatalf("EmbedBatch empty text returned error: %v", err)
+	}
+	if len(batch) != 1 || batch[0] != nil {
+		t.Fatalf("EmbedBatch empty = %#v, want one nil vector", batch)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := model.Embed(cancelled, "hello"); err != context.Canceled {
+		t.Fatalf("Embed cancelled error = %v, want context.Canceled", err)
+	}
+	if _, err := model.EmbedRaw(cancelled, "hello"); err != context.Canceled {
+		t.Fatalf("EmbedRaw cancelled error = %v, want context.Canceled", err)
+	}
+	if _, err := model.EmbedBatch(cancelled, []string{"hello"}); err != context.Canceled {
+		t.Fatalf("EmbedBatch cancelled error = %v, want context.Canceled", err)
+	}
+
+	if model.Dimensions() != 3 {
+		t.Fatalf("Dimensions = %d, want 3", model.Dimensions())
+	}
+	if model.MaxTokens() != 0 {
+		t.Fatalf("MaxTokens = %d, want 0", model.MaxTokens())
+	}
+	if model.ModelDescription() != "fixture.gguf" {
+		t.Fatalf("ModelDescription = %q", model.ModelDescription())
+	}
+	if err := model.Close(); err != nil {
+		t.Fatalf("Close nil native handles returned error: %v", err)
+	}
+}
+
+func TestRerankerModelSafeBranches(t *testing.T) {
+	ctx := context.Background()
+	var nilReranker *RerankerModel
+	if _, err := nilReranker.Score(ctx, "query", "doc"); err == nil {
+		t.Fatal("expected nil reranker score error")
+	}
+	if err := nilReranker.Close(); err != nil {
+		t.Fatalf("nil reranker close returned error: %v", err)
+	}
+
+	r := &RerankerModel{}
+	if _, err := r.Score(ctx, "query", "doc"); err == nil {
+		t.Fatal("expected unloaded reranker score error")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("unloaded reranker close returned error: %v", err)
+	}
+
+	if got := sigmoid32(0); math.Abs(float64(got-0.5)) > 1e-6 {
+		t.Fatalf("sigmoid32(0) = %f, want 0.5", got)
+	}
+	if got := sigmoid32(2); got <= 0.5 || got >= 1 {
+		t.Fatalf("sigmoid32(2) = %f, want (0.5, 1)", got)
+	}
+	if got := sigmoid32(-2); got <= 0 || got >= 0.5 {
+		t.Fatalf("sigmoid32(-2) = %f, want (0, 0.5)", got)
+	}
+}
+
+func TestGenerationModelSafeBranches(t *testing.T) {
+	params := DefaultGenerateParams()
+	if params.MaxTokens != 512 {
+		t.Fatalf("MaxTokens = %d, want 512", params.MaxTokens)
+	}
+	if len(params.StopTokens) == 0 {
+		t.Fatal("expected default stop tokens")
+	}
+
+	model := &GenerationModel{modelPath: "fixture.gguf", batchSize: 4, contextSize: 8}
+	if model.ModelPath() != "fixture.gguf" {
+		t.Fatalf("ModelPath = %q", model.ModelPath())
+	}
+	if _, err := model.Generate(context.Background(), "prompt", params); err == nil {
+		t.Fatal("expected Generate to fail for nil native handles")
+	}
+	if err := model.GenerateStream(context.Background(), "prompt", params, func(string) error { return nil }); err == nil {
+		t.Fatal("expected GenerateStream to fail for nil native handles")
+	}
+	if err := model.Close(); err != nil {
+		t.Fatalf("Close nil native generation handles returned error: %v", err)
+	}
+}
+
+func TestNativeLoadFailureBranches(t *testing.T) {
+	missingEmbedding := DefaultOptions("/definitely/missing/embedding-model.gguf")
+	if model, err := LoadModel(missingEmbedding); err == nil || model != nil {
+		t.Fatalf("LoadModel missing = (%v, %v), want nil error", model, err)
+	}
+
+	if reranker, err := LoadRerankerModel(missingEmbedding); err == nil || reranker != nil {
+		t.Fatalf("LoadRerankerModel missing = (%v, %v), want nil error", reranker, err)
+	}
+
+	missingGeneration := DefaultGenerationOptions("/definitely/missing/generation-model.gguf")
+	if model, err := LoadGenerationModel(missingGeneration); err == nil || model != nil {
+		t.Fatalf("LoadGenerationModel missing = (%v, %v), want nil error", model, err)
 	}
 }
 

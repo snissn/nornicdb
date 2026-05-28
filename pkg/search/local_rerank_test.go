@@ -132,3 +132,70 @@ type failingScorer struct{}
 func (failingScorer) Score(context.Context, string, string) (float32, error) {
 	return 0, context.DeadlineExceeded
 }
+
+type captureScorer struct {
+	queries []string
+	docs    []string
+	score   float32
+}
+
+func (c *captureScorer) Score(ctx context.Context, query, document string) (float32, error) {
+	c.queries = append(c.queries, query)
+	c.docs = append(c.docs, document)
+	return c.score, nil
+}
+
+func TestLocalReranker_RerankNilContextCapsAndTruncates(t *testing.T) {
+	scorer := &captureScorer{score: 0.75}
+	cfg := &LocalRerankerConfig{
+		Enabled:       true,
+		Timeout:       0,
+		MaxCandidates: 1,
+		MaxDocChars:   3,
+	}
+	r := NewLocalReranker(scorer, cfg)
+
+	var nilCtx context.Context
+	results, err := r.Rerank(nilCtx, " query ", []RerankCandidate{
+		{ID: "a", Content: " abcdef ", Score: 0.1},
+		{ID: "b", Content: "second", Score: 0.2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].ID != "a" {
+		t.Fatalf("got results %#v, want only candidate a", results)
+	}
+	if len(scorer.queries) != 1 || scorer.queries[0] != "query" {
+		t.Fatalf("queries = %#v, want trimmed query", scorer.queries)
+	}
+	if len(scorer.docs) != 1 || scorer.docs[0] != "abc" {
+		t.Fatalf("docs = %#v, want truncated document", scorer.docs)
+	}
+}
+
+func TestLocalReranker_RerankAllFilteredFallsBack(t *testing.T) {
+	cfg := &LocalRerankerConfig{
+		Enabled:       true,
+		Timeout:       0,
+		MaxCandidates: 0,
+		MaxDocChars:   0,
+		MinScore:      0.5,
+	}
+	r := NewLocalReranker(&captureScorer{score: 0.1}, cfg)
+	candidates := []RerankCandidate{
+		{ID: "a", Content: "alpha", Score: 0.9},
+		{ID: "b", Content: "beta", Score: 0.8},
+	}
+
+	results, err := r.Rerank(context.Background(), "query", candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || results[0].ID != "a" || results[1].ID != "b" {
+		t.Fatalf("expected pass-through results, got %#v", results)
+	}
+	if results[0].FinalScore != candidates[0].Score || results[1].FinalScore != candidates[1].Score {
+		t.Fatalf("expected original scores preserved, got %#v", results)
+	}
+}

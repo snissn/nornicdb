@@ -10,6 +10,7 @@ import (
 	"time"
 
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/kms"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,4 +88,52 @@ func TestResolveProviderManagedDBKey_RotatesWrappedDEKMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &persisted))
 	require.Equal(t, uint32(2), persisted.Version)
+}
+
+func TestResolveProviderManagedDBKey_MetadataErrorBranches(t *testing.T) {
+	cfg := nornicConfig.LoadDefaults()
+	cfg.Database.EncryptionEnabled = true
+	cfg.Database.EncryptionProvider = "local"
+	cfg.Database.EncryptionMasterKey = "example-test-key-do-not-use-0001"
+	cfg.Database.EncryptionKeyURI = "kms://local/nornicdb-test"
+
+	t.Run("invalid local master key", func(t *testing.T) {
+		badCfg := nornicConfig.LoadDefaults()
+		badCfg.Database.EncryptionMasterKey = "short"
+		_, err := resolveProviderManagedDBKey(t.TempDir(), badCfg, "local")
+		require.ErrorContains(t, err, "invalid encryption master key")
+	})
+
+	t.Run("malformed metadata json", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "db.kms_dek.json"), []byte("{"), 0600))
+		_, err := resolveProviderManagedDBKey(dir, cfg, "local")
+		require.ErrorContains(t, err, "failed to decode persisted DEK metadata")
+	})
+
+	t.Run("provider mismatch", func(t *testing.T) {
+		dir := t.TempDir()
+		metadata := persistedProviderDEK{Provider: "aws", CiphertextB64: base64.StdEncoding.EncodeToString([]byte("wrapped"))}
+		raw, err := json.Marshal(metadata)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "db.kms_dek.json"), raw, 0600))
+		_, err = resolveProviderManagedDBKey(dir, cfg, "local")
+		require.ErrorContains(t, err, "persisted DEK was created with provider")
+	})
+
+	t.Run("invalid ciphertext encoding", func(t *testing.T) {
+		dir := t.TempDir()
+		metadata := persistedProviderDEK{Provider: "local", CiphertextB64: "not-base64!!!"}
+		raw, err := json.Marshal(metadata)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "db.kms_dek.json"), raw, 0600))
+		_, err = resolveProviderManagedDBKey(dir, cfg, "local")
+		require.ErrorContains(t, err, "failed to decode persisted DEK ciphertext")
+	})
+}
+
+func TestPersistProviderDEK_WriteErrorBranch(t *testing.T) {
+	dir := t.TempDir()
+	err := persistProviderDEK(dir, "local", &kms.DataKey{Ciphertext: []byte("wrapped"), CreatedAt: time.Now()})
+	require.ErrorContains(t, err, "failed to persist DEK metadata")
 }

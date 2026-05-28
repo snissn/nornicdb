@@ -155,3 +155,70 @@ func TestStartRetentionSweep_NoOpWithoutManager(t *testing.T) {
 	db := &DB{}
 	db.startRetentionSweep(nil)
 }
+
+func TestRetentionSweep_ProcessesExpiredAndSkipsExcluded(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = engine.Close() })
+	namespaced := storage.NewNamespacedEngine(engine, "nornic")
+	now := time.Now().UTC()
+	_, err := namespaced.CreateNode(&storage.Node{ID: "old", Labels: []string{"User"}, CreatedAt: now.Add(-2 * time.Hour), Properties: map[string]any{"owner_id": "alice"}})
+	require.NoError(t, err)
+	_, err = namespaced.CreateNode(&storage.Node{ID: "recent", Labels: []string{"User"}, CreatedAt: now, Properties: map[string]any{"owner_id": "bob"}})
+	require.NoError(t, err)
+	_, err = namespaced.CreateNode(&storage.Node{ID: "audit", Labels: []string{"AuditLog"}, CreatedAt: now.Add(-2 * time.Hour), Properties: map[string]any{"owner_id": "carol"}})
+	require.NoError(t, err)
+
+	manager := retention.NewManager()
+	require.NoError(t, manager.AddPolicy(&retention.Policy{
+		ID:       "user-short",
+		Category: retention.CategoryUser,
+		RetentionPeriod: retention.RetentionPeriod{
+			Duration: time.Hour,
+		},
+		Active: true,
+	}))
+	var deleted []string
+	manager.SetDeleteCallback(func(record *retention.DataRecord) error {
+		deleted = append(deleted, record.ID)
+		return namespaced.DeleteNode(storage.NodeID(record.ID))
+	})
+
+	db := &DB{storage: namespaced, baseStorage: engine, config: &Config{}, retentionManager: manager, searchServices: make(map[string]*dbSearchService)}
+	db.config.Retention.ExcludedLabels = []string{"AuditLog"}
+	db.SetDbSearchFlagsResolver(func(dbName string) (bool, bool, string, string) { return false, false, "startup", "startup" })
+	db.runRetentionSweep(context.Background())
+
+	require.Equal(t, []string{"old"}, deleted)
+	_, err = namespaced.GetNode("old")
+	require.Error(t, err)
+	_, err = namespaced.GetNode("recent")
+	require.NoError(t, err)
+	_, err = namespaced.GetNode("audit")
+	require.NoError(t, err)
+}
+
+func TestRetentionSweep_BudgetAndStartBranches(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = engine.Close() })
+	namespaced := storage.NewNamespacedEngine(engine, "nornic")
+	_, err := namespaced.CreateNode(&storage.Node{ID: "first", Labels: []string{"User"}, CreatedAt: time.Now().Add(-2 * time.Hour), Properties: map[string]any{"owner_id": "alice"}})
+	require.NoError(t, err)
+	_, err = namespaced.CreateNode(&storage.Node{ID: "second", Labels: []string{"User"}, CreatedAt: time.Now().Add(-2 * time.Hour), Properties: map[string]any{"owner_id": "bob"}})
+	require.NoError(t, err)
+
+	manager := retention.NewManager()
+	require.NoError(t, manager.AddPolicy(&retention.Policy{ID: "user-short", Category: retention.CategoryUser, RetentionPeriod: retention.RetentionPeriod{Duration: time.Hour}, Active: true}))
+	db := &DB{storage: namespaced, baseStorage: engine, config: &Config{}, retentionManager: manager, searchServices: make(map[string]*dbSearchService)}
+	db.SetDbSearchFlagsResolver(func(dbName string) (bool, bool, string, string) { return false, false, "startup", "startup" })
+	db.config.Retention.MaxSweepRecords = 1
+	db.runRetentionSweep(context.Background())
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	db.config.Retention.SweepIntervalSeconds = 1
+	db.startRetentionSweep(canceled)
+	db.bgWg.Wait()
+
+	db.closed = true
+	db.startRetentionSweep(context.Background())
+}

@@ -59,3 +59,17 @@ func TestDB_HealthCheck_RespectsContextCancellation(t *testing.T) {
 		t.Fatalf("HealthCheck with cancelled ctx: got %v, want errors.Is(err, context.Canceled)", err)
 	}
 }
+
+func TestDB_HealthCheck_NilAndUninitializedBranches(t *testing.T) {
+	var nilDB *DB
+	err := nilDB.HealthCheck(context.Background())
+	if err == nil || err.Error() != "nornicdb: nil DB" {
+		t.Fatalf("HealthCheck nil DB: got %v", err)
+	}
+
+	db := &DB{}
+	err = db.HealthCheck(context.Background())
+	if err == nil || err.Error() != "nornicdb: storage engine not initialized" {
+		t.Fatalf("HealthCheck uninitialized DB: got %v", err)
+	}
+}

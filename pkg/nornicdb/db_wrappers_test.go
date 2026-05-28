@@ -330,16 +330,24 @@ func TestDBWrapperHelpers_SetEmbedderBranches(t *testing.T) {
 		t.Cleanup(func() { _ = base.Close() })
 		cfg := DefaultConfig()
 		cfg.Memory.KmeansClusterInterval = 0 // avoid timer side effects
+		calledYield := false
 		db := &DB{
 			config:            cfg,
 			baseStorage:       base,
 			storage:           storage.NewNamespacedEngine(base, "nornic"),
 			embedWorkerConfig: DefaultEmbedQueueConfig(),
+			embedQueueYieldFn: func() bool { calledYield = true; return true },
 		}
 		db.embedWorkerConfig.DeferWorkerStart = true
 
 		db.SetEmbedder(newMockEmbedder())
 		require.NotNil(t, db.embedQueue)
+		db.embedQueue.mu.Lock()
+		gotYield := db.embedQueue.shouldYield
+		db.embedQueue.mu.Unlock()
+		require.NotNil(t, gotYield)
+		require.True(t, gotYield())
+		require.True(t, calledYield)
 		db.embedQueue.Close()
 	})
 
@@ -399,4 +407,46 @@ func TestDBWrapperHelpers_SetEmbedderBranches(t *testing.T) {
 		db.stopClusteringTimer()
 		require.Nil(t, db.clusterTicker)
 	})
+}
+
+func TestDBWrapperHelpers_CountAndBuildBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	db := &DB{
+		storage:             storage.NewNamespacedEngine(base, "nornic"),
+		baseStorage:         base,
+		config:              DefaultConfig(),
+		searchServices:      make(map[string]*dbSearchService),
+		embeddingDims:       3,
+		searchMinSimilarity: 0.1,
+		buildCtx:            context.Background(),
+	}
+
+	_, err := db.storage.CreateNode(&storage.Node{ID: "default", Properties: map[string]any{"content": "default"}, ChunkEmbeddings: [][]float32{{1, 0, 0}}})
+	require.NoError(t, err)
+	require.NoError(t, db.BuildSearchIndexes(context.Background()))
+	require.Equal(t, 1, db.EmbeddingCount())
+	require.Equal(t, 1, db.EmbeddingCountCached())
+	require.Equal(t, 3, db.VectorIndexDimensionsCached())
+
+	tenantStorage := storage.NewNamespacedEngine(base, "tenant_count")
+	_, err = tenantStorage.CreateNode(&storage.Node{ID: "tenant", Properties: map[string]any{"content": "tenant"}, ChunkEmbeddings: [][]float32{{0, 1, 0}}})
+	require.NoError(t, err)
+	tenantSvc, err := db.EnsureSearchIndexesBuilt(context.Background(), "tenant_count", tenantStorage)
+	require.NoError(t, err)
+	require.Equal(t, 1, tenantSvc.EmbeddingCount())
+
+	db.SetAllDatabasesProvider(func() []DatabaseAndStorage {
+		return []DatabaseAndStorage{
+			{Name: "system", Storage: storage.NewNamespacedEngine(base, "system")},
+			{Name: "composite", Storage: tenantStorage, IsComposite: true},
+			{Name: "nornic", Storage: db.storage},
+			{Name: "tenant_count", Storage: tenantStorage},
+			{Name: "missing_base"},
+		}
+	})
+	require.Equal(t, 2, db.EmbeddingCount())
+
+	db.closed = true
+	require.ErrorIs(t, db.BuildSearchIndexes(context.Background()), ErrClosed)
 }

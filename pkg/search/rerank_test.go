@@ -276,6 +276,67 @@ func TestCrossEncoderWithAuth(t *testing.T) {
 	assert.Equal(t, "Bearer test-api-key", receivedAuth)
 }
 
+func TestCrossEncoderAdditionalAPIResponseBranches(t *testing.T) {
+	t.Run("simple rankings response", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"rankings": []map[string]interface{}{
+					{"index": 1, "score": 0.95},
+					{"index": 0, "score": 0.25},
+				},
+			})
+		}))
+		defer server.Close()
+
+		ce := NewCrossEncoder(&CrossEncoderConfig{Enabled: true, APIURL: server.URL, Timeout: time.Second})
+		out, err := ce.Rerank(context.Background(), "query", []RerankCandidate{
+			{ID: "a", Content: "alpha", Score: 0.1},
+			{ID: "b", Content: "beta", Score: 0.2},
+		})
+		require.NoError(t, err)
+		require.Len(t, out, 2)
+		assert.Equal(t, "b", out[0].ID)
+		assert.Equal(t, 0.95, out[0].CrossScore)
+	})
+
+	t.Run("malformed response falls back", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("not-json"))
+		}))
+		defer server.Close()
+
+		ce := NewCrossEncoder(&CrossEncoderConfig{Enabled: true, APIURL: server.URL, Timeout: time.Second})
+		out, err := ce.Rerank(context.Background(), "query", []RerankCandidate{
+			{ID: "a", Content: "alpha", Score: 0.9},
+			{ID: "b", Content: "beta", Score: 0.8},
+		})
+		require.NoError(t, err)
+		require.Len(t, out, 2)
+		assert.Equal(t, "a", out[0].ID)
+		assert.Equal(t, 0.9, out[0].FinalScore)
+	})
+
+	t.Run("unrecognized response and invalid request url fall back", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+		}))
+		defer server.Close()
+
+		candidates := []RerankCandidate{{ID: "a", Content: "alpha", Score: 0.7}}
+		ce := NewCrossEncoder(&CrossEncoderConfig{Enabled: true, APIURL: server.URL, Timeout: time.Second})
+		out, err := ce.Rerank(context.Background(), "query", candidates)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "a", out[0].ID)
+
+		badURL := NewCrossEncoder(&CrossEncoderConfig{Enabled: true, APIURL: "://bad-url", Timeout: time.Second})
+		out, err = badURL.Rerank(context.Background(), "query", candidates)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "a", out[0].ID)
+	})
+}
+
 func TestCrossEncoder_NameEnabledConfigAndAvailability(t *testing.T) {
 	ce := NewCrossEncoder(nil)
 	assert.Equal(t, "cross_encoder", ce.Name())
@@ -393,6 +454,47 @@ func TestLLMReranker_RerankScoredFilteredAndFallbacks(t *testing.T) {
 		return "{}", nil
 	})
 	out, err = rBad.Rerank(context.Background(), "q", cands[:2])
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	assert.Equal(t, "a", out[0].ID)
+	assert.Equal(t, "b", out[1].ID)
+}
+
+func TestLLMReranker_RerankOrderFillsOmittedAndErrorFallback(t *testing.T) {
+	cfg := &LLMRerankerConfig{
+		Enabled:       true,
+		Timeout:       time.Second,
+		MaxCandidates: 0,
+		MaxDocChars:   0,
+	}
+	cands := []RerankCandidate{
+		{ID: "a", Content: "alpha", Score: 0.8},
+		{ID: "b", Content: "beta", Score: 0.6},
+		{ID: "c", Content: "gamma", Score: 0.4},
+	}
+
+	r := NewLLMReranker(cfg, func(ctx context.Context, prompt string) (string, error) {
+		return `{"order":[2,0]}`, nil
+	})
+	var nilCtx context.Context
+	out, err := r.Rerank(nilCtx, " query ", cands)
+	require.NoError(t, err)
+	require.Len(t, out, 3)
+	assert.Equal(t, "c", out[0].ID)
+	assert.Equal(t, "a", out[1].ID)
+	assert.Equal(t, "b", out[2].ID)
+	assert.Equal(t, 3, out[2].NewRank)
+	assert.Equal(t, cands[1].Score, out[2].FinalScore)
+	assert.Greater(t, out[0].FinalScore, out[1].FinalScore)
+
+	out, err = r.Rerank(context.Background(), "query", nil)
+	require.NoError(t, err)
+	assert.Empty(t, out)
+
+	rErr := NewLLMReranker(cfg, func(ctx context.Context, prompt string) (string, error) {
+		return "", context.Canceled
+	})
+	out, err = rErr.Rerank(context.Background(), "query", cands[:2])
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	assert.Equal(t, "a", out[0].ID)

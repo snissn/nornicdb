@@ -1759,6 +1759,42 @@ func (p *pendingAdderEngine) AddToPendingEmbeddings(id storage.NodeID) {
 }
 
 func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
+	t.Run("queue len and trigger debounce branches", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		worker := NewEmbedWorker(newMockEmbedder(), engine, &EmbedWorkerConfig{
+			NumWorkers:           1,
+			ScanInterval:         time.Second,
+			BatchDelay:           time.Millisecond,
+			MaxRetries:           1,
+			ChunkSize:            64,
+			ChunkOverlap:         8,
+			TriggerDebounceDelay: 10 * time.Millisecond,
+			ClusterDebounceDelay: time.Second,
+			ClusterMinBatchSize:  10,
+			DeferWorkerStart:     true,
+			EmbedBatchSize:       1,
+			PropertiesInclude:    nil,
+			PropertiesExclude:    nil,
+			IncludeLabels:        true,
+		})
+		defer worker.Close()
+
+		require.Zero(t, worker.QueueLen())
+		worker.Trigger()
+		worker.Trigger()
+		require.Eventually(t, func() bool { return worker.QueueLen() == 1 }, 200*time.Millisecond, 5*time.Millisecond)
+		select {
+		case <-worker.trigger:
+		default:
+			t.Fatal("expected debounced trigger signal")
+		}
+
+		worker.closed.Store(true)
+		worker.Trigger()
+		require.Zero(t, worker.QueueLen())
+	})
+
 	t.Run("debounce accumulates and fires when threshold met", func(t *testing.T) {
 		var got []int
 		ew := &EmbedWorker{

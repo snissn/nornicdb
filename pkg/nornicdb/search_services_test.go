@@ -790,6 +790,69 @@ func TestSearchServices_EnsureBuiltAndStart_ErrorBranches(t *testing.T) {
 	})
 }
 
+func TestSearchServices_OffLazyStatsAndRemoveBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	db := &DB{
+		storage:             storage.NewNamespacedEngine(base, "nornic"),
+		baseStorage:         base,
+		config:              DefaultConfig(),
+		searchServices:      make(map[string]*dbSearchService),
+		embeddingDims:       3,
+		searchMinSimilarity: 0.2,
+		buildCtx:            context.Background(),
+	}
+
+	db.SetDbSearchFlagsResolver(func(dbName string) (bool, bool, string, string) {
+		if dbName == "off_cov" {
+			return false, false, "startup", "startup"
+		}
+		return true, true, "lazy", "lazy"
+	})
+
+	svc, err := db.EnsureSearchIndexesBuilt(context.Background(), "off_cov", nil)
+	require.NoError(t, err)
+	require.True(t, svc.GetBuildProgress().Ready)
+	status := db.GetDatabaseSearchStatus("off_cov")
+	require.True(t, status.Ready)
+	require.False(t, status.BM25Enabled)
+	require.False(t, status.VectorEnabled)
+	require.False(t, status.LazyTriggerNeeded)
+
+	lazySvc, err := db.EnsureSearchIndexesBuilt(context.Background(), "lazy_cov", nil)
+	require.NoError(t, err)
+	require.NotNil(t, lazySvc)
+	lazyStatus := db.GetDatabaseSearchStatus("lazy_cov")
+	require.True(t, lazyStatus.Initialized)
+	require.False(t, lazyStatus.Ready)
+	require.True(t, lazyStatus.LazyTriggerNeeded)
+
+	startedLazy, err := db.EnsureSearchIndexesBuildStarted("lazy_started_cov", nil)
+	require.NoError(t, err)
+	require.NotNil(t, startedLazy)
+	require.False(t, startedLazy.GetBuildProgress().Ready)
+
+	require.NoError(t, db.removeNodeFromSearchIndexes(context.Background(), "lazy_cov", nil, ""))
+	err = db.removeNodeFromSearchIndexes(context.Background(), "system", nil, "node")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "system database")
+
+	count, dims, bytes := db.GetDatabaseManagedEmbeddingStats("")
+	require.Zero(t, count)
+	require.Equal(t, 3, dims)
+	require.Zero(t, bytes)
+	count, dims, bytes = db.GetDatabaseManagedEmbeddingStats("system")
+	require.Zero(t, count)
+	require.Zero(t, dims)
+	require.Zero(t, bytes)
+
+	broken := &DB{storage: storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornic"), searchServices: make(map[string]*dbSearchService)}
+	count, dims, bytes = broken.GetDatabaseManagedEmbeddingStats("tenant_without_base")
+	require.Zero(t, count)
+	require.Zero(t, dims)
+	require.Zero(t, bytes)
+}
+
 func TestSearchServices_CloseBuildDone_IsIdempotent(t *testing.T) {
 	entry := &dbSearchService{buildDone: make(chan struct{})}
 	entry.closeBuildDone()
