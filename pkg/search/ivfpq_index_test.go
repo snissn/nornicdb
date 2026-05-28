@@ -87,6 +87,11 @@ func TestIVFPQ_InternalHelpersAndScratch(t *testing.T) {
 	out = h2.toSortedDescending()
 	require.Equal(t, []string{"z", "x"}, []string{out[0].ID, out[1].ID})
 
+	h3 := newCandidateMinHeap(0)
+	require.Equal(t, 1, h3.cap)
+	h4 := newCandidateMinHeapWithBuffer(make([]Candidate, 0, 4), 0)
+	require.Equal(t, 1, h4.cap)
+
 	idx := &IVFPQIndex{
 		profile:   IVFPQProfile{Dimensions: 2, NProbe: 1, RerankTopK: 10},
 		codebooks: codebooks,
@@ -132,6 +137,11 @@ func TestIVFPQ_SearchApproxBranchesAndProfileHelpers(t *testing.T) {
 	require.Equal(t, idx.profile, idx.Profile())
 	require.True(t, idx.compatibleProfile(IVFPQProfile{Dimensions: 2, IVFLists: 2, PQSegments: 2, PQBits: 4}))
 	require.False(t, idx.compatibleProfile(IVFPQProfile{Dimensions: 3, IVFLists: 2, PQSegments: 2, PQBits: 4}))
+	require.Equal(t, IVFPQProfile{}, nilIdx.Profile())
+	require.Equal(t, 0, nilIdx.Count())
+	require.False(t, nilIdx.compatibleProfile(idx.profile))
+	require.Equal(t, 0.0, ivfpqBytesPerVector(IVFPQProfile{PQSegments: 0}))
+	require.Equal(t, 10.0, ivfpqBytesPerVector(IVFPQProfile{PQSegments: 8}))
 }
 
 func TestIVFPQList_AppendCodeAndCodeAt(t *testing.T) {

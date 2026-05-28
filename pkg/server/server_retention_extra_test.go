@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -93,6 +94,43 @@ func TestRetentionPolicyByID_PUT_AndDELETE(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, resp.Code)
 }
 
+func TestRetentionPolicyByID_AdditionalErrorBranches(t *testing.T) {
+	server, authenticator := setupRetentionTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	policy := retention.Policy{
+		ID:              "lookup-policy",
+		Name:            "lookup",
+		Category:        retention.CategoryUser,
+		RetentionPeriod: retention.RetentionPeriod{Duration: 24 * time.Hour},
+		Active:          true,
+	}
+	require.NoError(t, server.db.GetRetentionManager().AddPolicy(&policy))
+
+	resp := makeRequest(t, server, http.MethodGet, retentionPoliciesEndpoint+"/lookup-policy", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+	var got retention.Policy
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Equal(t, "lookup-policy", got.ID)
+
+	resp = makeRequest(t, server, http.MethodPut, retentionPoliciesEndpoint+"/missing", "not-object", "Bearer "+token)
+	require.Equal(t, http.StatusBadRequest, resp.Code)
+
+	missing := policy
+	missing.ID = "ignored-by-handler"
+	resp = makeRequest(t, server, http.MethodPut, retentionPoliciesEndpoint+"/missing", missing, "Bearer "+token)
+	require.Equal(t, http.StatusBadRequest, resp.Code)
+
+	resp = makeRequest(t, server, http.MethodPatch, retentionPoliciesEndpoint+"/lookup-policy", nil, "Bearer "+token)
+	require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
+
+	req := httptest.NewRequest(http.MethodGet, retentionPoliciesEndpoint+"/blank", nil)
+	req.SetPathValue("id", "   ")
+	rec := httptest.NewRecorder()
+	server.handleRetentionPolicyByID(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 // (no path-validation test for empty-id branch — net/http/httptest
 // rejects whitespace-only path segments at request construction, so
 // the handler's r.PathValue("id") TrimSpace branch is unreachable
@@ -139,6 +177,9 @@ func TestRetentionHolds_BadJSON_AndMethodNotAllowed(t *testing.T) {
 	// PUT not supported → 405.
 	resp = makeRequest(t, server, http.MethodPut, "/admin/retention/holds", retention.LegalHold{}, "Bearer "+token)
 	require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
+
+	resp = makeRequest(t, server, http.MethodPost, "/admin/retention/holds", retention.LegalHold{PlacedBy: "legal"}, "Bearer "+token)
+	require.Equal(t, http.StatusBadRequest, resp.Code)
 }
 
 func TestRetentionHoldByID_DeleteAndErrors(t *testing.T) {
@@ -161,6 +202,12 @@ func TestRetentionHoldByID_DeleteAndErrors(t *testing.T) {
 	// DELETE on unknown id → 404.
 	resp = makeRequest(t, server, http.MethodDelete, "/admin/retention/holds/nope", nil, "Bearer "+token)
 	require.Equal(t, http.StatusNotFound, resp.Code)
+
+	req := httptest.NewRequest(http.MethodDelete, "/admin/retention/holds/blank", nil)
+	req.SetPathValue("id", " \t ")
+	rec := httptest.NewRecorder()
+	server.handleRetentionHoldByID(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRetentionErasures_LifecycleAndErrors(t *testing.T) {
@@ -197,4 +244,43 @@ func TestRetentionSweep(t *testing.T) {
 	// GET not supported.
 	resp = makeRequest(t, server, http.MethodGet, "/admin/retention/sweep", nil, "Bearer "+token)
 	require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
+}
+
+func TestRetentionDefaultsStatusAndProcessAdditionalBranches(t *testing.T) {
+	server, authenticator := setupRetentionTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	resp := makeRequest(t, server, http.MethodGet, "/admin/retention/policies/defaults", nil, "Bearer "+token)
+	require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
+
+	resp = makeRequest(t, server, http.MethodPost, "/admin/retention/policies/defaults", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+	resp = makeRequest(t, server, http.MethodPost, "/admin/retention/policies/defaults", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+	var defaultsPayload map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&defaultsPayload))
+	require.Equal(t, float64(0), defaultsPayload["loaded"])
+	require.Equal(t, float64(7), defaultsPayload["skipped"])
+	require.Empty(t, defaultsPayload["errors"])
+
+	resp = makeRequest(t, server, http.MethodPost, "/admin/retention/status", nil, "Bearer "+token)
+	require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
+
+	erasureReq, err := server.db.GetRetentionManager().CreateErasureRequest("subject", "subject@example.com")
+	require.NoError(t, err)
+	resp = makeRequest(t, server, http.MethodGet, "/admin/retention/erasures/"+erasureReq.ID+"/process", nil, "Bearer "+token)
+	require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
+	resp = makeRequest(t, server, http.MethodPost, "/admin/retention/erasures/"+erasureReq.ID+"/process", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+	var processed retention.ErasureRequest
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&processed))
+	require.Equal(t, erasureReq.ID, processed.ID)
+	require.Equal(t, retention.ErasureStatusCompleted, processed.Status)
+	require.Equal(t, 0, processed.ItemsFound)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/retention/erasures/blank/process", nil)
+	req.SetPathValue("id", "  ")
+	rec := httptest.NewRecorder()
+	server.handleRetentionProcessErasure(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 }

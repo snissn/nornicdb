@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/fstest"
 
 	"github.com/stretchr/testify/require"
 )
@@ -12,15 +13,71 @@ func TestSanitizeUIBasePath(t *testing.T) {
 	t.Run("allows normal prefixed path", func(t *testing.T) {
 		require.Equal(t, "/nornic-db", sanitizeUIBasePath("/nornic-db/"))
 		require.Equal(t, "/nornic-db", sanitizeUIBasePath("nornic-db"))
+		require.Equal(t, "/foo_bar-v1", sanitizeUIBasePath("/foo_bar-v1"))
 	})
 
 	t.Run("rejects malicious header payload", func(t *testing.T) {
+		require.Equal(t, "", sanitizeUIBasePath(""))
+		require.Equal(t, "", sanitizeUIBasePath("/"))
 		require.Equal(t, "", sanitizeUIBasePath(`/" onload="alert(1)`))
 		require.Equal(t, "", sanitizeUIBasePath(`/x"><script>alert(1)</script>`))
 		require.Equal(t, "", sanitizeUIBasePath(`/../admin`))
 		require.Equal(t, "/foo/bar", sanitizeUIBasePath(`/foo//bar`))
 		require.Equal(t, "", sanitizeUIBasePath(`/foo\bar`))
+		require.Equal(t, "", sanitizeUIBasePath(`/foo:bar`))
 	})
+}
+
+func TestUIAssetHelpersAdditionalBranches(t *testing.T) {
+	origEnabled := UIEnabled
+	origAssets := UIAssets
+	origBasePath := UIBasePath
+	defer func() {
+		UIEnabled = origEnabled
+		UIAssets = origAssets
+		UIBasePath = origBasePath
+	}()
+
+	UIEnabled = true
+	UIAssets = nil
+	h, err := newUIHandler()
+	require.Error(t, err)
+	require.Nil(t, h)
+
+	UIAssets = fstest.MapFS{
+		"dist/assets/app.js": &fstest.MapFile{Data: []byte("console.log('missing index')")},
+	}
+	h, err = newUIHandler()
+	require.Error(t, err)
+	require.Nil(t, h)
+
+	SetUIBasePath("proxy/ui/")
+	require.Equal(t, "/proxy/ui", UIBasePath)
+	SetUIBasePath(`/bad:path`)
+	require.Empty(t, UIBasePath)
+
+	UIAssets = fstest.MapFS{
+		"ui/dist/index.html":    &fstest.MapFile{Data: []byte(`<script src="/assets/app.js"></script><link href="/favicon.ico">`)},
+		"ui/dist/assets/app.js": &fstest.MapFile{Data: []byte("console.log('ok')")},
+	}
+	SetUIBasePath("/app")
+	h, err = newUIHandler()
+	require.NoError(t, err)
+	require.NotNil(t, h)
+	require.Equal(t, "/app", h.basePath)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "console.log('ok')")
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `src="/app/assets/app.js"`)
+	require.Contains(t, rec.Body.String(), `href="/app/favicon.ico"`)
 }
 
 func TestUIHandler_ServeHTTP_DoesNotReflectMaliciousBasePathHeader(t *testing.T) {

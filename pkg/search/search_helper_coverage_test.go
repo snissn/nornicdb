@@ -86,6 +86,37 @@ func TestPropertyVectorHelpers(t *testing.T) {
 	require.Equal(t, 1, svc.CountPropertyVectorEntries("body"))
 }
 
+func TestScoreVectorIDDotBranches(t *testing.T) {
+	svc := &Service{}
+	score, ok := svc.scoreVectorIDDot([]float32{1, 0}, "missing")
+	require.False(t, ok)
+	require.Equal(t, 0.0, score)
+
+	engine := storage.NewMemoryEngine()
+	t.Cleanup(func() { engine.Close() })
+	svc = NewServiceWithDimensions(engine, 2)
+	score, ok = svc.scoreVectorIDDot([]float32{1, 0}, "missing")
+	require.False(t, ok)
+	require.Equal(t, 0.0, score)
+
+	require.NoError(t, svc.vectorIndex.Add("v1", []float32{0.5, 0.5}))
+	score, ok = svc.scoreVectorIDDot([]float32{1, 0}, "v1")
+	require.True(t, ok)
+	require.InDelta(t, 0.70710677, score, 1e-6)
+}
+
+func TestIVFPQBackgroundPersistenceNoopBranches(t *testing.T) {
+	svc := &Service{}
+	require.Empty(t, svc.ivfpqPersistenceBasePath("", ""))
+	require.Equal(t, "hnsw-path", svc.ivfpqPersistenceBasePath("vector-path", "hnsw-path"))
+	require.Equal(t, "vector-path", svc.ivfpqPersistenceBasePath("vector-path", ""))
+
+	svc.persistIVFPQBackground("", "")
+	svc.persistIVFPQBackground(t.TempDir()+"/vectors", "")
+	svc.ivfpqIndex = &IVFPQIndex{}
+	svc.persistIVFPQBackground(t.TempDir()+"/vectors", "")
+}
+
 func TestFilterByPropertiesDirect(t *testing.T) {
 	eng := newFilterTestEngine(t)
 	svc := NewService(eng)

@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/txsession"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2964,6 +2966,112 @@ func TestBaseURLAndAuditBranches(t *testing.T) {
 		server.SetAuditLogger(logger)
 		server.logAudit(req, "u2", "security_event", false, "denied")
 	}
+}
+
+func TestRequestAndStatusHelperBranches(t *testing.T) {
+	assert.Empty(t, hostnameFromRequest(nil))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "internal.local:7474"
+	req.Header.Set("X-Forwarded-Host", " public.example.com:8443, proxy.local ")
+	assert.Equal(t, "public.example.com", hostnameFromRequest(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "db.local"
+	assert.Equal(t, "db.local", hostnameFromRequest(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = ""
+	assert.Empty(t, hostnameFromRequest(req))
+
+	assert.False(t, shouldUseAcceptedStatusForMutation(nil))
+	assert.False(t, shouldUseAcceptedStatusForMutation(&TransactionResponse{}))
+	assert.False(t, shouldUseAcceptedStatusForMutation(&TransactionResponse{Receipt: map[string]any{"bookmark": "x"}, Optimistic: map[string]any{"queued": true}}))
+	assert.True(t, shouldUseAcceptedStatusForMutation(&TransactionResponse{Optimistic: map[string]any{"queued": true}}))
+
+	assert.Equal(t, "sub:user-sub", transactionOwnerKey(nil, &auth.JWTClaims{Sub: " user-sub ", Username: "ignored"}))
+	assert.Equal(t, "user:alice", transactionOwnerKey(nil, &auth.JWTClaims{Username: " alice ", Email: "ignored@example.com"}))
+	assert.Equal(t, "email:alice@example.com", transactionOwnerKey(nil, &auth.JWTClaims{Email: " alice@example.com "}))
+	authReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	authReq.Header.Set("Authorization", "Bearer abc")
+	owner := transactionOwnerKey(authReq, nil)
+	assert.True(t, strings.HasPrefix(owner, "auth:"))
+	assert.Len(t, owner, len("auth:")+64)
+	assert.Equal(t, "anonymous", transactionOwnerKey(nil, nil))
+}
+
+func TestAuditLoggerAndMVCCExpirationBranches(t *testing.T) {
+	server := &Server{}
+	require.NotPanics(t, func() { server.SetAuditLogger(nil) })
+
+	session := &txsession.Session{ID: "tx-1", Database: "nornic", Owner: "alice"}
+	server.logMVCCSnapshotExpiration(session, storage.ErrMVCCSnapshotGracefulCancel)
+	server.logMVCCSnapshotExpiration(nil, storage.ErrMVCCSnapshotGracefulCancel)
+
+	var auditBuffer bytes.Buffer
+	cfg := audit.DefaultConfig()
+	logger := audit.NewLoggerWithWriter(&auditBuffer, cfg)
+	server.SetAuditLogger(logger)
+	server.logMVCCSnapshotExpiration(nil, storage.ErrMVCCSnapshotGracefulCancel)
+	server.logMVCCSnapshotExpiration(session, nil)
+	server.logMVCCSnapshotExpiration(session, storage.ErrMVCCSnapshotGracefulCancel)
+	server.logMVCCSnapshotExpiration(session, storage.ErrMVCCSnapshotHardExpired)
+
+	logText := auditBuffer.String()
+	require.Equal(t, 2, strings.Count(logText, string(audit.EventSnapshotExpired)))
+	require.Contains(t, logText, `"expiration_kind":"graceful"`)
+	require.Contains(t, logText, `"expiration_kind":"hard"`)
+	require.Contains(t, logText, `"session_id":"tx-1"`)
+}
+
+func TestImplicitTransactionGenericPathAdditionalBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+	dbName := server.dbManager.DefaultDatabaseName()
+	adminCtx := context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+		Username: "admin",
+		Roles:    []string{"admin"},
+	})
+
+	t.Run("bare use returns syntax error", func(t *testing.T) {
+		body := `{"statements":[{"statement":":USE"},{"statement":"RETURN 1 AS n"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/commit", strings.NewReader(body)).WithContext(adminCtx)
+		rec := httptest.NewRecorder()
+		server.handleImplicitTransaction(rec, req, dbName)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var response TransactionResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+		require.Len(t, response.Errors, 1)
+		require.Equal(t, "Neo.ClientError.Statement.SyntaxError", response.Errors[0].Code)
+		require.Contains(t, response.Errors[0].Message, ":USE requires a database name")
+		require.Empty(t, response.Results)
+	})
+
+	t.Run("access denied without claims on generic path", func(t *testing.T) {
+		body := `{"statements":[{"statement":"CREATE (n:Doc {name:'generic-denied'})"},{"statement":"RETURN 1 AS n"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/commit", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		server.handleImplicitTransaction(rec, req, dbName)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var response TransactionResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+		require.Len(t, response.Errors, 1)
+		require.Equal(t, "Neo.ClientError.Security.Forbidden", response.Errors[0].Code)
+		require.Contains(t, response.Errors[0].Message, "Access to database")
+	})
+
+	t.Run("bom comment becomes empty result", func(t *testing.T) {
+		body := `{"statements":[{"statement":"RETURN 1 AS n"},{"statement":"\ufeff // comment only","includeStats":true}]}`
+		req := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/commit", strings.NewReader(body)).WithContext(adminCtx)
+		rec := httptest.NewRecorder()
+		server.handleImplicitTransaction(rec, req, dbName)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var response TransactionResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+		require.Empty(t, response.Errors)
+		require.Len(t, response.Results, 2)
+		require.Empty(t, response.Results[1].Columns)
+		require.Empty(t, response.Results[1].Data)
+	})
 }
 
 func TestAuthResolverAndRoleByIDAdditionalBranches(t *testing.T) {

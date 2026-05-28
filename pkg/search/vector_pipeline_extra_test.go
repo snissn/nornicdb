@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,6 +69,12 @@ func TestVectorPipelineExtraCandidateLimitAndScorers(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 
 	gpuScorer := NewGPUExactScorer(nil, NewCPUExactScorer(coverageVectorGetter{vectors: map[string][]float32{"a": {1, 0}}}))
+	scored, err = gpuScorer.ScoreCandidates(context.Background(), []float32{1, 0}, []Candidate{{ID: "a"}})
+	require.NoError(t, err)
+	require.Equal(t, []ScoredCandidate{{ID: "a", Score: 1}}, scored)
+
+	gpuIndex := gpu.NewEmbeddingIndex(nil, &gpu.EmbeddingIndexConfig{Dimensions: 2, InitialCap: 1, GPUEnabled: false, AutoSync: false})
+	gpuScorer = NewGPUExactScorer(gpuIndex, NewCPUExactScorer(coverageVectorGetter{vectors: map[string][]float32{"a": {1, 0}}}))
 	scored, err = gpuScorer.ScoreCandidates(context.Background(), []float32{1, 0}, []Candidate{{ID: "a"}})
 	require.NoError(t, err)
 	require.Equal(t, []ScoredCandidate{{ID: "a", Score: 1}}, scored)
