@@ -183,6 +183,25 @@ func TestAuthAttempt_BoltProtocol(t *testing.T) {
 	// Implicit assertion: did not panic across all three result values.
 }
 
+func TestSetAuthMetrics_ObserveAuthAttempt(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	bag := observability.NewAuthMetrics(reg)
+	srv := New(DefaultConfig(), fakeQueryExecutor{})
+
+	srv.SetAuthMetrics(bag)
+	srv.observeAuthAttempt("success")
+	srv.observeAuthAttempt("failure")
+	srv.observeAuthAttempt("denied")
+
+	assert.Equal(t, 1.0, sumCounterWithLabelValue(t, reg, "nornicdb_auth_attempts_total", "result", "success"))
+	assert.Equal(t, 1.0, sumCounterWithLabelValue(t, reg, "nornicdb_auth_attempts_total", "result", "failure"))
+	assert.Equal(t, 1.0, sumCounterWithLabelValue(t, reg, "nornicdb_auth_attempts_total", "result", "denied"))
+
+	srv.SetAuthMetrics(nil)
+	srv.observeAuthAttempt("success")
+	assert.Equal(t, 1.0, sumCounterWithLabelValue(t, reg, "nornicdb_auth_attempts_total", "result", "success"))
+}
+
 // readGaugeValue gathers reg, finds the named single-series gauge, and
 // returns its value. Test fails if not found.
 func readGaugeValue(t *testing.T, reg *prometheus.Registry, name string) float64 {

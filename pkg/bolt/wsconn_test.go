@@ -163,6 +163,49 @@ func TestWSConn_Close_Idempotent(t *testing.T) {
 	_ = wsc.Close()
 }
 
+func TestWSConn_WriteAfterCloseReturnsError(t *testing.T) {
+	rig := newWSTestRig(t, nil)
+	_, wsc, _ := rig.dial(t)
+
+	if err := wsc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	n, err := wsc.Write([]byte("after close"))
+	if err == nil {
+		t.Fatalf("expected write after close to return an error")
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 bytes written after close, got %d", n)
+	}
+}
+
+func TestWSConn_SetDeadlineSetsAndClearsBothDirections(t *testing.T) {
+	wsc := &wsConn{}
+	deadline := time.Unix(123, 456)
+
+	if err := wsc.SetDeadline(deadline); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	readDeadline := wsc.readDeadline.Load()
+	writeDeadline := wsc.writeDeadline.Load()
+	if readDeadline == nil || !readDeadline.Equal(deadline) {
+		t.Fatalf("read deadline = %v, want %v", readDeadline, deadline)
+	}
+	if writeDeadline == nil || !writeDeadline.Equal(deadline) {
+		t.Fatalf("write deadline = %v, want %v", writeDeadline, deadline)
+	}
+
+	if err := wsc.SetDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear SetDeadline: %v", err)
+	}
+	if got := wsc.readDeadline.Load(); got != nil {
+		t.Fatalf("read deadline was not cleared: %v", got)
+	}
+	if got := wsc.writeDeadline.Load(); got != nil {
+		t.Fatalf("write deadline was not cleared: %v", got)
+	}
+}
+
 func TestWSConn_LocalAddr_AlwaysTCPAddr(t *testing.T) {
 	// Construct a wsConn directly with non-TCP addrs; we don't need a
 	// live websocket for this since we're only exercising the address
