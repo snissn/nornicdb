@@ -348,6 +348,27 @@ embedding:
   # Set to 0 to disable warmup
   warmup_interval: "5m"
 
+  # --- llama.cpp context features (advanced, local provider only) ---
+  # These passthrough settings control how llama.cpp creates the model context.
+  # Most models work with defaults; override only when a model requires it.
+
+  # Context type: 0=default, 1=MTP (multi-token prediction).
+  # Only set to 1 if the model was trained with MTP layers.
+  # Env: NORNICDB_EMBEDDING_CTX_TYPE
+  # ctx_type: 0
+
+  # Pooling strategy: 1=mean (default), 2=cls, 3=last, 4=rank
+  # Env: NORNICDB_EMBEDDING_POOLING_TYPE
+  # pooling_type: 1
+
+  # Attention type: 0=causal, 1=non-causal (BERT-style bidirectional, default for embeddings)
+  # Env: NORNICDB_EMBEDDING_ATTENTION_TYPE
+  # attention_type: 1
+
+  # Flash attention: -1=auto (default), 0=disabled, 1=enabled
+  # Env: NORNICDB_EMBEDDING_FLASH_ATTN
+  # flash_attn: -1
+
 # =============================================================================
 # MEMORY/DECAY CONFIGURATION
 # Docs: https://github.com/orneryd/nornicdb/docs/features/memory-decay.md
@@ -611,6 +632,26 @@ heimdall:
   # Allowlist of MCP tool names when mcp_enable is true. Omit = all tools; [] = none; [store, link] = only those.
   # Env: NORNICDB_HEIMDALL_MCP_TOOLS (comma-separated; unset = all, empty = none)
   # mcp_tools: [store, recall, discover, link, task, tasks]
+
+  # --- llama.cpp context features (advanced, local provider only) ---
+  # These passthrough settings control how llama.cpp creates the model context.
+  # Most generation models work with defaults; override only when a model requires it.
+
+  # Context type: 0=default, 1=MTP (multi-token prediction).
+  # Env: NORNICDB_HEIMDALL_CTX_TYPE
+  # ctx_type: 0
+
+  # Pooling strategy: -1=unspecified/none (default for generation), 1=mean, 2=cls, 3=last
+  # Env: NORNICDB_HEIMDALL_POOLING_TYPE
+  # pooling_type: -1
+
+  # Attention type: 0=causal (default for generation), 1=non-causal
+  # Env: NORNICDB_HEIMDALL_ATTENTION_TYPE
+  # attention_type: 0
+
+  # Flash attention: -1=auto (default), 0=disabled, 1=enabled
+  # Env: NORNICDB_HEIMDALL_FLASH_ATTN
+  # flash_attn: -1
 
 # =============================================================================
 # COMPLIANCE SETTINGS

@@ -813,6 +813,15 @@ Heimdall is the cognitive guardian and AI chat assistant. It supports **local** 
 | `NORNICDB_HEIMDALL_API_KEY`  | (empty)     | API key for OpenAI (required when provider=openai)                |
 | `NORNICDB_HEIMDALL_MODEL`    | (varies)    | Model name (GGUF file, Ollama model, or OpenAI model)             |
 
+**Advanced llama.cpp context features** (local provider only, most models work with defaults):
+
+| Variable                            | Default | Description                                          |
+| ----------------------------------- | ------- | ---------------------------------------------------- |
+| `NORNICDB_HEIMDALL_CTX_TYPE`        | `0`     | Context type: 0=default, 1=MTP                       |
+| `NORNICDB_HEIMDALL_POOLING_TYPE`    | `-1`    | Pooling: -1=none, 1=mean, 2=cls, 3=last             |
+| `NORNICDB_HEIMDALL_ATTENTION_TYPE`  | `0`     | Attention: 0=causal, 1=non-causal                    |
+| `NORNICDB_HEIMDALL_FLASH_ATTN`      | `-1`    | Flash attention: -1=auto, 0=disabled, 1=enabled      |
+
 Streaming (SSE) is supported for chat completions when the client requests it; the OpenAI and Ollama providers stream tokens as they are generated.
 
 See [Heimdall AI Assistant](../user-guides/heimdall-ai-assistant.md) for full configuration, provider examples, and YAML. To expose MCP memory tools (store, recall, link, etc.) in the Bifrost agentic loop, set `NORNICDB_HEIMDALL_MCP_ENABLE=true` and optionally `NORNICDB_HEIMDALL_MCP_TOOLS` (comma-separated allowlist); see [Enabling MCP tools in the agentic loop](../user-guides/heimdall-mcp-tools.md).
@@ -828,6 +837,15 @@ Stage-2 reranking improves vector/hybrid search by re-scoring top candidates wit
 | `NORNICDB_SEARCH_RERANK_MODEL`    | (see below) | For **local**: GGUF filename (e.g. `bge-reranker-v2-m3-Q4_K_M.gguf`). For **API**: model name (e.g. `rerank-english-v3.0`) |
 | `NORNICDB_SEARCH_RERANK_API_URL`  | (see below) | Rerank API URL for non-local (default for `ollama`: `http://localhost:11434/rerank`)                                       |
 | `NORNICDB_SEARCH_RERANK_API_KEY`  | (empty)     | API key for Cohere, OpenAI, etc.                                                                                           |
+
+**Advanced llama.cpp context features** (local provider only, most models work with defaults):
+
+| Variable                          | Default | Description                                          |
+| --------------------------------- | ------- | ---------------------------------------------------- |
+| `NORNICDB_RERANK_CTX_TYPE`        | `0`     | Context type: 0=default, 1=MTP                       |
+| `NORNICDB_RERANK_POOLING_TYPE`    | `1`     | Pooling: 1=mean, 2=cls, 3=last, 4=rank              |
+| `NORNICDB_RERANK_ATTENTION_TYPE`  | `1`     | Attention: 0=causal, 1=non-causal                    |
+| `NORNICDB_RERANK_FLASH_ATTN`      | `-1`    | Flash attention: -1=auto, 0=disabled, 1=enabled      |
 
 Local models live in `NORNICDB_MODELS_DIR` (default `./models`). Download the default reranker with `make download-bge-reranker`.
 
@@ -895,6 +913,13 @@ export NORNICDB_EMBEDDING_MODEL=bge-m3
 export NORNICDB_EMBEDDING_DIMENSIONS=1024
 export NORNICDB_EMBEDDING_API_URL=http://localhost:11434
 export NORNICDB_MODELS_DIR=./models                # used by provider=local
+
+# Embedding llama.cpp context features (advanced, local provider only)
+# Most models work with defaults; override only when a model requires it.
+# export NORNICDB_EMBEDDING_CTX_TYPE=0             # 0=default, 1=MTP
+# export NORNICDB_EMBEDDING_POOLING_TYPE=1         # 1=mean, 2=cls, 3=last, 4=rank
+# export NORNICDB_EMBEDDING_ATTENTION_TYPE=1       # 0=causal, 1=non-causal (BERT-style)
+# export NORNICDB_EMBEDDING_FLASH_ATTN=-1          # -1=auto, 0=disabled, 1=enabled
 ```
 
 ## Qdrant gRPC Endpoint (Qdrant SDK Compatibility)

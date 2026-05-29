@@ -61,6 +61,12 @@ NORNICDB_EMBEDDING_PROVIDER=openai             # Uses OpenAI API
 NORNICDB_EMBEDDING_GPU_LAYERS=-1               # -1 = auto (all to GPU if available)
                                                # 0 = CPU only
                                                # N = offload N layers to GPU
+
+# llama.cpp context features (advanced — most models work with defaults)
+NORNICDB_EMBEDDING_CTX_TYPE=0                  # 0 = default, 1 = MTP (multi-token prediction)
+NORNICDB_EMBEDDING_POOLING_TYPE=1              # 1 = mean (default), 2 = cls, 3 = last, 4 = rank
+NORNICDB_EMBEDDING_ATTENTION_TYPE=1            # 0 = causal, 1 = non-causal (BERT-style, default)
+NORNICDB_EMBEDDING_FLASH_ATTN=-1              # -1 = auto (default), 0 = disabled, 1 = enabled
 ```
 
 **Backward Compatibility:** Existing `ollama` and `openai` configurations work exactly as before.

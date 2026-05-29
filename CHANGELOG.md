@@ -5,9 +5,31 @@ All notable changes to NornicDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Latest Changes]
+## [v1.1.3] - 2026-05-29
 
-- See `docs/latest-untagged.md` for any post-1.1.2 untagged work.
+Maintenance release: **llama.cpp upgraded to b9410** with configurable per-model context features, plus several storage and Bolt correctness fixes discovered through expanded test coverage. No on-disk format changes; existing databases upgrade transparently.
+
+### Added
+
+- **Per-model llama.cpp context feature passthrough.** Each model domain (embedding, rerank, Heimdall) now accepts env-driven llama.cpp context parameters so operators can tune models that require non-default settings (e.g. MTP-trained models, CLS pooling, rank pooling):
+  - Embedding: `NORNICDB_EMBEDDING_CTX_TYPE`, `NORNICDB_EMBEDDING_POOLING_TYPE`, `NORNICDB_EMBEDDING_ATTENTION_TYPE`, `NORNICDB_EMBEDDING_FLASH_ATTN`
+  - Rerank: `NORNICDB_RERANK_CTX_TYPE`, `NORNICDB_RERANK_POOLING_TYPE`, `NORNICDB_RERANK_ATTENTION_TYPE`, `NORNICDB_RERANK_FLASH_ATTN`
+  - Heimdall: `NORNICDB_HEIMDALL_CTX_TYPE`, `NORNICDB_HEIMDALL_POOLING_TYPE`, `NORNICDB_HEIMDALL_ATTENTION_TYPE`, `NORNICDB_HEIMDALL_FLASH_ATTN`
+
+### Changed
+
+- **llama.cpp upgraded from b9106 → b9410.** Build scripts and Dockerfiles now disable the new `app/` and `tools/` targets (`-DLLAMA_BUILD_TOOLS=OFF`, `--target llama --target ggml`) to avoid link errors against `llama-server-impl`. Context creation explicitly sets `ctx_type = LLAMA_CONTEXT_TYPE_DEFAULT` to prevent struct-layout mismatches from accidentally enabling MTP on non-MTP models.
+
+### Fixed
+
+- **Cypher:** `$dotted.param` parsing no longer fails; the simple-where cache is correctly skipped for parameterized values.
+- **Storage:** Node label index is rebuilt from bodies on engine open (#183), fixing incorrect `db.labels()` results after unclean shutdown.
+- **Storage:** Label-count metadata is now namespaced per-database, preserving correctness across async write paths and startup re-indexing.
+- **Bolt:** Running queries are cancelled on client disconnect and `RESET`, preventing goroutine/resource leaks.
+
+### Tests
+
+- Expanded unit test coverage across cypher, bolt, storage, search, server, heimdall, fabric, kms, multidb, otel, and grpc packages.
 
 ## [v1.1.2] - 2026-05-26
 
@@ -65,7 +87,6 @@ Headline release: **Bolt over WebSocket** lands end-to-end so browser-based Neo4
 ### Fixed
 
 - **`mcp-neo4j-memory` regressions — three independently reproducible Cypher correctness defects resolved.**
-
   1. **Map-parameter property access stored as literal text.** `WITH $entity AS entity MERGE (e:Memory {name: entity.name})` previously stored the literal string `"{name:'Alice', type:'Person'}.name"` instead of evaluating `entity.name`. The WITH-binding substitution treated `entity.<key>` as a standalone identifier and replaced just `entity`, leaving an orphaned `.name` suffix. Fixed by expanding `<ident>.<key>` into the property's Cypher literal value before the standalone-identifier replacer runs. Token boundary checks (word / underscore / dot) keep unrelated identifiers untouched. The same pattern in `UNWIND [$r] AS r MATCH (a),(b) WHERE a.name = r.source AND b.name = r.target MERGE (a)-[:REL]->(b)` now matches and creates the expected edge.
 
   2. **Aggregating RETURN after CALL…YIELD…WITH…WHERE returned 0 rows.** A bare `RETURN collect(...)` is required by Cypher to produce exactly one row even when the WHERE filters every input. The `MATCH-WITH-RETURN` aggregation path looked up `cr.values["entity.name"]` (a literal string keyed by alias) and silently produced an empty list when `collect(entity.name)` ran over it. New `resolveInnerForRow` evaluates each aggregate's inner expression three ways — bare alias, `alias.property` against a stored `*storage.Node`, or general expression with WITH-bound nodes as context — and applies uniformly to `count`, `sum`, and `collect`. WITH-followed-by-WHERE-followed-by-aggregating-RETURN now produces exactly one row holding the aggregation's identity value (`collect → []`, `count → 0`).
