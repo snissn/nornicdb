@@ -408,6 +408,52 @@ func TestMergeRelationship_Basic(t *testing.T) {
 	assert.Equal(t, int64(1), verifyResult.Rows[0][0])
 }
 
+func TestMergeNode_OnCreateOnMatchNarySetMapMergePreservesCreated(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	query := `MERGE (p:Pds {url: $node.url}) ON CREATE SET p.created = timestamp(), p += $node ON MATCH SET p.updated = timestamp(), p += $node RETURN p`
+	params := map[string]interface{}{
+		"node": map[string]interface{}{
+			"url":    "https://example.test/poc",
+			"status": "created-input",
+		},
+	}
+
+	createdResult, err := exec.Execute(ctx, query, params)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, createdResult.Stats.NodesCreated)
+	require.Len(t, createdResult.Rows, 1)
+
+	verifyCreated, err := exec.Execute(ctx, `MATCH (p:Pds {url: $url}) RETURN p.created, p.updated, p.status`, map[string]interface{}{
+		"url": "https://example.test/poc",
+	})
+	require.NoError(t, err)
+	require.Len(t, verifyCreated.Rows, 1)
+	require.NotNil(t, verifyCreated.Rows[0][0], "ON CREATE branch must set created before map merge")
+	require.Nil(t, verifyCreated.Rows[0][1], "ON MATCH branch must not run for a newly created MERGE node")
+	require.Equal(t, "created-input", verifyCreated.Rows[0][2])
+
+	params["node"] = map[string]interface{}{
+		"url":    "https://example.test/poc",
+		"status": "matched-input",
+	}
+	matchedResult, err := exec.Execute(ctx, query, params)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, matchedResult.Stats.NodesCreated)
+
+	verifyMatched, err := exec.Execute(ctx, `MATCH (p:Pds {url: $url}) RETURN p.created, p.updated, p.status`, map[string]interface{}{
+		"url": "https://example.test/poc",
+	})
+	require.NoError(t, err)
+	require.Len(t, verifyMatched.Rows, 1)
+	require.NotNil(t, verifyMatched.Rows[0][0], "ON MATCH branch must preserve original created property")
+	require.NotNil(t, verifyMatched.Rows[0][1], "ON MATCH branch must set updated")
+	require.Equal(t, "matched-input", verifyMatched.Rows[0][2])
+}
+
 func TestMergeRelationship_Idempotent(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 

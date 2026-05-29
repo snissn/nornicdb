@@ -175,39 +175,65 @@ func (e *StorageExecutor) substituteParams(cypher string, params map[string]inte
 		return cypher
 	}
 
-	// Use pre-compiled regex to find all parameter references
-	// Parameters are: $name or $name123 (alphanumeric starting with letter)
-	result := parameterPattern.ReplaceAllStringFunc(cypher, func(match string) string {
-		// Extract parameter name (without $)
-		paramName := match[1:]
+	var result strings.Builder
+	result.Grow(len(cypher))
 
-		// Look up the value
+	for i := 0; i < len(cypher); {
+		dollarIdx := strings.IndexByte(cypher[i:], '$')
+		if dollarIdx < 0 {
+			result.WriteString(cypher[i:])
+			break
+		}
+		dollarIdx += i
+		result.WriteString(cypher[i:dollarIdx])
+
+		start := dollarIdx + 1
+		if start >= len(cypher) {
+			result.WriteByte('$')
+			break
+		}
+
+		first := cypher[start]
+		if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+			result.WriteByte('$')
+			i = start
+			continue
+		}
+
+		end := start + 1
+		for end < len(cypher) && isWordChar(cypher[end]) {
+			end++
+		}
+
+		match := cypher[dollarIdx:end]
+		paramName := cypher[start:end]
+
+		// Preserve dotted parameter paths like $node.url so downstream parsers can
+		// resolve the full path from the params context as one expression.
+		if end < len(cypher) && cypher[end] == '.' {
+			result.WriteString(match)
+			i = end
+			continue
+		}
+
 		value, exists := params[paramName]
 		if !exists {
-			// Parameter not provided, leave as-is (might be handled elsewhere or is an error)
-			return match
+			result.WriteString(match)
+			i = end
+			continue
 		}
 
-		// Type-preserving short-circuit: list and map values must NOT be
-		// converted to Cypher literal text. Doing so forces the parser to
-		// re-decode them and widens every typed slice / map to
-		// []interface{} / map[string]interface{}, which silently drops
-		// the caller's declared shape.
-		//
-		// SET, MATCH and CALL paths all read $param values from the
-		// context map directly (via resolvePropValue / param lookups),
-		// so leaving the reference intact preserves the strict type
-		// end-to-end — caller writes []string{"A","B"}, the SET-RETURN
-		// row carries []string{"A","B"}, and the storage round-trip via
-		// MATCH-RETURN also produces []string{"A","B"}.
 		if isCompositeParamValue(value) {
-			return match
+			result.WriteString(match)
+			i = end
+			continue
 		}
 
-		return e.valueToLiteral(value)
-	})
+		result.WriteString(e.valueToLiteral(value))
+		i = end
+	}
 
-	return result
+	return result.String()
 }
 
 // resolveDirectParamRef returns the typed parameter value for a literal
@@ -246,6 +272,22 @@ func resolveDirectParamRef(ctx context.Context, expr string) (interface{}, bool)
 		return nil, false
 	}
 	return v, true
+}
+
+// resolveParamPathRef returns the typed parameter value for a literal
+// "$name.path" reference, paired with true. Bare "$name" references are also
+// supported, but callers that only want single identifiers should continue to
+// use resolveDirectParamRef.
+func resolveParamPathRef(ctx context.Context, expr string) (interface{}, bool) {
+	expr = strings.TrimSpace(expr)
+	if !strings.HasPrefix(expr, "$") {
+		return nil, false
+	}
+	params := getParamsFromContext(ctx)
+	if params == nil {
+		return nil, false
+	}
+	return resolveSetMergeSourceFromParams(params, strings.TrimSpace(expr[1:]))
 }
 
 // isCompositeParamValue reports whether a parameter value is a typed list

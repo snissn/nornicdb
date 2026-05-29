@@ -81,6 +81,19 @@ func mergeCreateConflict(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "already exists")
 }
 
+func mergePropsContainUnresolvedParamLiteral(props map[string]interface{}) bool {
+	for _, val := range props {
+		s, ok := val.(string)
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(s), "$") {
+			return true
+		}
+	}
+	return false
+}
+
 func mergeLookupCacheKey(labels []string, prop string, val interface{}) string {
 	return unwindMergeKey(unwindMergeLabelsKey(labels), map[string]interface{}{prop: val})
 }
@@ -522,8 +535,10 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 	// Note: Parameters ($param) should already be substituted by substituteParams()
 	varName, labels, matchProps, err := e.parseMergePattern(ctx, mergePattern)
 
-	// If pattern contains unsubstituted params (like $path), handle gracefully
-	if strings.Contains(mergePattern, "$") {
+	// If pattern properties still contain unresolved param literals (like
+	// $path), handle gracefully. Resolved dotted param paths such as $node.url
+	// must keep their parsed match props.
+	if mergePropsContainUnresolvedParamLiteral(matchProps) {
 		// Extract what we can from the pattern
 		varName = e.extractVarName(mergePattern)
 		labels = e.extractLabels(mergePattern)

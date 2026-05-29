@@ -85,13 +85,20 @@ func (e *StorageExecutor) buildBoundInFastFilter(variable, whereClause string) (
 }
 
 func (e *StorageExecutor) getCompiledSimpleWhere(ctx context.Context, variable, whereClause string) (func(*storage.Node) bool, bool) {
-	key := variable + "\x00" + strings.TrimSpace(whereClause)
+	trimmedClause := strings.TrimSpace(whereClause)
+	// Parameterized predicates are context-bound and must not be cached by raw
+	// clause text alone; otherwise a prior $param value can bleed into later
+	// executions of the same WHERE shape.
+	if strings.Contains(trimmedClause, "$") {
+		return e.compileSimpleWhere(ctx, variable, trimmedClause)
+	}
+	key := variable + "\x00" + trimmedClause
 	if cached, ok := compiledSimpleWhereCache.Load(key); ok {
 		if fn, okFn := cached.(func(*storage.Node) bool); okFn {
 			return fn, true
 		}
 	}
-	fn, ok := e.compileSimpleWhere(ctx, variable, whereClause)
+	fn, ok := e.compileSimpleWhere(ctx, variable, trimmedClause)
 	if ok {
 		compiledSimpleWhereCache.Store(key, fn)
 	}
@@ -557,6 +564,10 @@ func (e *StorageExecutor) evaluateWhereAsBoolean(ctx context.Context, whereClaus
 // parseValue extracts the actual value from a Cypher literal
 func (e *StorageExecutor) parseValue(ctx context.Context, s string) interface{} {
 	s = strings.TrimSpace(s)
+
+	if v, ok := resolveParamPathRef(ctx, s); ok {
+		return normalizePropValue(v)
+	}
 
 	// Handle arrays: [0.1, 0.2, 0.3]
 	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {

@@ -290,7 +290,13 @@ func (e *StorageExecutor) parsePropertyValue(ctx context.Context, valueStr strin
 		return nil
 	}
 
-	// Handle $param references directly so the typed value (e.g. []string,
+	// Handle $param and dotted $param.path references directly so typed values
+	// survive intact during pattern parsing.
+	if v, ok := resolveParamPathRef(ctx, valueStr); ok {
+		return normalizePropValue(v)
+	}
+
+	// Handle bare $param references directly so the typed value (e.g. []string,
 	// []float64) survives intact. Without this, the param-skip in
 	// substituteParams leaves "$name" as literal text here and the
 	// remaining branches would either misparse it or fall through to the

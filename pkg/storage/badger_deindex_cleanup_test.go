@@ -178,3 +178,33 @@ func TestDeindexCleanupJob_RunOnce_CanceledContext(t *testing.T) {
 	_, err := j.RunOnce(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestDeindexCleanupJob_RetryWorkItemBranches(t *testing.T) {
+	eng := newTestEngine(t)
+	job := NewDeindexCleanupJob(eng, time.Hour)
+
+	item := &DeindexWorkItem{
+		WorkItemID:  "deindex:nornic:retry",
+		TargetID:    "nornic:retry",
+		TargetScope: "NODE",
+		Status:      "pending",
+	}
+	job.retryWorkItem(item)
+
+	stored, err := eng.GetDeindexWorkItem("deindex:nornic:retry")
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, 1, stored.RetryCount)
+	require.Equal(t, "pending", stored.Status)
+	require.Greater(t, stored.NextAttemptAt, time.Now().UnixNano())
+
+	item.RetryCount = 20
+	item.Status = "pending"
+	job.retryWorkItem(item)
+	stored, err = eng.GetDeindexWorkItem("deindex:nornic:retry")
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, 21, stored.RetryCount)
+	require.Equal(t, "failed", stored.Status)
+	require.LessOrEqual(t, time.Until(time.Unix(0, stored.NextAttemptAt)), 24*time.Hour)
+}

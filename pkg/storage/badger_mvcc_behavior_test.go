@@ -289,6 +289,44 @@ func TestBadgerEngine_RebuildMVCCHeads_BatchesLargeDataset(t *testing.T) {
 	}
 }
 
+func TestBadgerEngine_RebuildMVCCEdgeHeadsFromVersions(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+	startID := NodeID(prefixTestID("mvcc-edge-rebuild-start"))
+	endID := NodeID(prefixTestID("mvcc-edge-rebuild-end"))
+	_, err := engine.CreateNode(&Node{ID: startID, Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: endID, Labels: []string{"Node"}})
+	require.NoError(t, err)
+
+	edgeID := EdgeID(prefixTestID("mvcc-edge-rebuild"))
+	require.NoError(t, engine.CreateEdge(&Edge{
+		ID:         edgeID,
+		StartNode:  startID,
+		EndNode:    endID,
+		Type:       "REL",
+		Properties: map[string]any{"version": 1},
+	}))
+	require.NoError(t, engine.UpdateEdge(&Edge{
+		ID:         edgeID,
+		StartNode:  startID,
+		EndNode:    endID,
+		Type:       "REL",
+		Properties: map[string]any{"version": 2},
+	}))
+
+	require.NoError(t, engine.clearBadgerPrefix(context.Background(), prefixMVCCEdgeHead))
+	_, err = engine.GetEdgeCurrentHead(edgeID)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	require.NoError(t, engine.RebuildMVCCHeads(context.Background()))
+	head, err := engine.GetEdgeCurrentHead(edgeID)
+	require.NoError(t, err)
+	require.False(t, head.Tombstoned)
+	latest, err := engine.GetEdgeLatestVisible(edgeID)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, latest.Properties["version"])
+}
+
 func TestBadgerTransaction_CreateEdge_AllowsReadableNodesWithoutMVCCHead(t *testing.T) {
 	engine := createMVCCBadgerEngine(t)
 

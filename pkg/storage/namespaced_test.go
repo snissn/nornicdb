@@ -1201,6 +1201,57 @@ func TestNamespacedEngine_CountAndLookupHelpers(t *testing.T) {
 	})
 }
 
+func TestNamespacedEngine_OptionalDelegateFallbackBranches(t *testing.T) {
+	base := NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	inner := &nonStreamingCountEngine{Engine: base}
+	ns := NewNamespacedEngine(inner, "tenant_a")
+
+	logger := ns.namespaceLog()
+	require.NotNil(t, logger)
+	require.Same(t, logger, ns.namespaceLog())
+
+	node, err := ns.GetTemporalNodeAsOf("Doc", "id", "n1", "from", "to", time.Now())
+	require.NoError(t, err)
+	require.Nil(t, node)
+
+	current, err := ns.IsCurrentTemporalNode(&Node{ID: "n1", Labels: []string{"Doc"}}, time.Now())
+	require.NoError(t, err)
+	require.True(t, current)
+
+	_, err = ns.GetNodeVisibleAt("n1", MVCCVersion{})
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = ns.GetEdgeVisibleAt("e1", MVCCVersion{})
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = ns.GetNodesByLabelVisibleAt("Doc", MVCCVersion{})
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = ns.GetEdgesByTypeVisibleAt("REL", MVCCVersion{})
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = ns.GetEdgesBetweenVisibleAt("n1", "n2", MVCCVersion{})
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = ns.GetNodeCurrentHead("n1")
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = ns.GetEdgeCurrentHead("e1")
+	require.ErrorIs(t, err, ErrNotImplemented)
+
+	release := ns.RegisterSnapshotReader(SnapshotReaderInfo{ReaderID: "reader"})
+	require.NotNil(t, release)
+	release()
+	require.Equal(t, map[string]interface{}{"enabled": false}, ns.LifecycleStatus())
+	require.NoError(t, ns.TriggerPruneNow(context.Background()))
+	ns.PauseLifecycle()
+	ns.ResumeLifecycle()
+	require.NoError(t, ns.SetLifecycleSchedule(time.Second))
+	require.Nil(t, ns.TopLifecycleDebtKeys(5))
+
+	latestNode, err := ns.GetNodeLatestVisible("missing")
+	require.ErrorIs(t, err, ErrNotFound)
+	require.Nil(t, latestNode)
+	latestEdge, err := ns.GetEdgeLatestVisible("missing")
+	require.ErrorIs(t, err, ErrNotFound)
+	require.Nil(t, latestEdge)
+}
+
 func TestNamespacedEngine_UserConversionHelpers(t *testing.T) {
 	memory := NewNamespacedEngine(NewMemoryEngine(), "tenant_a")
 	assert.Nil(t, memory.toUserNode(nil))
