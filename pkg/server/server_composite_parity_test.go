@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/multidb"
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
 
@@ -188,6 +190,38 @@ func TestDatabaseInfoCompositeStatsProvenanceDeterministic(t *testing.T) {
 	sorted := append([]string(nil), aliases...)
 	sort.Strings(sorted)
 	require.Equal(t, sorted, aliases, "statsProvenance must be deterministic (alias ascending)")
+}
+
+func TestCompositeConstituentStatsPartialBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	missingReq := httptest.NewRequest(http.MethodGet, "/db/missing_cmp", nil)
+	stats, partial := server.compositeConstituentStats(missingReq, "missing_cmp")
+	require.True(t, partial)
+	require.Nil(t, stats)
+
+	dbManager, err := multidb.NewDatabaseManager(server.db.GetBaseStorageForManager(), &multidb.Config{
+		DefaultDatabase: "nornic",
+		SystemDatabase:  "system",
+		RemoteEngineFactory: func(_ multidb.ConstituentRef, authToken string) (storage.Engine, error) {
+			require.Equal(t, "Bearer remote-token", authToken)
+			return nil, fmt.Errorf("remote stats unavailable")
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, dbManager.CreateCompositeDatabase("cmp_partial_stats", []multidb.ConstituentRef{
+		{Alias: "r", DatabaseName: "remote_db", Type: "remote", AccessMode: "read", URI: "http://remote.example"},
+	}))
+	server.dbManager = dbManager
+
+	req := httptest.NewRequest(http.MethodGet, "/db/cmp_partial_stats", nil)
+	req.Header.Set("Authorization", "Bearer remote-token")
+	stats, partial = server.compositeConstituentStats(req, "cmp_partial_stats")
+	require.True(t, partial)
+	require.Len(t, stats, 1)
+	require.Equal(t, false, stats[0]["reachable"])
+	require.Contains(t, stats[0]["error"], "remote stats unavailable")
+	require.Equal(t, int64(0), stats[0]["nodeCount"])
 }
 
 type txError struct {

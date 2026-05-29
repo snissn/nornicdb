@@ -19,6 +19,9 @@ func TestSearchBuildSettingsPath(t *testing.T) {
 
 	p = searchBuildSettingsPath("", "", "/tmp/a/hnsw")
 	require.Equal(t, filepath.Join("/tmp/a", "build_settings"), p)
+
+	p = searchBuildSettingsPath("", "", "")
+	require.Empty(t, p)
 }
 
 func TestSearchBuildSettingsRoundTrip(t *testing.T) {
@@ -81,6 +84,12 @@ func TestLoadAndSaveSearchBuildSettings_EdgeBranches(t *testing.T) {
 		require.Nil(t, got)
 	})
 
+	t.Run("load missing file returns nil without error", func(t *testing.T) {
+		got, err := loadSearchBuildSettings(filepath.Join(t.TempDir(), "missing_build_settings"))
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
 	t.Run("load with wrong format version returns nil", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "build_settings")
 		require.NoError(t, saveSearchBuildSettings(path, searchBuildSettingsSnapshot{
@@ -98,6 +107,31 @@ func TestLoadAndSaveSearchBuildSettings_EdgeBranches(t *testing.T) {
 		err := saveSearchBuildSettings("", searchBuildSettingsSnapshot{FormatVersion: searchBuildSettingsFormatVersion})
 		require.NoError(t, err)
 	})
+
+	t.Run("save returns parent creation error", func(t *testing.T) {
+		dir := t.TempDir()
+		parentFile := filepath.Join(dir, "not-a-dir")
+		require.NoError(t, os.WriteFile(parentFile, []byte("x"), 0o644))
+
+		err := saveSearchBuildSettings(filepath.Join(parentFile, "build_settings"), searchBuildSettingsSnapshot{FormatVersion: searchBuildSettingsFormatVersion})
+		require.Error(t, err)
+	})
+}
+
+func TestComposeRoutingBuildSettings_ClampsAndDefaults(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+
+	t.Setenv("NORNICDB_KMEANS_MAX_ITERATIONS", "1")
+	t.Setenv("NORNICDB_VECTOR_ROUTING_MODE", "")
+	routing := svc.composeRoutingBuildSettings()
+	require.Contains(t, routing, "mode=hybrid")
+	require.Contains(t, routing, "kmeans_max_iter=5")
+
+	t.Setenv("NORNICDB_KMEANS_MAX_ITERATIONS", "1000")
+	t.Setenv("NORNICDB_VECTOR_ROUTING_MODE", "  lexical  ")
+	routing = svc.composeRoutingBuildSettings()
+	require.Contains(t, routing, "mode=lexical")
+	require.Contains(t, routing, "kmeans_max_iter=500")
 }
 
 func TestBuildSettings_CurrentBM25AndPersistBranches(t *testing.T) {

@@ -1233,13 +1233,27 @@ func TestDBLifecycleHandlers(t *testing.T) {
 	server, authn := setupTestServer(t)
 	token := getAuthToken(t, authn, "admin")
 
-	rec := makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc", nil, "Bearer "+token)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/databases/nornic/mvcc", nil)
+	(&Server{}).handleDbLifecyclePrefix(rec, req, "nornic", "mvcc")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	rec = makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc", nil, "Bearer "+token)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var status map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &status))
 	require.Equal(t, "nornic", status["database"])
 	require.Contains(t, status, "enabled")
 	require.Contains(t, status, "pressure_band")
+
+	rec = makeRequest(t, server, "POST", "/admin/databases/nornic/mvcc/status", nil, "Bearer "+token)
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+	require.NoError(t, server.dbManager.CreateCompositeDatabase("lifecycle_cmp", []multidb.ConstituentRef{
+		{Alias: "n", DatabaseName: server.dbManager.DefaultDatabaseName(), Type: "local", AccessMode: "read_write"},
+	}))
+	rec = makeRequest(t, server, "GET", "/admin/databases/lifecycle_cmp/mvcc", nil, "Bearer "+token)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 
 	rec = makeRequest(t, server, "POST", "/admin/databases/nornic/mvcc/pause", nil, "Bearer "+token)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -1269,6 +1283,11 @@ func TestDBLifecycleHandlers(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &status))
 	require.Equal(t, true, status["automatic"])
 	require.Equal(t, "2m0s", status["cycle_interval"])
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/admin/databases/nornic/mvcc/schedule", strings.NewReader("{"))
+	server.handleDbLifecyclePrefix(rec, req, "nornic", "mvcc/schedule")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 
 	rec = makeRequest(t, server, "POST", "/admin/databases/nornic/mvcc/schedule", map[string]any{"interval": "-1s"}, "Bearer "+token)
 	require.Equal(t, http.StatusBadRequest, rec.Code)

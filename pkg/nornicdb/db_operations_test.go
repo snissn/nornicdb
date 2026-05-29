@@ -491,6 +491,39 @@ func TestDecodeRow_MapWithoutPropertiesAndFieldFallbacks(t *testing.T) {
 	require.Equal(t, 7, out.LegacyCode)
 }
 
+func TestDecodeRow_TagAndColumnEdgeBranches(t *testing.T) {
+	type tagged struct {
+		DisplayName string `json:"display_name,omitempty"`
+		Ignored     string `json:"-"`
+		Count       int
+		private     string
+	}
+
+	var row tagged
+	err := decodeRow(
+		[]string{"n.display_name", "ignored", "count", "extra"},
+		[]interface{}{"Dana", "kept by lowercase field fallback", int64(5)},
+		&row,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "Dana", row.DisplayName)
+	require.Equal(t, "kept by lowercase field fallback", row.Ignored)
+	require.Equal(t, 5, row.Count)
+	require.Empty(t, row.private)
+
+	row = tagged{}
+	err = decodeRow([]string{"n"}, []interface{}{
+		map[string]interface{}{
+			"DISPLAY_NAME": "ignored because lowercase fallback is exact-key only",
+			"display_name": "Eli",
+			"private":      "not settable",
+		},
+	}, &row)
+	require.NoError(t, err)
+	require.Equal(t, "Eli", row.DisplayName)
+	require.Empty(t, row.private)
+}
+
 func TestDB_AdminSmallHelpers(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Database.AsyncWritesEnabled = true

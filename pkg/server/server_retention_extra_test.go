@@ -250,6 +250,13 @@ func TestRetentionDefaultsStatusAndProcessAdditionalBranches(t *testing.T) {
 	server, authenticator := setupRetentionTestServer(t)
 	token := getAuthToken(t, authenticator, "admin")
 
+	disabledServer, _ := setupTestServer(t)
+	disabledRec := httptest.NewRecorder()
+	disabledReq := httptest.NewRequest(http.MethodPost, "/admin/retention/erasures/e/process", nil)
+	disabledReq.SetPathValue("id", "e")
+	disabledServer.handleRetentionProcessErasure(disabledRec, disabledReq)
+	require.Equal(t, http.StatusServiceUnavailable, disabledRec.Code)
+
 	resp := makeRequest(t, server, http.MethodGet, "/admin/retention/policies/defaults", nil, "Bearer "+token)
 	require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
 
