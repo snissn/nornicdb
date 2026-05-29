@@ -93,3 +93,53 @@ func TestExtractNodeNumIDAndMVCCVersionFromVersionKey(t *testing.T) {
 	_, _, err = extractNodeNumIDAndMVCCVersionFromVersionKey(wrong)
 	require.Error(t, err)
 }
+
+func TestExtractEdgeNumIDFromEdgeTypeKey(t *testing.T) {
+	key := edgeTypeIndexKey("KNOWS", 987)
+	num, ok := extractEdgeNumIDFromEdgeTypeKey(key)
+	require.True(t, ok)
+	require.Equal(t, uint64(987), num)
+
+	_, ok = extractEdgeNumIDFromEdgeTypeKey([]byte{prefixEdgeTypeIndex, 'r'})
+	require.False(t, ok)
+}
+
+func TestEncodeNodeV1Body_LargeEmbeddingsAreExternalized(t *testing.T) {
+	node := &Node{
+		ID:              "test:legacy-large",
+		Labels:          []string{"Document"},
+		Properties:      map[string]any{"title": "legacy"},
+		ChunkEmbeddings: makeLargeChunkEmbeddings(),
+	}
+
+	body, storedSeparately, err := encodeNodeV1Body(node)
+	require.NoError(t, err)
+	require.True(t, storedSeparately)
+	require.NotEmpty(t, body)
+
+	decoded, err := decodeNodeV1(body)
+	require.NoError(t, err)
+	require.Equal(t, node.ID, decoded.ID)
+	require.Equal(t, node.Labels, decoded.Labels)
+	require.True(t, decoded.EmbeddingsStoredSeparately)
+	require.Nil(t, decoded.ChunkEmbeddings)
+	require.EqualValues(t, len(node.ChunkEmbeddings), decoded.EmbedMeta["chunk_count"])
+}
+
+func TestEncodeNodeV1Body_PreservesExistingChunkCount(t *testing.T) {
+	node := &Node{
+		ID:              "test:legacy-large-existing-count",
+		Labels:          []string{"Document"},
+		Properties:      map[string]any{"title": "legacy"},
+		ChunkEmbeddings: makeLargeChunkEmbeddings(),
+		EmbedMeta:       map[string]any{"chunk_count": 99},
+	}
+
+	body, storedSeparately, err := encodeNodeV1Body(node)
+	require.NoError(t, err)
+	require.True(t, storedSeparately)
+
+	decoded, err := decodeNodeV1(body)
+	require.NoError(t, err)
+	require.EqualValues(t, 99, decoded.EmbedMeta["chunk_count"])
+}

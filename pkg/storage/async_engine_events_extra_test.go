@@ -265,6 +265,8 @@ func TestAsyncEngine_OptionalDelegates_DefaultFallbacks(t *testing.T) {
 	ae := &AsyncEngine{engine: inner}
 
 	assert.Same(t, inner, ae.GetInnerEngine())
+	var nilAsync *AsyncEngine
+	assert.Nil(t, nilAsync.GetInnerEngine())
 	assert.Nil(t, (&AsyncEngine{}).GetInnerEngine())
 
 	current, err := ae.IsCurrentTemporalNode(&Node{ID: nodeID}, time.Now())
@@ -412,6 +414,12 @@ func TestAsyncEngine_OptionalDelegates_ForwardToWrappedEngine(t *testing.T) {
 	edge, err := ae.GetEdgeVisibleAt("e-2", MVCCVersion{})
 	require.NoError(t, err)
 	assert.Equal(t, EdgeID("visible-edge"), edge.ID)
+	latestNode, err := ae.GetNodeLatestVisible("n-2")
+	require.NoError(t, err)
+	assert.Equal(t, NodeID("visible-node"), latestNode.ID)
+	latestEdge, err := ae.GetEdgeLatestVisible("e-2")
+	require.NoError(t, err)
+	assert.Equal(t, EdgeID("visible-edge"), latestEdge.ID)
 	nodes, err := ae.GetNodesByLabelVisibleAt("Label", MVCCVersion{})
 	require.NoError(t, err)
 	require.Len(t, nodes, 2)

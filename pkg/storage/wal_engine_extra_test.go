@@ -17,6 +17,12 @@ type walStatsLookupEngine struct {
 	lookupErr      error
 }
 
+type walLabelFallbackEngine struct {
+	Engine
+	nodesByLabel []*Node
+	labelErr     error
+}
+
 func (e *walStatsLookupEngine) NodeCountByLabel(string) (int64, error) {
 	return e.labelCount, nil
 }
@@ -35,6 +41,13 @@ func (e *walStatsLookupEngine) ForEachNodeIDByLabel(_ string, visit func(NodeID)
 		}
 	}
 	return nil
+}
+
+func (e *walLabelFallbackEngine) GetNodesByLabel(string) ([]*Node, error) {
+	if e.labelErr != nil {
+		return nil, e.labelErr
+	}
+	return e.nodesByLabel, nil
 }
 
 func TestWALEngine_GetInnerEngine_Delegation(t *testing.T) {
@@ -199,6 +212,45 @@ func TestWALEngine_OptionalDelegateAndErrorBranches(t *testing.T) {
 	lookup.lookupErr = errors.New("lookup failed")
 	err = w.ForEachNodeIDByLabel("Person", func(NodeID) bool { return true })
 	require.ErrorIs(t, err, lookup.lookupErr)
+}
+
+func TestWALEngine_LabelFallbackBranches(t *testing.T) {
+	base := &walLabelFallbackEngine{
+		Engine: NewMemoryEngine(),
+		nodesByLabel: []*Node{
+			{ID: "tenant:a", Labels: []string{"Person"}},
+			{ID: "tenant:b", Labels: []string{"Person"}},
+			{ID: "other:c", Labels: []string{"Person"}},
+		},
+	}
+	t.Cleanup(func() { _ = base.Close() })
+	w := NewWALEngine(base, nil)
+
+	count, err := w.NodeCountByLabel("Person")
+	require.NoError(t, err)
+	require.EqualValues(t, 3, count)
+
+	count, err = w.NodeCountByLabelInNamespace("tenant", "Person")
+	require.NoError(t, err)
+	require.EqualValues(t, 2, count)
+
+	var visited []NodeID
+	err = w.ForEachNodeIDByLabel("Person", func(id NodeID) bool {
+		visited = append(visited, id)
+		return len(visited) < 2
+	})
+	require.NoError(t, err)
+	require.Equal(t, []NodeID{"tenant:a", "tenant:b"}, visited)
+	require.NoError(t, w.ForEachNodeIDByLabel("Person", nil))
+
+	wantErr := errors.New("label lookup failed")
+	base.labelErr = wantErr
+	_, err = w.NodeCountByLabel("Person")
+	require.ErrorIs(t, err, wantErr)
+	_, err = w.NodeCountByLabelInNamespace("tenant", "Person")
+	require.ErrorIs(t, err, wantErr)
+	err = w.ForEachNodeIDByLabel("Person", func(NodeID) bool { return true })
+	require.ErrorIs(t, err, wantErr)
 }
 
 func TestWALEngine_MVCCHeadDelegation(t *testing.T) {

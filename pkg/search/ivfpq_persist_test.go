@@ -102,3 +102,120 @@ func TestIVFPQPersist_ServiceBranches(t *testing.T) {
 	svc.persistIVFPQBackground("", "")
 	svc.persistIVFPQBackground(filepath.Join(t.TempDir(), "vectors"), "")
 }
+
+func tinyIVFPQIndexForTest(profile IVFPQProfile) *IVFPQIndex {
+	idx := &IVFPQIndex{
+		profile:         profile,
+		centroids:       [][]float32{{1, 0}, {0, 1}},
+		centroidNorm:    [][]float32{{1, 0}, {0, 1}},
+		codebooks:       []ivfpqCodebook{{SubDim: 2, Codeword: [][]float32{{0, 0}, {1, 1}}}},
+		lists:           []ivfpqList{{IDs: []string{"doc-1"}, CodeSize: 1, Codes: []byte{1}}},
+		formatVersion:   ivfpqBundleFormatVersion,
+		builtAtUnixNano: 123,
+	}
+	idx.initScratchPool()
+	return idx
+}
+
+func TestIVFPQPersist_LoadErrorBranches(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "hnsw")
+	dir := ivfpqBundleDir(base)
+	require.NoError(t, os.WriteFile(dir, []byte("not-a-dir"), 0o644))
+	idx, err := LoadIVFPQBundle(base)
+	require.Error(t, err)
+	require.Nil(t, idx)
+
+	for _, tc := range []struct {
+		name      string
+		files     map[string]any
+		badFile   string
+		badBytes  []byte
+		wantError string
+	}{
+		{
+			name:      "bad meta",
+			badFile:   "meta",
+			badBytes:  []byte("not-msgpack"),
+			wantError: "msgpack",
+		},
+		{
+			name: "missing centroids",
+			files: map[string]any{
+				"meta":      ivfpqMetaSnapshot{FormatVersion: ivfpqBundleFormatVersion},
+				"codebooks": ivfpqCodebooksSnapshot{},
+				"lists":     ivfpqListsSnapshot{},
+			},
+			wantError: "no such file",
+		},
+		{
+			name: "bad codebooks",
+			files: map[string]any{
+				"meta":      ivfpqMetaSnapshot{FormatVersion: ivfpqBundleFormatVersion},
+				"centroids": [][]float32{},
+				"lists":     ivfpqListsSnapshot{},
+			},
+			badFile:   "codebooks",
+			badBytes:  []byte("not-msgpack"),
+			wantError: "msgpack",
+		},
+		{
+			name: "bad lists",
+			files: map[string]any{
+				"meta":      ivfpqMetaSnapshot{FormatVersion: ivfpqBundleFormatVersion},
+				"centroids": [][]float32{},
+				"codebooks": ivfpqCodebooksSnapshot{},
+			},
+			badFile:   "lists",
+			badBytes:  []byte("not-msgpack"),
+			wantError: "msgpack",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := filepath.Join(t.TempDir(), "hnsw")
+			dir := ivfpqBundleDir(base)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			if len(tc.files) > 0 {
+				require.NoError(t, writeMsgpackSnapshots(dir, tc.files))
+			}
+			if tc.badFile != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, tc.badFile), tc.badBytes, 0o644))
+			}
+			idx, err := LoadIVFPQBundle(base)
+			require.Error(t, err)
+			require.Nil(t, idx)
+			require.Contains(t, err.Error(), tc.wantError)
+		})
+	}
+}
+
+func TestIVFPQPersist_ServiceSuccessAndCacheBranches(t *testing.T) {
+	profile := IVFPQProfile{Dimensions: 2, IVFLists: 2, PQSegments: 1, PQBits: 1, NProbe: 1, RerankTopK: 2}
+	idx := tinyIVFPQIndexForTest(profile)
+
+	base := filepath.Join(t.TempDir(), "hnsw")
+	require.NoError(t, SaveIVFPQBundle(base, idx))
+	loaded, err := LoadIVFPQBundle(base)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Equal(t, 1, loaded.Count())
+	require.True(t, loaded.compatibleProfile(profile))
+
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	svc.ivfpqIndex = idx
+	var nilCtx context.Context
+	cached, err := svc.getOrBuildIVFPQIndex(nilCtx, profile, nil)
+	require.NoError(t, err)
+	require.Same(t, idx, cached)
+
+	svc = NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	svc.hnswIndexPath = base
+	loadedFromDisk, err := svc.getOrBuildIVFPQIndex(context.Background(), profile, nil)
+	require.NoError(t, err)
+	require.NotNil(t, loadedFromDisk)
+	require.Equal(t, 1, loadedFromDisk.Count())
+
+	svc.persistIVFPQBackground("", base)
+	stat, err := os.Stat(ivfpqBundleDir(base))
+	require.NoError(t, err)
+	require.True(t, stat.IsDir())
+}

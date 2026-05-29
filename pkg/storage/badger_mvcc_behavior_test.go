@@ -149,6 +149,47 @@ func TestBadgerEngine_MVCCEdgeLatestSnapshotAndRecreate(t *testing.T) {
 	require.EqualValues(t, 4, latest.Properties["weight"])
 }
 
+func TestBadgerEngine_MVCCLatestVisibleFallsBackToVersionRecords(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+	nodeID := NodeID(prefixTestID("mvcc-version-only-node"))
+	nodeVersion := MVCCVersion{CommitTimestamp: time.Now().UTC(), CommitSequence: 11}
+	require.NoError(t, engine.AppendNodeVersion(&Node{
+		ID:         nodeID,
+		Labels:     []string{"Doc"},
+		Properties: map[string]any{"source": "version-record"},
+	}, nodeVersion))
+
+	latestNode, err := engine.GetNodeLatestVisible(nodeID)
+	require.NoError(t, err)
+	require.Equal(t, nodeID, latestNode.ID)
+	require.Equal(t, "version-record", latestNode.Properties["source"])
+
+	tombstonedNodeID := NodeID(prefixTestID("mvcc-version-only-tombstone"))
+	require.NoError(t, engine.AppendNodeTombstone(tombstonedNodeID, MVCCVersion{CommitTimestamp: nodeVersion.CommitTimestamp.Add(time.Second), CommitSequence: 12}))
+	_, err = engine.GetNodeLatestVisible(tombstonedNodeID)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	edgeID := EdgeID(prefixTestID("mvcc-version-only-edge"))
+	edgeVersion := MVCCVersion{CommitTimestamp: nodeVersion.CommitTimestamp.Add(2 * time.Second), CommitSequence: 13}
+	require.NoError(t, engine.AppendEdgeVersion(&Edge{
+		ID:         edgeID,
+		StartNode:  nodeID,
+		EndNode:    nodeID,
+		Type:       "LINKS",
+		Properties: map[string]any{"source": "edge-version-record"},
+	}, edgeVersion))
+
+	latestEdge, err := engine.GetEdgeLatestVisible(edgeID)
+	require.NoError(t, err)
+	require.Equal(t, edgeID, latestEdge.ID)
+	require.Equal(t, "edge-version-record", latestEdge.Properties["source"])
+
+	tombstonedEdgeID := EdgeID(prefixTestID("mvcc-version-only-edge-tombstone"))
+	require.NoError(t, engine.AppendEdgeTombstone(tombstonedEdgeID, MVCCVersion{CommitTimestamp: edgeVersion.CommitTimestamp.Add(time.Second), CommitSequence: 14}))
+	_, err = engine.GetEdgeLatestVisible(tombstonedEdgeID)
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
 func TestAsyncEngine_GetNodeLatestEffectiveUsesPendingState(t *testing.T) {
 	base := createMVCCBadgerEngine(t)
 	async := NewAsyncEngine(base, &AsyncEngineConfig{FlushInterval: time.Hour})

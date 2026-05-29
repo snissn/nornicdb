@@ -2074,6 +2074,54 @@ func TestRestore(t *testing.T) {
 		require.NoError(t, db.Restore(ctx, p))
 		require.Equal(t, 1, maint.mvccRebuildCalls)
 	})
+
+	t.Run("returns temporal rebuild error after restore", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		maint := &temporalMaintenanceTestEngine{Engine: baseEngine, rebuildErr: errors.New("temporal rebuild failed")}
+		db := &DB{
+			storage:        storage.NewNamespacedEngine(maint, "nornic"),
+			baseStorage:    maint,
+			config:         DefaultConfig(),
+			searchServices: make(map[string]*dbSearchService),
+		}
+
+		p := filepath.Join(t.TempDir(), "backup-temporal-rebuild-fail.json")
+		require.NoError(t, os.WriteFile(p, []byte(`{
+			"version":"1.0",
+			"created_at":"2026-03-10T00:00:00Z",
+			"nodes":[{"id":"n1","labels":["Person"],"properties":{"name":"Alice"}}],
+			"edges":[]
+		}`), 0644))
+
+		err := db.Restore(ctx, p)
+		require.ErrorContains(t, err, "failed to rebuild temporal indexes after restore")
+		require.Equal(t, 1, maint.rebuildCalls)
+	})
+
+	t.Run("returns mvcc rebuild error after restore", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		maint := &temporalMaintenanceTestEngine{Engine: baseEngine, mvccRebuildErr: errors.New("mvcc rebuild failed")}
+		db := &DB{
+			storage:        storage.NewNamespacedEngine(maint, "nornic"),
+			baseStorage:    maint,
+			config:         DefaultConfig(),
+			searchServices: make(map[string]*dbSearchService),
+		}
+
+		p := filepath.Join(t.TempDir(), "backup-mvcc-rebuild-fail.json")
+		require.NoError(t, os.WriteFile(p, []byte(`{
+			"version":"1.0",
+			"created_at":"2026-03-10T00:00:00Z",
+			"nodes":[{"id":"n1","labels":["Person"],"properties":{"name":"Alice"}}],
+			"edges":[]
+		}`), 0644))
+
+		err := db.Restore(ctx, p)
+		require.ErrorContains(t, err, "failed to rebuild mvcc heads after restore")
+		require.Equal(t, 1, maint.mvccRebuildCalls)
+	})
 }
 
 func TestDB_TemporalMaintenance(t *testing.T) {

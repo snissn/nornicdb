@@ -130,6 +130,42 @@ func TestResolveProviderManagedDBKey_MetadataErrorBranches(t *testing.T) {
 		_, err = resolveProviderManagedDBKey(dir, cfg, "local")
 		require.ErrorContains(t, err, "failed to decode persisted DEK ciphertext")
 	})
+
+	t.Run("audit signing config error", func(t *testing.T) {
+		badCfg := nornicConfig.LoadDefaults()
+		badCfg.Database.EncryptionAuditSignEvents = true
+		_, err := resolveProviderManagedDBKey(t.TempDir(), badCfg, "local")
+		require.ErrorContains(t, err, "audit signing key is required")
+	})
+
+	t.Run("unsupported provider", func(t *testing.T) {
+		_, err := resolveProviderManagedDBKey(t.TempDir(), cfg, "unknown-kms")
+		require.ErrorContains(t, err, "failed to initialize encryption provider")
+	})
+
+	t.Run("decrypt failure for persisted wrapped key", func(t *testing.T) {
+		dir := t.TempDir()
+		metadata := persistedProviderDEK{
+			Provider:      "local",
+			KeyURI:        "kms://local/nornicdb-test",
+			CiphertextB64: base64.StdEncoding.EncodeToString([]byte("not-a-wrapped-key")),
+		}
+		raw, err := json.Marshal(metadata)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "db.kms_dek.json"), raw, 0600))
+		_, err = resolveProviderManagedDBKey(dir, cfg, "local")
+		require.ErrorContains(t, err, "failed to unwrap persisted DEK")
+	})
+
+	t.Run("data directory is a file", func(t *testing.T) {
+		dir := t.TempDir()
+		dataPath := filepath.Join(dir, "data-file")
+		require.NoError(t, os.WriteFile(dataPath, []byte("x"), 0600))
+		fileCfg := *cfg
+		fileCfg.Database.EncryptionAuditLogPath = filepath.Join(dir, "audit.jsonl")
+		_, err := resolveProviderManagedDBKey(dataPath, &fileCfg, "local")
+		require.ErrorContains(t, err, "failed to create data directory")
+	})
 }
 
 func TestPersistProviderDEK_WriteErrorBranch(t *testing.T) {

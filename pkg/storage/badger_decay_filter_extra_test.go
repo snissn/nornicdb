@@ -33,6 +33,24 @@ func TestBadgerEngine_SetAccessAccumulator(t *testing.T) {
 	require.Nil(t, e.accumulator)
 }
 
+func TestBadgerEngine_RecordMaterializedAccess(t *testing.T) {
+	var nilEngine *BadgerEngine
+	nilEngine.RecordMaterializedAccess("n1")
+
+	e := NewMemoryEngine()
+	t.Cleanup(func() { _ = e.Close() })
+	e.RecordMaterializedAccess("n1")
+
+	stub := &stubAccessAccumulator{}
+	e.SetAccessAccumulator(stub)
+	e.RecordMaterializedAccess("")
+	require.EqualValues(t, 0, stub.count.Load())
+
+	e.RecordMaterializedAccess("n1")
+	require.EqualValues(t, 1, stub.count.Load())
+	require.Equal(t, "n1", stub.last)
+}
+
 func TestBadgerEngine_BeginQueryRevealScope_RevealAndNonReveal(t *testing.T) {
 	e := NewMemoryEngine()
 	t.Cleanup(func() { _ = e.Close() })

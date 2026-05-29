@@ -69,4 +69,15 @@ func TestWriteMsgpackSnapshotsAndAtomic_ErrorPaths(t *testing.T) {
 		_, statErr := os.Stat(target)
 		require.True(t, os.IsNotExist(statErr))
 	})
+
+	t.Run("atomic write fails when parent is a file", func(t *testing.T) {
+		dir := t.TempDir()
+		parentFile := filepath.Join(dir, "not-a-dir")
+		require.NoError(t, os.WriteFile(parentFile, []byte("x"), 0o644))
+
+		err := writeMsgpackSnapshotsAtomic(filepath.Join(parentFile, "bundle"), map[string]any{
+			"state.msgpack": map[string]any{"v": 1},
+		})
+		require.Error(t, err)
+	})
 }

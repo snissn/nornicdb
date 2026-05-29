@@ -792,3 +792,149 @@ func TestConstraintContractNamespaceForEdge_NoPrefixes(t *testing.T) {
 		t.Fatal("expected false when no database prefix found")
 	}
 }
+
+func TestBadgerTransactionEvaluateConstraintContractExpressions(t *testing.T) {
+	tx := &BadgerTransaction{
+		pendingNodes: map[NodeID]*Node{
+			"tenant::start": {ID: "tenant::start", Properties: map[string]interface{}{"region": "west"}},
+			"tenant::end":   {ID: "tenant::end", Properties: map[string]interface{}{"region": "west"}},
+		},
+		deletedNodes: map[NodeID]struct{}{},
+	}
+
+	node := &Node{ID: "tenant::n1", Properties: map[string]interface{}{"status": "active"}}
+	ok, err := tx.evaluateNodeConstraintContractExpressionLocked(node, "n.status IN ['active', 'pending']")
+	if err != nil || !ok {
+		t.Fatalf("expected node IN expression to pass, ok=%v err=%v", ok, err)
+	}
+
+	ok, err = tx.evaluateNodeConstraintContractExpressionLocked(node, "n.status IN ['disabled']")
+	if err != nil || ok {
+		t.Fatalf("expected node IN expression to fail without error, ok=%v err=%v", ok, err)
+	}
+
+	_, err = tx.evaluateNodeConstraintContractExpressionLocked(node, "n.status = 'active'")
+	if err == nil {
+		t.Fatal("expected unsupported node predicate error")
+	}
+
+	edge := &Edge{ID: "tenant::e1", StartNode: "tenant::start", EndNode: "tenant::end", Properties: map[string]interface{}{"status": "open", "weight": 7}}
+	ok, err = tx.evaluateRelationshipConstraintContractExpressionLocked(edge, "r.status IN ['open', 'closed']")
+	if err != nil || !ok {
+		t.Fatalf("expected relationship IN expression to pass, ok=%v err=%v", ok, err)
+	}
+	ok, err = tx.evaluateRelationshipConstraintContractExpressionLocked(edge, "startNode(r).region = endNode(r).region")
+	if err != nil || !ok {
+		t.Fatalf("expected endpoint equality expression to pass, ok=%v err=%v", ok, err)
+	}
+	ok, err = tx.evaluateRelationshipConstraintContractExpressionLocked(edge, "r.weight >= 7")
+	if err != nil || !ok {
+		t.Fatalf("expected relationship comparison expression to pass, ok=%v err=%v", ok, err)
+	}
+	ok, err = tx.evaluateRelationshipConstraintContractExpressionLocked(edge, "startNode(r) <> endNode(r)")
+	if err != nil || !ok {
+		t.Fatalf("expected distinct endpoint expression to pass, ok=%v err=%v", ok, err)
+	}
+
+	loop := &Edge{ID: "tenant::loop", StartNode: "tenant::start", EndNode: "tenant::start"}
+	ok, err = tx.evaluateRelationshipConstraintContractExpressionLocked(loop, "startNode(r) <> endNode(r)")
+	if err != nil || ok {
+		t.Fatalf("expected distinct endpoint expression to fail without error, ok=%v err=%v", ok, err)
+	}
+
+	tx.deletedNodes["tenant::end"] = struct{}{}
+	_, err = tx.evaluateRelationshipConstraintContractExpressionLocked(edge, "startNode(r).region = endNode(r).region")
+	if err == nil {
+		t.Fatal("expected missing endpoint error")
+	}
+}
+
+func TestBadgerTransactionCurrentStateHelpers(t *testing.T) {
+	engine, err := NewBadgerEngineInMemory()
+	if err != nil {
+		t.Fatalf("NewBadgerEngineInMemory: %v", err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+
+	if _, err := engine.CreateNode(&Node{ID: "tenant::n1"}); err != nil {
+		t.Fatalf("create n1: %v", err)
+	}
+	if _, err := engine.CreateNode(&Node{ID: "tenant::n2"}); err != nil {
+		t.Fatalf("create n2: %v", err)
+	}
+	if _, err := engine.CreateNode(&Node{ID: "tenant::n3"}); err != nil {
+		t.Fatalf("create n3: %v", err)
+	}
+	if err := engine.CreateEdge(&Edge{ID: "tenant::out", StartNode: "tenant::n1", EndNode: "tenant::n2", Type: "REL"}); err != nil {
+		t.Fatalf("create out edge: %v", err)
+	}
+	if err := engine.CreateEdge(&Edge{ID: "tenant::in", StartNode: "tenant::n2", EndNode: "tenant::n1", Type: "REL"}); err != nil {
+		t.Fatalf("create in edge: %v", err)
+	}
+
+	tx := &BadgerTransaction{
+		engine: engine,
+		pendingNodes: map[NodeID]*Node{
+			"tenant::pending": {ID: "tenant::pending", Properties: map[string]interface{}{"v": 1}},
+		},
+		pendingEdges: map[EdgeID]*Edge{
+			"tenant::out":         {ID: "tenant::out", StartNode: "tenant::n3", EndNode: "tenant::n1", Type: "REL"},
+			"tenant::pending-out": {ID: "tenant::pending-out", StartNode: "tenant::n1", EndNode: "tenant::n3", Type: "REL"},
+			"tenant::pending-in":  {ID: "tenant::pending-in", StartNode: "tenant::n3", EndNode: "tenant::n1", Type: "REL"},
+		},
+		deletedNodes: map[NodeID]struct{}{"tenant::deleted": {}},
+		deletedEdges: map[EdgeID]struct{}{"tenant::in": {}},
+	}
+
+	node, err := tx.currentNodeLocked("tenant::pending")
+	if err != nil || node == nil || node.ID != "tenant::pending" {
+		t.Fatalf("expected pending node, node=%v err=%v", node, err)
+	}
+	node, err = tx.currentNodeLocked("tenant::deleted")
+	if err != nil || node != nil {
+		t.Fatalf("expected deleted node to be hidden, node=%v err=%v", node, err)
+	}
+
+	edge, err := tx.currentEdgeLocked("tenant::pending-out")
+	if err != nil || edge == nil || edge.ID != "tenant::pending-out" {
+		t.Fatalf("expected pending edge, edge=%v err=%v", edge, err)
+	}
+	tx.deletedEdges["tenant::deleted-edge"] = struct{}{}
+	edge, err = tx.currentEdgeLocked("tenant::deleted-edge")
+	if err != nil || edge != nil {
+		t.Fatalf("expected deleted edge to be hidden, edge=%v err=%v", edge, err)
+	}
+
+	outgoing, err := tx.currentOutgoingEdgesLocked("tenant::n1")
+	if err != nil {
+		t.Fatalf("currentOutgoingEdgesLocked: %v", err)
+	}
+	if !edgeListContains(outgoing, "tenant::pending-out") || edgeListContains(outgoing, "tenant::out") {
+		t.Fatalf("unexpected outgoing edges: %+v", outgoing)
+	}
+
+	incoming, err := tx.currentIncomingEdgesLocked("tenant::n1")
+	if err != nil {
+		t.Fatalf("currentIncomingEdgesLocked: %v", err)
+	}
+	if !edgeListContains(incoming, "tenant::pending-in") || !edgeListContains(incoming, "tenant::out") || edgeListContains(incoming, "tenant::in") {
+		t.Fatalf("unexpected incoming edges: %+v", incoming)
+	}
+
+	adjacent, err := tx.currentAdjacentEdgesLocked("tenant::n1")
+	if err != nil {
+		t.Fatalf("currentAdjacentEdgesLocked: %v", err)
+	}
+	if !edgeListContains(adjacent, "tenant::pending-out") || !edgeListContains(adjacent, "tenant::pending-in") {
+		t.Fatalf("unexpected adjacent edges: %+v", adjacent)
+	}
+}
+
+func edgeListContains(edges []*Edge, id EdgeID) bool {
+	for _, edge := range edges {
+		if edge != nil && edge.ID == id {
+			return true
+		}
+	}
+	return false
+}

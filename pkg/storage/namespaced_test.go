@@ -32,6 +32,14 @@ type namespacedPrefixStatsEngine struct {
 	edgeErr   error
 }
 
+type namespacedLabelStatsEngine struct {
+	Engine
+	count     int64
+	err       error
+	namespace string
+	label     string
+}
+
 type namespacedStreamingOnlyEngine struct {
 	Engine
 	streamNodeErr error
@@ -188,6 +196,15 @@ func (e *namespacedPrefixStatsEngine) EdgeCountByPrefix(prefix string) (int64, e
 		return 0, e.edgeErr
 	}
 	return e.edgeCount, nil
+}
+
+func (e *namespacedLabelStatsEngine) NodeCountByLabelInNamespace(namespace, label string) (int64, error) {
+	e.namespace = namespace
+	e.label = label
+	if e.err != nil {
+		return 0, e.err
+	}
+	return e.count, nil
 }
 
 func (e *namespacedStreamingOnlyEngine) StreamNodes(ctx context.Context, fn func(node *Node) error) error {
@@ -897,6 +914,60 @@ func TestNamespacedEngine_DirectStreamingAndEmbeddingHelpers(t *testing.T) {
 		errBoom = errors.New("fallback chunk callback failed")
 		err = tenantA.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error { return errBoom })
 		require.ErrorIs(t, err, errBoom)
+	})
+
+	t.Run("node count by label covers stats streaming and all-nodes fallbacks", func(t *testing.T) {
+		statsInner := &namespacedLabelStatsEngine{Engine: NewMemoryEngine(), count: 9}
+		t.Cleanup(func() { _ = statsInner.Close() })
+		statsTenant := NewNamespacedEngine(statsInner, "tenant_a")
+		count, err := statsTenant.NodeCountByLabel("Person")
+		require.NoError(t, err)
+		assert.EqualValues(t, 9, count)
+		assert.Equal(t, "tenant_a", statsInner.namespace)
+		assert.Equal(t, "Person", statsInner.label)
+
+		wantStatsErr := errors.New("stats count failed")
+		statsInner.err = wantStatsErr
+		_, err = statsTenant.NodeCountByLabel("Person")
+		require.ErrorIs(t, err, wantStatsErr)
+
+		streamBase := NewMemoryEngine()
+		t.Cleanup(func() { _ = streamBase.Close() })
+		streamInner := &namespacedStreamingOnlyEngine{Engine: streamBase}
+		streamTenantA := NewNamespacedEngine(streamInner, "tenant_a")
+		streamTenantB := NewNamespacedEngine(streamInner, "tenant_b")
+		_, err = streamTenantA.CreateNode(&Node{ID: "one", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = streamTenantA.CreateNode(&Node{ID: "two", Labels: []string{"person"}})
+		require.NoError(t, err)
+		_, err = streamTenantB.CreateNode(&Node{ID: "three", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		count, err = streamTenantA.NodeCountByLabel("PERSON")
+		require.NoError(t, err)
+		assert.EqualValues(t, 2, count)
+
+		wantStreamErr := errors.New("stream count failed")
+		streamInner.streamNodeErr = wantStreamErr
+		_, err = streamTenantA.NodeCountByLabel("Person")
+		require.ErrorIs(t, err, wantStreamErr)
+
+		allNodesBase := NewMemoryEngine()
+		t.Cleanup(func() { _ = allNodesBase.Close() })
+		allNodesInner := &nonStreamingCountEngine{Engine: allNodesBase}
+		allNodesTenantA := NewNamespacedEngine(allNodesInner, "tenant_a")
+		allNodesTenantB := NewNamespacedEngine(allNodesInner, "tenant_b")
+		_, err = allNodesTenantA.CreateNode(&Node{ID: "one", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = allNodesTenantB.CreateNode(&Node{ID: "two", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		count, err = allNodesTenantA.NodeCountByLabel("person")
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, count)
+
+		wantAllNodesErr := errors.New("all nodes failed")
+		allNodesInner.allNodesErr = wantAllNodesErr
+		_, err = allNodesTenantA.NodeCountByLabel("Person")
+		require.ErrorIs(t, err, wantAllNodesErr)
 	})
 
 	t.Run("find node needing embedding falls back to namespace scan after many foreign nodes", func(t *testing.T) {
