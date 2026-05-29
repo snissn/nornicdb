@@ -368,7 +368,8 @@ func TestSearchWarmupVectorPipelineBranches(t *testing.T) {
 	svc := NewServiceWithDimensions(engine, 3)
 
 	// No embeddings: warmup is a no-op.
-	svc.warmupVectorPipeline(nil)
+	var nilCtx context.Context
+	svc.warmupVectorPipeline(nilCtx)
 	svc.pipelineMu.RLock()
 	require.Nil(t, svc.vectorPipeline)
 	svc.pipelineMu.RUnlock()
@@ -1995,6 +1996,58 @@ func TestVectorQueryNodes_IndexedAndExactPaths(t *testing.T) {
 	assert.Empty(t, hits)
 }
 
+func TestVectorQueryNodes_ExactPathDefaultsAndNamedBranches(t *testing.T) {
+	emptyEngine := storage.NewMemoryEngine()
+	t.Cleanup(func() { emptyEngine.Close() })
+	emptySvc := NewServiceWithDimensions(emptyEngine, 3)
+	var nilCtx context.Context
+	hits, err := emptySvc.VectorQueryNodes(nilCtx, []float32{1, 0, 0}, VectorQuerySpec{Similarity: "dot"})
+	require.NoError(t, err)
+	assert.Empty(t, hits)
+
+	engine := storage.NewMemoryEngine()
+	t.Cleanup(func() { engine.Close() })
+	svc := NewServiceWithDimensions(engine, 3)
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:              "named_exact",
+		Labels:          []string{"Doc"},
+		NamedEmbeddings: map[string][]float32{"myvec": {1, 0, 0}, "other": {0, 1, 0}},
+	}))
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:              "managed_default",
+		Labels:          []string{"Doc"},
+		NamedEmbeddings: map[string][]float32{"managed": {0.9, 0.1, 0}},
+	}))
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:              "wrong_label",
+		Labels:          []string{"Other"},
+		NamedEmbeddings: map[string][]float32{"myvec": {1, 0, 0}},
+	}))
+
+	hits, err = svc.VectorQueryNodes(context.Background(), []float32{1, 0, 0}, VectorQuerySpec{
+		Label:      "Doc",
+		Property:   "myvec",
+		Similarity: "dot",
+		Limit:      1,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.Equal(t, "named_exact", hits[0].ID)
+
+	hits, err = svc.VectorQueryNodes(context.Background(), []float32{1, 0, 0}, VectorQuerySpec{
+		Label:      "Doc",
+		Similarity: "dot",
+		Limit:      5,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits)
+	assert.Equal(t, "named_exact", hits[0].ID)
+
+	hits, err = svc.vectorQueryNodesExact(context.Background(), []float32{1, 0}, VectorQuerySpec{Limit: 5}, "default", "dot")
+	require.NoError(t, err)
+	assert.Empty(t, hits)
+}
+
 func TestVectorQueryHelpers_ConversionsAndResolution(t *testing.T) {
 	assert.Equal(t, []float32{1, 2}, toFloat32SliceAny([]float32{1, 2}))
 	assert.Equal(t, []float32{1, 2}, toFloat32SliceAny([]float64{1, 2}))
@@ -2022,6 +2075,7 @@ func TestVectorQueryHelpers_ConversionsAndResolution(t *testing.T) {
 	require.Len(t, embs, 1)
 	assert.Equal(t, []float32{0, 1, 0}, embs[0])
 	assert.Nil(t, resolveCypherCandidateEmbeddings(nil, "vec", "x"))
+	assert.Nil(t, resolveCypherCandidateEmbeddings(&storage.Node{ID: "empty"}, "vec", "x"))
 
 	// Missing property key (no Cypher vector index/property binding): fall through
 	// to all managed named embeddings.

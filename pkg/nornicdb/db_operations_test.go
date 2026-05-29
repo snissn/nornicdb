@@ -63,6 +63,33 @@ func TestDB_GetIndexes(t *testing.T) {
 		assert.Equal(t, "User", indexes[0].Label)
 		assert.Equal(t, "email", indexes[0].Property)
 	})
+
+	t.Run("handles properties arrays nil schema and closed db", func(t *testing.T) {
+		db, err := Open("", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		require.NoError(t, db.CreateIndex(context.Background(), "Article", "body", "fulltext"))
+		indexes, err := db.GetIndexes(context.Background())
+		require.NoError(t, err)
+		require.Len(t, indexes, 1)
+		require.Equal(t, "body", indexes[0].Property)
+		require.Equal(t, "fulltext", indexes[0].Type)
+
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		nilSchema := &nilSchemaEngine{Engine: baseEngine}
+		minimal := &DB{storage: nilSchema, baseStorage: nilSchema, config: DefaultConfig()}
+		indexes, err = minimal.GetIndexes(context.Background())
+		require.NoError(t, err)
+		require.Empty(t, indexes)
+		require.ErrorContains(t, minimal.CreateIndex(context.Background(), "A", "b", "property"), "schema manager not initialized")
+
+		minimal.closed = true
+		_, err = minimal.GetIndexes(context.Background())
+		require.ErrorIs(t, err, ErrClosed)
+		require.ErrorIs(t, minimal.CreateIndex(context.Background(), "A", "b", "property"), ErrClosed)
+	})
 }
 
 func TestDB_CreateIndex(t *testing.T) {

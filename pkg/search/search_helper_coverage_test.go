@@ -84,6 +84,25 @@ func TestPropertyVectorHelpers(t *testing.T) {
 
 	svc.RemovePropertyVectorIndex("")
 	require.Equal(t, 1, svc.CountPropertyVectorEntries("body"))
+
+	(*Service)(nil).RemovePropertyVectorIndex("body")
+
+	liveSvc := NewServiceWithDimensions(engine, 4)
+	liveSvc.resultCache.Put("cached", &SearchResponse{Query: "cached"})
+	liveSvc.nodePropVector = map[string]map[string]string{
+		"node-1": {"body": "node-1-prop-body"},
+		"node-2": {"title": "node-2-prop-title"},
+	}
+	require.NoError(t, liveSvc.vectorIndex.Add("node-1-prop-body", []float32{0, 1, 0, 0}))
+	require.NoError(t, liveSvc.vectorIndex.Add("node-2-prop-title", []float32{0, 0, 1, 0}))
+
+	liveSvc.RemovePropertyVectorIndex("body")
+	require.Nil(t, liveSvc.resultCache.Get("cached"))
+	require.Equal(t, 0, liveSvc.CountPropertyVectorEntries("body"))
+	require.Equal(t, 1, liveSvc.CountPropertyVectorEntries("title"))
+	if liveSvc.persistTimer != nil {
+		liveSvc.persistTimer.Stop()
+	}
 }
 
 func TestScoreVectorIDDotBranches(t *testing.T) {

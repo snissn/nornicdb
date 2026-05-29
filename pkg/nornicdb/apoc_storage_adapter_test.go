@@ -469,6 +469,59 @@ func TestAPOCStorageAdapter_GraphTraversalAndPaths(t *testing.T) {
 	require.ErrorIs(t, err, apocstorage.ErrPathNotFound)
 }
 
+func TestAPOCStorageAdapter_TraversalMissingNodeBranches(t *testing.T) {
+	engine := newAPOCAdapterTestEngine()
+	adapter := NewAPOCStorageAdapter(engine)
+	engine.nodes["1"] = &storage.Node{ID: "1", Labels: []string{"Node"}}
+	engine.nodes["3"] = &storage.Node{ID: "3", Labels: []string{"Node"}}
+	engine.edges["10"] = &storage.Edge{ID: "10", StartNode: "1", EndNode: "2", Type: "LINK"}
+	engine.edges["11"] = &storage.Edge{ID: "11", StartNode: "1", EndNode: "3", Type: "LINK"}
+
+	_, err := adapter.FindShortestPath(99, 99, "", 1)
+	require.ErrorIs(t, err, apocstorage.ErrNodeNotFound)
+	_, err = adapter.FindShortestPath(99, 3, "", 1)
+	require.ErrorIs(t, err, apocstorage.ErrNodeNotFound)
+
+	path, err := adapter.FindShortestPath(1, 3, "LINK", 2)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), path.Nodes[len(path.Nodes)-1].ID)
+	_, err = adapter.FindShortestPath(1, 3, "LINK", 0)
+	require.ErrorIs(t, err, apocstorage.ErrPathNotFound)
+
+	_, err = adapter.FindAllPaths(99, 3, "", 1)
+	require.ErrorIs(t, err, apocstorage.ErrNodeNotFound)
+	paths, err := adapter.FindAllPaths(1, 3, "LINK", 2)
+	require.NoError(t, err)
+	require.Len(t, paths, 1)
+	paths, err = adapter.FindAllPaths(1, 3, "LINK", 0)
+	require.NoError(t, err)
+	require.Empty(t, paths)
+
+	var bfsVisited []int64
+	require.NoError(t, adapter.BFS(99, "", 2, func(node *apocstorage.Node) bool {
+		bfsVisited = append(bfsVisited, node.ID)
+		return true
+	}))
+	require.Empty(t, bfsVisited)
+	require.NoError(t, adapter.BFS(1, "", 0, func(node *apocstorage.Node) bool {
+		bfsVisited = append(bfsVisited, node.ID)
+		return true
+	}))
+	require.Equal(t, []int64{1}, bfsVisited)
+
+	var dfsVisited []int64
+	require.NoError(t, adapter.DFS(99, "", 2, func(node *apocstorage.Node) bool {
+		dfsVisited = append(dfsVisited, node.ID)
+		return true
+	}))
+	require.Empty(t, dfsVisited)
+	require.NoError(t, adapter.DFS(1, "", 0, func(node *apocstorage.Node) bool {
+		dfsVisited = append(dfsVisited, node.ID)
+		return true
+	}))
+	require.Equal(t, []int64{1}, dfsVisited)
+}
+
 func TestAPOCStorageAdapter_ErrorMappings(t *testing.T) {
 	engine := newAPOCAdapterTestEngine()
 	adapter := NewAPOCStorageAdapter(engine)

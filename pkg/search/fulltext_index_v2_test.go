@@ -132,6 +132,54 @@ func TestFulltextIndexV2_LoadDecodeFailureClears(t *testing.T) {
 	require.Equal(t, 0, idx.Count())
 }
 
+func TestFulltextIndexV2_PersistenceErrorAndMigrationBranches(t *testing.T) {
+	idx := NewFulltextIndexV2()
+	require.NoError(t, idx.Load(filepath.Join(t.TempDir(), "missing")))
+
+	badParent := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(badParent, []byte("x"), 0644))
+	require.Error(t, idx.Load(filepath.Join(badParent, "child")))
+	require.Error(t, idx.Save(filepath.Join(badParent, "child")))
+
+	legacyPath := filepath.Join(t.TempDir(), "legacy_bad_version")
+	file, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, msgpack.NewEncoder(file).Encode(&bm25V1Snapshot{Version: "9.0.0"}))
+	require.NoError(t, file.Close())
+	idx.Index("doc", "content")
+	require.NoError(t, idx.Load(legacyPath))
+	require.Equal(t, 0, idx.Count())
+
+	nilMapsPath := filepath.Join(t.TempDir(), "legacy_nil_maps")
+	file, err = os.Create(nilMapsPath)
+	require.NoError(t, err)
+	require.NoError(t, msgpack.NewEncoder(file).Encode(&bm25V1Snapshot{Version: "1.0.0"}))
+	require.NoError(t, file.Close())
+	require.NoError(t, idx.Load(nilMapsPath))
+	require.Equal(t, 0, idx.Count())
+
+	legacyEdgePath := filepath.Join(t.TempDir(), "legacy_edges")
+	file, err = os.Create(legacyEdgePath)
+	require.NoError(t, err)
+	require.NoError(t, msgpack.NewEncoder(file).Encode(&bm25V1Snapshot{
+		Version:   "1.0.0",
+		Documents: map[string]string{"good": "alpha", "neg": "beta"},
+		InvertedIndex: map[string]map[string]int{
+			"empty": {},
+			"bad":   {"missing": 1, "good": 0},
+			"good":  {"good": 70000},
+		},
+		DocLengths: map[string]int{"good": 1, "neg": -3},
+	}))
+	require.NoError(t, file.Close())
+	require.NoError(t, idx.Load(legacyEdgePath))
+	require.Equal(t, 2, idx.Count())
+	require.NotEmpty(t, idx.Search("good", 10))
+
+	idx.applyV2Snapshot(bm25V2Snapshot{Version: bm25V2FormatVersion, DocLengths: []uint32{2, 3}})
+	require.Equal(t, int64(5), idx.totalDocLength)
+}
+
 func TestFulltextIndexV2_MinIntHelper(t *testing.T) {
 	require.Equal(t, 1, minInt(1, 2))
 	require.Equal(t, -5, minInt(-5, 3))

@@ -57,6 +57,35 @@ func TestLocalReranker_IsAvailable(t *testing.T) {
 	if badReranker.IsAvailable(context.Background()) {
 		t.Fatal("expected IsAvailable false when health check scoring fails")
 	}
+
+	var nilReranker *LocalReranker
+	if nilReranker.IsAvailable(context.Background()) {
+		t.Fatal("expected IsAvailable false for nil reranker")
+	}
+}
+
+func TestLocalReranker_RerankDisabledPassThrough(t *testing.T) {
+	candidates := []RerankCandidate{{ID: "a", Content: "alpha", Score: 0.7}}
+
+	var nilReranker *LocalReranker
+	results, err := nilReranker.Rerank(context.Background(), "query", candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].ID != "a" || results[0].FinalScore != 0.7 {
+		t.Fatalf("nil reranker pass-through = %#v", results)
+	}
+
+	cfg := DefaultLocalRerankerConfig()
+	cfg.Enabled = false
+	disabled := NewLocalReranker(mockScorer{}, cfg)
+	results, err = disabled.Rerank(context.Background(), "query", candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].ID != "a" || results[0].FinalScore != 0.7 {
+		t.Fatalf("disabled reranker pass-through = %#v", results)
+	}
 }
 
 func TestLocalReranker_Rerank_EmptyCandidates(t *testing.T) {

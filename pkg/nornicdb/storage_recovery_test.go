@@ -93,6 +93,9 @@ func TestStorageRecoveryHelpers_HeuristicsAndArtifacts(t *testing.T) {
 
 	t.Run("latestSnapshotPath picks newest snapshot", func(t *testing.T) {
 		dir := t.TempDir()
+		require.NoError(t, os.Mkdir(filepath.Join(dir, "snapshot-dir.json"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "not-a-snapshot.json"), []byte("{}"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot-ignore.txt"), []byte("{}"), 0644))
 		old := filepath.Join(dir, "snapshot-old.json")
 		newer := filepath.Join(dir, "snapshot-new.json")
 		require.NoError(t, os.WriteFile(old, []byte("{}"), 0644))
@@ -103,6 +106,12 @@ func TestStorageRecoveryHelpers_HeuristicsAndArtifacts(t *testing.T) {
 		got, err := latestSnapshotPath(dir)
 		require.NoError(t, err)
 		require.Equal(t, newer, got)
+
+		empty := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(empty, "ignored.txt"), []byte("{}"), 0644))
+		_, err = latestSnapshotPath(empty)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no snapshots found")
 	})
 
 	t.Run("hasRecoverableArtifacts from snapshots and wal files", func(t *testing.T) {
@@ -122,6 +131,7 @@ func TestStorageRecoveryHelpers_HeuristicsAndArtifacts(t *testing.T) {
 		base3 := t.TempDir()
 		segDir := filepath.Join(base3, "wal", "segments")
 		require.NoError(t, os.MkdirAll(segDir, 0755))
+		require.NoError(t, os.Mkdir(filepath.Join(segDir, "seg-dir-1.wal"), 0755))
 		require.NoError(t, os.WriteFile(filepath.Join(segDir, "seg-1-2.wal"), []byte("x"), 0644))
 		require.True(t, hasRecoverableArtifacts(base3))
 	})

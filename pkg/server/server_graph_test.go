@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
@@ -21,6 +22,43 @@ type graphOutgoingErrorEngine struct {
 
 func (e *graphOutgoingErrorEngine) GetOutgoingEdges(storage.NodeID) ([]*storage.Edge, error) {
 	return nil, fmt.Errorf("boom")
+}
+
+type graphEdgesStubEngine struct {
+	storage.Engine
+	outgoing      []*storage.Edge
+	incoming      []*storage.Edge
+	outErr        error
+	inErr         error
+	cancel        context.CancelFunc
+	incomingCalls int
+}
+
+func (e *graphEdgesStubEngine) GetOutgoingEdges(storage.NodeID) ([]*storage.Edge, error) {
+	if e.cancel != nil {
+		e.cancel()
+	}
+	if e.outErr != nil {
+		return nil, e.outErr
+	}
+	return e.outgoing, nil
+}
+
+func (e *graphEdgesStubEngine) GetIncomingEdges(storage.NodeID) ([]*storage.Edge, error) {
+	e.incomingCalls++
+	if e.inErr != nil {
+		return nil, e.inErr
+	}
+	return e.incoming, nil
+}
+
+type graphNeighborhoodStubEngine struct {
+	*graphEdgesStubEngine
+	nodes map[storage.NodeID]*storage.Node
+}
+
+func (e *graphNeighborhoodStubEngine) GetNode(id storage.NodeID) (*storage.Node, error) {
+	return e.nodes[id], nil
 }
 
 type graphNoMVCCEngine struct {
@@ -493,6 +531,53 @@ func TestGraphEdgesForNode_DedupesOutgoingAndIncoming(t *testing.T) {
 	require.Equal(t, storage.EdgeID("self-loop"), edges[0].ID)
 }
 
+func TestGraphEdgesForNode_ErrorAndFilterBranches(t *testing.T) {
+	t.Run("outgoing error", func(t *testing.T) {
+		wantErr := fmt.Errorf("outgoing failed")
+		engine := &graphEdgesStubEngine{Engine: storage.NewMemoryEngine(), outErr: wantErr}
+		t.Cleanup(func() { _ = engine.Close() })
+
+		_, err := graphEdgesForNode(context.Background(), engine, "n1")
+		require.ErrorIs(t, err, wantErr)
+		require.Zero(t, engine.incomingCalls)
+	})
+
+	t.Run("context canceled after outgoing lookup", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		engine := &graphEdgesStubEngine{Engine: storage.NewMemoryEngine(), cancel: cancel}
+		t.Cleanup(func() { _ = engine.Close() })
+
+		_, err := graphEdgesForNode(ctx, engine, "n1")
+		require.ErrorIs(t, err, context.Canceled)
+		require.Zero(t, engine.incomingCalls)
+	})
+
+	t.Run("incoming error", func(t *testing.T) {
+		wantErr := fmt.Errorf("incoming failed")
+		engine := &graphEdgesStubEngine{Engine: storage.NewMemoryEngine(), inErr: wantErr}
+		t.Cleanup(func() { _ = engine.Close() })
+
+		_, err := graphEdgesForNode(context.Background(), engine, "n1")
+		require.ErrorIs(t, err, wantErr)
+		require.Equal(t, 1, engine.incomingCalls)
+	})
+
+	t.Run("filters nil and duplicate edges", func(t *testing.T) {
+		shared := &storage.Edge{ID: "shared", StartNode: "n1", EndNode: "n2", Type: "REL"}
+		incomingOnly := &storage.Edge{ID: "incoming", StartNode: "n3", EndNode: "n1", Type: "REL"}
+		engine := &graphEdgesStubEngine{
+			Engine:   storage.NewMemoryEngine(),
+			outgoing: []*storage.Edge{nil, shared},
+			incoming: []*storage.Edge{nil, shared, incomingOnly},
+		}
+		t.Cleanup(func() { _ = engine.Close() })
+
+		edges, err := graphEdgesForNode(context.Background(), engine, "n1")
+		require.NoError(t, err)
+		require.Equal(t, []storage.EdgeID{"shared", "incoming"}, []storage.EdgeID{edges[0].ID, edges[1].ID})
+	})
+}
+
 func TestGraphExpandEndpoint_DelegatesToNeighborhood(t *testing.T) {
 	server, authenticator := setupTestServer(t)
 	token := getAuthToken(t, authenticator, "admin")
@@ -583,6 +668,10 @@ func TestGraphDiffEndpoint_AdditionalValidationBranches(t *testing.T) {
 	token := getAuthToken(t, authenticator, "admin")
 	asOf := time.Now().UTC().Format(time.RFC3339Nano)
 
+	wrongMethod := makeRequest(t, server, http.MethodGet, defaultGraphPath(server, "diff"), nil, "Bearer "+token)
+	require.Equal(t, 405, wrongMethod.Code)
+	require.Contains(t, wrongMethod.Body.String(), "POST required")
+
 	badJSONReq := httptest.NewRequest(http.MethodPost, defaultGraphPath(server, "diff"), strings.NewReader("{"))
 	badJSONRec := httptest.NewRecorder()
 	server.handleGraphDiff(badJSONRec, badJSONReq)
@@ -602,6 +691,21 @@ func TestGraphDiffEndpoint_AdditionalValidationBranches(t *testing.T) {
 	}, "Bearer "+token)
 	require.Equal(t, 400, invalidAsOf.Code)
 	require.Contains(t, invalidAsOf.Body.String(), "as_of must be a valid datetime")
+
+	missingAsOf := makeRequest(t, server, http.MethodPost, defaultGraphPath(server, "diff"), map[string]interface{}{
+		"node_ids": []string{"a"},
+		"as_of":    " ",
+	}, "Bearer "+token)
+	require.Equal(t, 400, missingAsOf.Code)
+	require.Contains(t, missingAsOf.Body.String(), "as_of is required")
+
+	invalidCompareTo := makeRequest(t, server, http.MethodPost, defaultGraphPath(server, "diff"), map[string]interface{}{
+		"node_ids":   []string{"a"},
+		"as_of":      asOf,
+		"compare_to": "not-a-date",
+	}, "Bearer "+token)
+	require.Equal(t, 400, invalidCompareTo.Code)
+	require.Contains(t, invalidCompareTo.Body.String(), "compare_to must be a valid datetime")
 
 	missingDBReq := httptest.NewRequest(http.MethodPost, "/nornicdb/graph//diff", strings.NewReader(`{"node_ids":["a"],"as_of":"`+asOf+`"}`))
 	missingDBReq.Header.Set("Content-Type", "application/json")
@@ -625,6 +729,50 @@ func TestWriteGraphResolveError_MapsSentinels(t *testing.T) {
 	recBadRequest := httptest.NewRecorder()
 	server.writeGraphResolveError(recBadRequest, ErrBadRequest)
 	require.Equal(t, 400, recBadRequest.Code)
+}
+
+func TestResolveGraphStorage_Branches(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	_, _, err := server.resolveGraphStorage(req)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "database path parameter is required")
+
+	req = httptest.NewRequest(http.MethodPost, "/", nil)
+	req.SetPathValue("database", "nornic")
+	_, _, err = server.resolveGraphStorage(req)
+	require.ErrorIs(t, err, errGraphForbidden)
+
+	server.auth = nil
+	req = httptest.NewRequest(http.MethodPost, "/", nil).WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{Roles: []string{"unknown"}}))
+	req.SetPathValue("database", "nornic")
+	_, _, err = server.resolveGraphStorage(req)
+	require.ErrorIs(t, err, errGraphForbidden)
+
+	req = httptest.NewRequest(http.MethodPost, "/", nil)
+	req.SetPathValue("database", "nornic")
+	dbName, engine, err := server.resolveGraphStorage(req)
+	require.NoError(t, err)
+	require.Equal(t, "nornic", dbName)
+	require.NotNil(t, engine)
+
+	req = httptest.NewRequest(http.MethodPost, "/", nil)
+	req.SetPathValue("database", "missing")
+	_, _, err = server.resolveGraphStorage(req)
+	require.ErrorIs(t, err, multidb.ErrDatabaseNotFound)
+
+	require.NoError(t, server.dbManager.CreateCompositeDatabase("cmp_graph_resolve", []multidb.ConstituentRef{{
+		Alias:        "main",
+		DatabaseName: "nornic",
+		Type:         "local",
+		AccessMode:   "read_write",
+	}}))
+	req = httptest.NewRequest(http.MethodPost, "/", nil)
+	req.SetPathValue("database", "cmp_graph_resolve")
+	_, _, err = server.resolveGraphStorage(req)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "graph endpoints on composite database")
 }
 
 func TestGraphHelperParsersAndNormalizers(t *testing.T) {
@@ -766,6 +914,76 @@ func TestCollectLatestNeighborhood_CanceledContext(t *testing.T) {
 
 	_, err = server.collectLatestNeighborhood(ctx, engine, []string{"a"}, 1, 10, newGraphFilterSet(nil, nil))
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCollectLatestNeighborhood_SeedAndFilterBranches(t *testing.T) {
+	server := &Server{}
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+	engine := &graphNeighborhoodStubEngine{
+		graphEdgesStubEngine: &graphEdgesStubEngine{
+			Engine: base,
+			outgoing: []*storage.Edge{
+				{ID: "blocked", StartNode: "seed", EndNode: "blocked-target", Type: "BLOCKED"},
+				{ID: "missing", StartNode: "seed", EndNode: "missing-neighbor", Type: "KNOWS"},
+				{ID: "hidden", StartNode: "seed", EndNode: "hidden-target", Type: "KNOWS"},
+				{ID: "good", StartNode: "seed", EndNode: "friend", Type: "KNOWS"},
+			},
+		},
+		nodes: map[storage.NodeID]*storage.Node{
+			"seed":           {ID: "seed", Labels: []string{"Seed"}},
+			"blocked-target": {ID: "blocked-target", Labels: []string{"Person"}},
+			"hidden-target":  {ID: "hidden-target", Labels: []string{"Hidden"}},
+			"friend":         {ID: "friend", Labels: []string{"Person"}},
+		},
+	}
+
+	collection, err := server.collectLatestNeighborhood(
+		context.Background(),
+		engine,
+		[]string{"", "seed", "seed", "missing-seed"},
+		1,
+		0,
+		newGraphFilterSet([]string{"Person"}, []string{"KNOWS"}),
+	)
+	require.NoError(t, err)
+	require.False(t, collection.truncated)
+	require.Contains(t, collection.nodes, "seed")
+	require.Contains(t, collection.nodes, "friend")
+	require.NotContains(t, collection.nodes, "blocked-target")
+	require.NotContains(t, collection.nodes, "hidden-target")
+	require.NotContains(t, collection.nodes, "missing-neighbor")
+	require.Contains(t, collection.edges, "good")
+	require.NotContains(t, collection.edges, "blocked")
+	require.NotContains(t, collection.edges, "hidden")
+	require.NotContains(t, collection.edges, "missing")
+}
+
+func TestCollectLatestNeighborhood_TruncatesSeedListAndPropagatesEdgeError(t *testing.T) {
+	server := &Server{}
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+
+	engine := &graphNeighborhoodStubEngine{
+		graphEdgesStubEngine: &graphEdgesStubEngine{Engine: base},
+		nodes: map[storage.NodeID]*storage.Node{
+			"a": {ID: "a", Labels: []string{"Node"}},
+			"b": {ID: "b", Labels: []string{"Node"}},
+		},
+	}
+	collection, err := server.collectLatestNeighborhood(context.Background(), engine, []string{"a", "b"}, 1, 1, newGraphFilterSet(nil, nil))
+	require.NoError(t, err)
+	require.True(t, collection.truncated)
+	require.Contains(t, collection.nodes, "a")
+	require.NotContains(t, collection.nodes, "b")
+
+	wantErr := fmt.Errorf("edge lookup failed")
+	errorEngine := &graphNeighborhoodStubEngine{
+		graphEdgesStubEngine: &graphEdgesStubEngine{Engine: base, outErr: wantErr},
+		nodes:                map[storage.NodeID]*storage.Node{"a": {ID: "a", Labels: []string{"Node"}}},
+	}
+	_, err = server.collectLatestNeighborhood(context.Background(), errorEngine, []string{"a"}, 1, 10, newGraphFilterSet(nil, nil))
+	require.ErrorIs(t, err, wantErr)
 }
 
 func TestCollectLatestPath_SourceEqualsTargetBranches(t *testing.T) {

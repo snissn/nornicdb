@@ -26,6 +26,15 @@ func (r *coverageReranker) Rerank(ctx context.Context, query string, candidates 
 	return r.results, r.err
 }
 
+type mmrGetNodeErrorEngine struct {
+	storage.Engine
+	err error
+}
+
+func (e *mmrGetNodeErrorEngine) GetNode(storage.NodeID) (*storage.Node, error) {
+	return nil, e.err
+}
+
 func TestSearchRerankExtraApplyMMRBranches(t *testing.T) {
 	engine := storage.NewMemoryEngine()
 	t.Cleanup(func() { engine.Close() })
@@ -52,6 +61,28 @@ func TestSearchRerankExtraApplyMMRBranches(t *testing.T) {
 	require.NoError(t, err)
 	selected := svc.applyMMR(context.Background(), noEmbeddingResults, []float32{1, 0}, 3, 0.5, map[string]bool{})
 	require.Equal(t, noEmbeddingResults, selected)
+}
+
+func TestSearchRerankExtraApplyMMRErrorBranches(t *testing.T) {
+	missingEngine := storage.NewMemoryEngine()
+	t.Cleanup(func() { missingEngine.Close() })
+	_, err := missingEngine.CreateNode(&storage.Node{ID: "nornic:ok", Labels: []string{"Doc"}, ChunkEmbeddings: [][]float32{{1, 0}}})
+	require.NoError(t, err)
+	missingSvc := NewServiceWithDimensions(missingEngine, 2)
+	seen := map[string]bool{}
+	selected := missingSvc.applyMMR(context.Background(), []rrfResult{
+		{ID: "nornic:missing", RRFScore: 0.9},
+		{ID: "nornic:ok", RRFScore: 0.8},
+	}, []float32{1, 0}, 2, 0.5, seen)
+	require.Equal(t, []rrfResult{{ID: "nornic:ok", RRFScore: 0.8}}, selected)
+	require.True(t, seen["nornic:missing"])
+
+	boomEngine := &mmrGetNodeErrorEngine{Engine: storage.NewMemoryEngine(), err: errors.New("storage boom")}
+	t.Cleanup(func() { boomEngine.Close() })
+	boomSvc := NewServiceWithDimensions(boomEngine, 2)
+	results := []rrfResult{{ID: "a", RRFScore: 0.9}, {ID: "b", RRFScore: 0.8}}
+	selected = boomSvc.applyMMR(context.Background(), results, []float32{1, 0}, 2, 0.5, nil)
+	require.Equal(t, results, selected)
 }
 
 func TestSearchRerankExtraApplyStage2Branches(t *testing.T) {
