@@ -548,6 +548,45 @@ class NornicDBClient {
     return fallback;
   }
 
+  // runCypherOverHttp drives a single Cypher statement through the
+  // HTTP /tx/commit endpoint. Faster than Bolt-over-WS for single
+  // fire-and-forget queries (1 HTTP round-trip vs multiple Bolt frames).
+  // Used by latency-sensitive paths like the traversal demo.
+  private async runCypherOverHttp(
+    dbName: string,
+    statement: string,
+    parameters?: Record<string, unknown>,
+  ): Promise<CypherResponse> {
+    const res = await fetch(
+      joinBasePath(BASE_PATH, `/db/${encodeURIComponent(dbName)}/tx/commit`),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          statements: [{ statement, parameters }],
+        }),
+      },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(res, "Cypher request failed");
+      return { results: [], errors: [{ code: "Neo.ClientError.Request.Invalid", message }] };
+    }
+    const json = await res.json();
+    return json as CypherResponse;
+  }
+
+  // executeCypherOverHttp provides a public HTTP-based Cypher path for
+  // latency-sensitive pages (e.g. the traversal demo) where the single
+  // HTTP round-trip is measurably faster than Bolt session lifecycle.
+  async executeCypherOverHttp(
+    dbName: string,
+    statement: string,
+    parameters?: Record<string, unknown>,
+  ): Promise<CypherResponse> {
+    return this.runCypherOverHttp(dbName, statement, parameters);
+  }
+
   // runCypherOverBolt drives a single Cypher statement through the
   // Bolt-over-WS driver and reshapes the result into the same
   // CypherResponse format the UI's parseCypherRows / display layer

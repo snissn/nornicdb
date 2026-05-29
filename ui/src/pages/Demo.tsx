@@ -300,16 +300,28 @@ export function Demo() {
       setStatusLine(`shortestPath ${startStar.name} ↔ ${endStar.name}`);
 
       try {
-        const resp = await api.executeCypherOnDatabase(
+        // Use the HTTP /tx/commit path for traversal timing — single
+        // HTTP round-trip is measurably faster than Bolt session
+        // lifecycle and lets us extract Resource Timing wire latency.
+        const resp = await api.executeCypherOverHttp(
           DEMO_DB,
           CYPHER_SHORTEST_PATH,
           { startId, endId },
         );
         const totalMs = nowMs() - start;
-        // Bolt-over-WS sessions don't surface wire timings via the
-        // browser's Resource Timing buffer (that API only covers HTTP
-        // fetches). The JS-observed total is what the user feels.
-        const wireMs = totalMs;
+        // Try to extract wire-level latency from the browser's Resource
+        // Timing buffer (only available for HTTP fetches, not WS).
+        const wireMs = (() => {
+          if (typeof performance === "undefined") return totalMs;
+          const entries = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
+          const txEntry = entries
+            .filter((e) => e.name.includes("/tx/commit"))
+            .pop();
+          if (txEntry && txEntry.responseEnd > 0 && txEntry.requestStart > 0) {
+            return txEntry.responseEnd - txEntry.requestStart;
+          }
+          return totalMs;
+        })();
         fg?.resumeAnimation();
         const rows = rowsFromCypher(resp);
         const first = rows[0];
