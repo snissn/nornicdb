@@ -285,14 +285,18 @@ func buildEmbedConfigFromResolved(effective map[string]string, fallback *Config)
 	}
 	gpuLayers := getInt("NORNICDB_EMBEDDING_GPU_LAYERS", 0)
 	cfg := &embed.Config{
-		Provider:   provider,
-		APIURL:     apiURL,
-		APIKey:     apiKey,
-		Model:      model,
-		Dimensions: dimensions,
-		ModelsDir:  fallback.ModelsDir,
-		Timeout:    30 * time.Second,
-		GPULayers:  gpuLayers,
+		Provider:      provider,
+		APIURL:        apiURL,
+		APIKey:        apiKey,
+		Model:         model,
+		Dimensions:    dimensions,
+		ModelsDir:     fallback.ModelsDir,
+		Timeout:       30 * time.Second,
+		GPULayers:     gpuLayers,
+		CtxType:       fallback.EmbeddingCtxType,
+		PoolingType:   fallback.EmbeddingPoolingType,
+		AttentionType: fallback.EmbeddingAttentionType,
+		FlashAttn:     fallback.EmbeddingFlashAttn,
 	}
 	switch provider {
 	case "ollama":
@@ -418,6 +422,11 @@ type Config struct {
 	// ModelsDir is the directory containing local GGUF models
 	// Env: NORNICDB_MODELS_DIR (default: ./models)
 	ModelsDir string
+	// Embedding llama.cpp context features (passthrough for local GGUF models)
+	EmbeddingCtxType       int // Env: NORNICDB_EMBEDDING_CTX_TYPE
+	EmbeddingPoolingType   int // Env: NORNICDB_EMBEDDING_POOLING_TYPE
+	EmbeddingAttentionType int // Env: NORNICDB_EMBEDDING_ATTENTION_TYPE
+	EmbeddingFlashAttn     int // Env: NORNICDB_EMBEDDING_FLASH_ATTN
 
 	// Slow Query Logging Configuration
 	// SlowQueryEnabled turns on slow query logging (default: true)
@@ -1346,6 +1355,21 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			go func() {
 				opts := localllm.DefaultOptions(modelPath)
 				opts.GPULayers = -1
+				// Apply rerank context features from config
+				if config.Features != nil {
+					if config.Features.RerankCtxType != 0 {
+						opts.Features.CtxType = config.Features.RerankCtxType
+					}
+					if config.Features.RerankPoolingType != 0 {
+						opts.Features.PoolingType = config.Features.RerankPoolingType
+					}
+					if config.Features.RerankAttentionType != 0 {
+						opts.Features.AttentionType = config.Features.RerankAttentionType
+					}
+					if config.Features.RerankFlashAttn != 0 {
+						opts.Features.FlashAttn = config.Features.RerankFlashAttn
+					}
+				}
 				rerankerModel, err := localllm.LoadRerankerModel(opts)
 				if err != nil {
 					rerankLog.Warn("search reranker model unavailable; stage-2 reranking disabled, RRF order only",
@@ -1416,13 +1440,17 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 	embeddingsReady := config.EmbeddingEnabled && (config.EmbeddingProvider == "local" || config.EmbeddingAPIURL != "")
 	if embeddingsReady {
 		embedConfig := &embed.Config{
-			Provider:   config.EmbeddingProvider,
-			APIURL:     config.EmbeddingAPIURL,
-			APIKey:     config.EmbeddingAPIKey,
-			Model:      config.EmbeddingModel,
-			Dimensions: config.EmbeddingDimensions,
-			ModelsDir:  config.ModelsDir,
-			Timeout:    30 * time.Second,
+			Provider:      config.EmbeddingProvider,
+			APIURL:        config.EmbeddingAPIURL,
+			APIKey:        config.EmbeddingAPIKey,
+			Model:         config.EmbeddingModel,
+			Dimensions:    config.EmbeddingDimensions,
+			ModelsDir:     config.ModelsDir,
+			Timeout:       30 * time.Second,
+			CtxType:       config.EmbeddingCtxType,
+			PoolingType:   config.EmbeddingPoolingType,
+			AttentionType: config.EmbeddingAttentionType,
+			FlashAttn:     config.EmbeddingFlashAttn,
 		}
 
 		// Set API path based on provider (only for remote providers)

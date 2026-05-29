@@ -10,14 +10,14 @@
 #   - Make (from MinGW or MSYS2)
 #
 # Usage:
-#   .\scripts\build-llama-cuda.ps1 [-Version b9106] [-Clean]
+#   .\scripts\build-llama-cuda.ps1 [-Version b9410] [-Clean]
 #
 # Output:
 #   lib\llama\libllama_windows_amd64.a (static library, CPU-only)
 #   lib\llama\llama.h, ggml*.h (headers)
 
 param(
-    [string]$Version = "b9106",  # Latest stable llama.cpp release tag
+    [string]$Version = "b9410",  # Latest stable llama.cpp release tag
     [switch]$Clean
 )
 
@@ -146,6 +146,8 @@ if (Test-Path $rootCMakePath) {
     $cmakeContent = $cmakeContent -replace '(add_subdirectory\(tools\))', '# $1 # Disabled for library-only build'
     # Comment out add_subdirectory(examples)
     $cmakeContent = $cmakeContent -replace '(add_subdirectory\(examples\))', '# $1 # Disabled for library-only build'
+    # Comment out add_subdirectory(app) -- new in b9410, depends on llama-server-impl
+    $cmakeContent = $cmakeContent -replace '(add_subdirectory\(app\))', '# $1 # Disabled for library-only build'
     $cmakeContent | Set-Content $rootCMakePath -NoNewline
 }
 
@@ -170,7 +172,8 @@ $cmakeArgs = @(
     "-DGGML_AVX=ON",
     "-DGGML_AVX2=ON",
     "-DGGML_FMA=ON",
-    "-DLLAMA_STANDALONE=OFF"
+    "-DLLAMA_STANDALONE=OFF",
+    "-DLLAMA_BUILD_TOOLS=OFF"
 )
 
 & cmake @cmakeArgs
@@ -182,7 +185,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # Build
 Write-Host "        Building with make..." -ForegroundColor Yellow
-& cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+& cmake --build build --config Release --target llama --target ggml -j $env:NUMBER_OF_PROCESSORS
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Build failed!" -ForegroundColor Red
     Set-Location $OriginalDir

@@ -242,6 +242,7 @@ type Options struct {
 	BatchSize   int
 	Threads     int
 	GPULayers   int
+	Features    ContextFeatures
 }
 
 // DefaultOptions returns options optimized for embedding generation.
@@ -270,6 +271,7 @@ func DefaultOptions(modelPath string) Options {
 		BatchSize:   8192, // Matches context for efficient processing
 		Threads:     threads,
 		GPULayers:   -1, // Auto: offload all layers to GPU
+		Features:    DefaultContextFeatures(),
 	}
 }
 
@@ -621,6 +623,7 @@ type GenerationOptions struct {
 	BatchSize   int
 	Threads     int
 	GPULayers   int
+	Features    ContextFeatures
 }
 
 // DefaultGenerationOptions returns options optimized for text generation.
@@ -639,6 +642,12 @@ func DefaultGenerationOptions(modelPath string) GenerationOptions {
 		BatchSize:   512,
 		Threads:     threads,
 		GPULayers:   -1, // Auto: use GPU if available
+		Features: ContextFeatures{
+			CtxType:       0,  // LLAMA_CONTEXT_TYPE_DEFAULT
+			PoolingType:   -1, // LLAMA_POOLING_TYPE_UNSPECIFIED
+			AttentionType: 0,  // LLAMA_ATTENTION_TYPE_CAUSAL
+			FlashAttn:     -1, // LLAMA_FLASH_ATTN_TYPE_AUTO
+		},
 	}
 }
 

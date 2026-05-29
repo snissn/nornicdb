@@ -6,6 +6,8 @@ package heimdall
 
 import (
 	"context"
+	"os"
+	"strconv"
 
 	"github.com/orneryd/nornicdb/pkg/localllm"
 )
@@ -22,12 +24,36 @@ func yzmaGeneratorLoader(modelPath string, gpuLayers, contextSize, batchSize int
 	opts.ContextSize = contextSize
 	opts.BatchSize = batchSize
 
+	// Apply Heimdall-specific context features from env
+	if v := yzmaEnvInt("NORNICDB_HEIMDALL_CTX_TYPE"); v != 0 {
+		opts.Features.CtxType = v
+	}
+	if v := yzmaEnvInt("NORNICDB_HEIMDALL_POOLING_TYPE"); v != 0 {
+		opts.Features.PoolingType = v
+	}
+	if v := yzmaEnvInt("NORNICDB_HEIMDALL_ATTENTION_TYPE"); v != 0 {
+		opts.Features.AttentionType = v
+	}
+	if v := yzmaEnvInt("NORNICDB_HEIMDALL_FLASH_ATTN"); v != 0 {
+		opts.Features.FlashAttn = v
+	}
+
 	model, err := localllm.LoadGenerationModel(opts)
 	if err != nil {
 		return nil, err
 	}
 
 	return &yzmaGenerator{model: model}, nil
+}
+
+// yzmaEnvInt reads an env var as int, returns 0 if unset or invalid.
+func yzmaEnvInt(key string) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return 0
 }
 
 // yzmaGenerator wraps localllm.GenerationModel to implement Generator interface.

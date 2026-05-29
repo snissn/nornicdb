@@ -6,7 +6,7 @@
 FROM debian:bookworm-slim AS builder
 
 ARG TARGETARCH
-ARG LLAMA_VERSION=b9106
+ARG LLAMA_VERSION=b9410
 ARG LLAMA_BUILD_JOBS=2
 
 WORKDIR /llama
@@ -33,11 +33,11 @@ RUN set -eux; \
     cmake -B build \
       -DLLAMA_STATIC=ON -DBUILD_SHARED_LIBS=OFF \
       -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
-      -DLLAMA_CURL=OFF \
+      -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_CURL=OFF \
       -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_C_FLAGS="${C_FLAGS}" -DCMAKE_CXX_FLAGS="${CXX_FLAGS}"; \
-    cmake --build build --config Release -j"${LLAMA_BUILD_JOBS}"
+    cmake --build build --config Release --target llama --target ggml -j"${LLAMA_BUILD_JOBS}"
 
 RUN mkdir -p /output/lib /output/include && \
     find build -name "*.a" -exec cp {} /output/lib/ \; && \

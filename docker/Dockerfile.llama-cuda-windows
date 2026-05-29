@@ -7,7 +7,7 @@
 # For local builds, use: .\scripts\build-llama-cuda.ps1
 #
 # Build (requires Windows container mode):
-#   docker build -f docker/Dockerfile.llama-cuda-windows -t timothyswt/llama-cuda-libs-windows:b9106 .
+#   docker build -f docker/Dockerfile.llama-cuda-windows -t timothyswt/llama-cuda-libs-windows:b9410 .
 #
 # For GitHub Actions:
 #   See .github/workflows/build-llama-windows.yml
@@ -28,7 +28,7 @@ RUN choco install -y git cmake ninja visualstudio2022buildtools --package-parame
 # Note: CUDA Toolkit must be pre-installed on the host or use NVIDIA's CUDA Windows container image
 # For CI, consider using: mcr.microsoft.com/dotnet/framework/sdk with manual CUDA install
 
-ARG LLAMA_VERSION=b9106
+ARG LLAMA_VERSION=b9410
 ARG CUDA_VERSION=12.6
 
 WORKDIR C:\\llama
@@ -46,7 +46,7 @@ RUN $content = Get-Content 'common\\log.cpp' -Raw; \
 # Setup VS environment and build
 ARG LLAMA_BUILD_JOBS=4
 SHELL ["cmd", "/S", "/C"]
-RUN call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_STATIC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON && cmake --build build --config Release -j %LLAMA_BUILD_JOBS%
+RUN call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_STATIC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=OFF -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON && cmake --build build --config Release --target llama --target ggml -j %LLAMA_BUILD_JOBS%
 
 # Combine libraries
 SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop';"]

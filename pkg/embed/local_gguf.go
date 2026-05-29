@@ -142,6 +142,21 @@ func NewLocalGGUF(config *Config) (*LocalGGUFEmbedder, error) {
 		opts.GPULayers = config.GPULayers
 	}
 
+	// Apply llama context features from config (env-driven overrides).
+	// Only override defaults when the config value is explicitly set.
+	if config.CtxType != 0 {
+		opts.Features.CtxType = config.CtxType
+	}
+	if config.PoolingType != 0 {
+		opts.Features.PoolingType = config.PoolingType
+	}
+	if config.AttentionType != 0 {
+		opts.Features.AttentionType = config.AttentionType
+	}
+	if config.FlashAttn != 0 {
+		opts.Features.FlashAttn = config.FlashAttn
+	}
+
 	fmt.Printf("🧠 Loading local embedding model: %s\n", modelPath)
 	fmt.Printf("   GPU layers: %d (-1 = auto/all)\n", opts.GPULayers)
 

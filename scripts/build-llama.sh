@@ -5,7 +5,7 @@
 #   ./scripts/build-llama.sh [version]
 #
 # Examples:
-#   ./scripts/build-llama.sh          # Uses default version (b9106)
+#   ./scripts/build-llama.sh          # Uses default version (b9410)
 #   ./scripts/build-llama.sh b8000    # Specific version
 #
 # Output:
@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-VERSION="${1:-b9106}"
+VERSION="${1:-b9410}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 OUTDIR="$PROJECT_ROOT/lib/llama"
@@ -53,7 +53,8 @@ echo "   Platform: ${OS}/${ARCH}"
 
 # Base CMake args for static library
 # Build PIC objects so static libs can link into PIE executables on Linux CI.
-CMAKE_ARGS="-DLLAMA_STATIC=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_CURL=OFF"
+# Disable all tools/examples/server/app targets — we only need the static libs.
+CMAKE_ARGS="-DLLAMA_STATIC=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_COMMON=ON -DLLAMA_CURL=OFF"
 
 # GPU-specific configuration
 GPU_SUFFIX=""
@@ -74,10 +75,10 @@ else
     echo "   GPU: None (CPU only with SIMD)"
 fi
 
-# Build
+# Build — only the static library targets we need (avoids app/tool link errors)
 echo "🏗️  Building..."
 cmake -B build $CMAKE_ARGS
-cmake --build build --config Release -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+cmake --build build --config Release --target llama --target ggml -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 # Find and combine all static libraries (llama.cpp now splits into multiple .a files)
 LIB_NAME="libllama_${OS}_${ARCH}${GPU_SUFFIX}.a"

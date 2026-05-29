@@ -28,6 +28,7 @@ type Options struct {
 	BatchSize   int
 	Threads     int
 	GPULayers   int
+	Features    ContextFeatures
 }
 
 // DefaultOptions returns options optimized for embedding generation.
@@ -45,6 +46,7 @@ func DefaultOptions(modelPath string) Options {
 		BatchSize:   0,
 		Threads:     threads,
 		GPULayers:   -1,
+		Features:    DefaultContextFeatures(),
 	}
 }
 

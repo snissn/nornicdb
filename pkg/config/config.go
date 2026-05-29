@@ -607,6 +607,22 @@ type MemoryConfig struct {
 	// EmbeddingWarmupInterval for periodic model warmup
 	// Env: NORNICDB_EMBEDDING_WARMUP_INTERVAL
 	EmbeddingWarmupInterval time.Duration
+	// EmbeddingCtxType sets the llama.cpp context type for embedding model.
+	// 0=default, 1=MTP. Only use MTP if the model contains MTP layers.
+	// Env: NORNICDB_EMBEDDING_CTX_TYPE
+	EmbeddingCtxType int
+	// EmbeddingPoolingType sets the embedding pooling strategy.
+	// 1=mean (default), 2=cls, 3=last, 4=rank.
+	// Env: NORNICDB_EMBEDDING_POOLING_TYPE
+	EmbeddingPoolingType int
+	// EmbeddingAttentionType sets the attention masking mode for embeddings.
+	// 0=causal, 1=non-causal (default for embeddings).
+	// Env: NORNICDB_EMBEDDING_ATTENTION_TYPE
+	EmbeddingAttentionType int
+	// EmbeddingFlashAttn controls flash attention for embedding model.
+	// -1=auto (default), 0=disabled, 1=enabled.
+	// Env: NORNICDB_EMBEDDING_FLASH_ATTN
+	EmbeddingFlashAttn int
 	// DefaultNodeLabel is the label applied to nodes when no label is specified.
 	// Env: NORNICDB_DEFAULT_NODE_LABEL (default: "Memory")
 	DefaultNodeLabel string
@@ -830,6 +846,23 @@ type FeatureFlagsConfig struct {
 	// Environment: NORNICDB_HEIMDALL_MEMORY_CURATION (default: false)
 	HeimdallMemoryCuration bool
 
+	// HeimdallCtxType sets the llama.cpp context type for Heimdall model.
+	// 0=default, 1=MTP.
+	// Env: NORNICDB_HEIMDALL_CTX_TYPE
+	HeimdallCtxType int
+	// HeimdallPoolingType sets the pooling strategy for Heimdall model.
+	// 0=none (default for generation), 1=mean, 2=cls, 3=last.
+	// Env: NORNICDB_HEIMDALL_POOLING_TYPE
+	HeimdallPoolingType int
+	// HeimdallAttentionType sets the attention masking mode for Heimdall model.
+	// 0=causal (default for generation), 1=non-causal.
+	// Env: NORNICDB_HEIMDALL_ATTENTION_TYPE
+	HeimdallAttentionType int
+	// HeimdallFlashAttn controls flash attention for Heimdall model.
+	// -1=auto (default), 0=disabled, 1=enabled.
+	// Env: NORNICDB_HEIMDALL_FLASH_ATTN
+	HeimdallFlashAttn int
+
 	// Expose MCP tools (store, recall, discover, link, task, tasks) to the Heimdall agentic loop.
 	// When false, the LLM does not see or call MCP tools (reduces context size). Default: false.
 	// Environment: NORNICDB_HEIMDALL_MCP_ENABLE (default: false)
@@ -858,6 +891,22 @@ type FeatureFlagsConfig struct {
 	// SearchRerankAPIKey for authenticated providers (e.g. OpenAI, Cohere).
 	// Environment: NORNICDB_SEARCH_RERANK_API_KEY
 	SearchRerankAPIKey string
+	// RerankCtxType sets the llama.cpp context type for rerank model.
+	// 0=default, 1=MTP.
+	// Env: NORNICDB_RERANK_CTX_TYPE
+	RerankCtxType int
+	// RerankPoolingType sets the pooling strategy for rerank model.
+	// 1=mean, 2=cls, 3=last, 4=rank.
+	// Env: NORNICDB_RERANK_POOLING_TYPE
+	RerankPoolingType int
+	// RerankAttentionType sets the attention masking mode for rerank model.
+	// 0=causal, 1=non-causal.
+	// Env: NORNICDB_RERANK_ATTENTION_TYPE
+	RerankAttentionType int
+	// RerankFlashAttn controls flash attention for rerank model.
+	// -1=auto, 0=disabled, 1=enabled.
+	// Env: NORNICDB_RERANK_FLASH_ATTN
+	RerankFlashAttn int
 
 	// === Token Budget Settings for Heimdall Prompt Construction ===
 	// These control how the context window is partitioned between system prompt,
@@ -2325,6 +2374,19 @@ func applyEnvVars(config *Config) error {
 	if v := getEnvDuration("NORNICDB_EMBEDDING_WARMUP_INTERVAL", 0); v > 0 {
 		config.Memory.EmbeddingWarmupInterval = v
 	}
+	// Embedding llama.cpp context features (per-model tuning via env)
+	if v := getEnvInt("NORNICDB_EMBEDDING_CTX_TYPE", 0); v != 0 {
+		config.Memory.EmbeddingCtxType = v
+	}
+	if v := getEnvInt("NORNICDB_EMBEDDING_POOLING_TYPE", 0); v != 0 {
+		config.Memory.EmbeddingPoolingType = v
+	}
+	if v := getEnvInt("NORNICDB_EMBEDDING_ATTENTION_TYPE", 0); v != 0 {
+		config.Memory.EmbeddingAttentionType = v
+	}
+	if v := getEnvInt("NORNICDB_EMBEDDING_FLASH_ATTN", 0); v != 0 {
+		config.Memory.EmbeddingFlashAttn = v
+	}
 	if v := getEnvInt("NORNICDB_KMEANS_MIN_EMBEDDINGS", 0); v > 0 {
 		config.Memory.KmeansMinEmbeddings = v
 	}
@@ -2615,6 +2677,19 @@ func applyEnvVars(config *Config) error {
 	if v, ok := envutil.LookupBoolLoose("NORNICDB_HEIMDALL_MEMORY_CURATION"); ok {
 		config.Features.HeimdallMemoryCuration = v
 	}
+	// Heimdall llama.cpp context features
+	if v := getEnvInt("NORNICDB_HEIMDALL_CTX_TYPE", 0); v != 0 {
+		config.Features.HeimdallCtxType = v
+	}
+	if v := getEnvInt("NORNICDB_HEIMDALL_POOLING_TYPE", 0); v != 0 {
+		config.Features.HeimdallPoolingType = v
+	}
+	if v := getEnvInt("NORNICDB_HEIMDALL_ATTENTION_TYPE", 0); v != 0 {
+		config.Features.HeimdallAttentionType = v
+	}
+	if v := getEnvInt("NORNICDB_HEIMDALL_FLASH_ATTN", 0); v != 0 {
+		config.Features.HeimdallFlashAttn = v
+	}
 	// MCP tools in agentic loop (NORNICDB_HEIMDALL_MCP_ENABLE, NORNICDB_HEIMDALL_MCP_TOOLS)
 	if v := os.Getenv("NORNICDB_HEIMDALL_MCP_ENABLE"); v != "" {
 		config.Features.HeimdallMCPEnable = v == "true" || v == "1"
@@ -2646,6 +2721,19 @@ func applyEnvVars(config *Config) error {
 	}
 	if v := getEnv("NORNICDB_SEARCH_RERANK_API_KEY", ""); v != "" {
 		config.Features.SearchRerankAPIKey = v
+	}
+	// Rerank llama.cpp context features
+	if v := getEnvInt("NORNICDB_RERANK_CTX_TYPE", 0); v != 0 {
+		config.Features.RerankCtxType = v
+	}
+	if v := getEnvInt("NORNICDB_RERANK_POOLING_TYPE", 0); v != 0 {
+		config.Features.RerankPoolingType = v
+	}
+	if v := getEnvInt("NORNICDB_RERANK_ATTENTION_TYPE", 0); v != 0 {
+		config.Features.RerankAttentionType = v
+	}
+	if v := getEnvInt("NORNICDB_RERANK_FLASH_ATTN", 0); v != 0 {
+		config.Features.RerankFlashAttn = v
 	}
 	if v := getEnvInt("NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS", 0); v > 0 {
 		config.Features.HeimdallMaxContextTokens = v

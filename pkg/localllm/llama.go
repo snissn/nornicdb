@@ -129,8 +129,18 @@ struct llama_model* load_model(const char* path, int n_gpu_layers) {
     return model;
 }
 
-// Create embedding context with Metal/GPU optimizations
-struct llama_context* create_context(struct llama_model* model, int n_ctx, int n_batch, int n_threads) {
+// Create embedding context with configurable features.
+//
+// Feature flags passed from Go allow env-driven control over context
+// parameters that vary by model (e.g. MTP models, different pooling).
+//
+// Parameters:
+//   ctx_type:       0=default, 1=MTP
+//   pooling_type:   -1=unspecified, 0=none, 1=mean, 2=cls, 3=last, 4=rank
+//   attention_type: -1=unspecified, 0=causal, 1=non-causal
+//   flash_attn:     -1=auto, 0=disabled, 1=enabled
+struct llama_context* create_context(struct llama_model* model, int n_ctx, int n_batch, int n_threads,
+                                     int ctx_type, int pooling_type, int attention_type, int flash_attn) {
     struct llama_context_params params = llama_context_default_params();
 
     // Context size for tokenization
@@ -146,15 +156,19 @@ struct llama_context* create_context(struct llama_model* model, int n_ctx, int n
 
     // Enable embeddings mode
     params.embeddings = 1;
-    params.pooling_type = LLAMA_POOLING_TYPE_MEAN;
 
-    // Set attention type for embedding models (non-causal, BERT-style)
-    // Embedding models use bidirectional attention unlike causal LLMs
-    params.attention_type = LLAMA_ATTENTION_TYPE_NON_CAUSAL;
+    // Context type — explicitly set to prevent struct-layout mismatches from
+    // accidentally enabling MTP on non-MTP models.
+    params.ctx_type = (enum llama_context_type)ctx_type;
 
-    // Flash attention - major speedup on Metal and CUDA
-    // Auto-detect best setting based on hardware and model
-    params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+    // Pooling strategy (configurable per-model via env)
+    params.pooling_type = (enum llama_pooling_type)pooling_type;
+
+    // Attention type for embedding models (non-causal = BERT-style bidirectional)
+    params.attention_type = (enum llama_attention_type)attention_type;
+
+    // Flash attention — major speedup on Metal and CUDA
+    params.flash_attn_type = (enum llama_flash_attn_type)flash_attn;
 
     // logits_all removed in newer llama.cpp - controlled per-batch now
     // We set batch.logits[i] = 1 in embed() function instead
@@ -226,7 +240,8 @@ void free_model(struct llama_model* model) { if (model) llama_model_free(model);
 // ============================================================================
 
 // Create context for text generation (different params than embeddings)
-struct llama_context* create_gen_context(struct llama_model* model, int n_ctx, int n_batch, int n_threads) {
+struct llama_context* create_gen_context(struct llama_model* model, int n_ctx, int n_batch, int n_threads,
+                                         int ctx_type, int pooling_type, int attention_type, int flash_attn) {
     struct llama_context_params params = llama_context_default_params();
 
     params.n_ctx = n_ctx;
@@ -235,13 +250,12 @@ struct llama_context* create_gen_context(struct llama_model* model, int n_ctx, i
     params.n_threads = n_threads;
     params.n_threads_batch = n_threads;
 
-	// Generation mode: keep the context params as close as possible to
-	// llama.cpp defaults and only flip the fields we actually need.
+    // Generation mode
     params.embeddings = 0;
-    params.pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED;
-    params.attention_type = LLAMA_ATTENTION_TYPE_CAUSAL;
-
-    // logits_all removed - controlled per-batch now
+    params.ctx_type = (enum llama_context_type)ctx_type;
+    params.pooling_type = (enum llama_pooling_type)pooling_type;
+    params.attention_type = (enum llama_attention_type)attention_type;
+    params.flash_attn_type = (enum llama_flash_attn_type)flash_attn;
 
     return llama_init_from_model(model, params);
 }
@@ -549,12 +563,14 @@ type Model struct {
 //   - BatchSize: Batch size for processing (default: match effective context size)
 //   - Threads: CPU threads for inference (default: NumCPU/2, min 4)
 //   - GPULayers: GPU layer offload (-1=auto/all, 0=CPU only, N=N layers)
+//   - Features: llama.cpp context features configurable per-model via env
 type Options struct {
 	ModelPath   string
 	ContextSize int
 	BatchSize   int
 	Threads     int
 	GPULayers   int
+	Features    ContextFeatures
 }
 
 const (
@@ -603,6 +619,7 @@ func DefaultOptions(modelPath string) Options {
 		BatchSize:   0, // Auto: match effective context size
 		Threads:     threads,
 		GPULayers:   -1, // Auto: offload all layers to GPU
+		Features:    DefaultContextFeatures(),
 	}
 }
 
@@ -677,7 +694,9 @@ func LoadModel(opts Options) (*Model, error) {
 	}
 	modelCtxTrain := int(C.get_n_ctx_train(model))
 	ctxSize, batchSize := resolveEmbeddingContextAndBatch(opts, modelCtxTrain)
-	ctx := C.create_context(model, C.int(ctxSize), C.int(batchSize), C.int(opts.Threads))
+	f := opts.Features
+	ctx := C.create_context(model, C.int(ctxSize), C.int(batchSize), C.int(opts.Threads),
+		C.int(f.CtxType), C.int(f.PoolingType), C.int(f.AttentionType), C.int(f.FlashAttn))
 	if ctx == nil {
 		C.free_model(model)
 		return nil, fmt.Errorf("failed to create context for: %s", opts.ModelPath)
@@ -1022,6 +1041,7 @@ type GenerationOptions struct {
 	BatchSize   int // Processing batch size (default: 512)
 	Threads     int // CPU threads (default: NumCPU/2)
 	GPULayers   int // GPU offload (-1=auto, 0=CPU)
+	Features    ContextFeatures
 }
 
 // DefaultGenerationOptions returns sensible defaults for text generation.
@@ -1036,6 +1056,12 @@ func DefaultGenerationOptions(modelPath string) GenerationOptions {
 		BatchSize:   512,
 		Threads:     threads,
 		GPULayers:   -1, // Auto GPU
+		Features: ContextFeatures{
+			CtxType:       0,  // LLAMA_CONTEXT_TYPE_DEFAULT
+			PoolingType:   -1, // LLAMA_POOLING_TYPE_UNSPECIFIED (no pooling for generation)
+			AttentionType: 0,  // LLAMA_ATTENTION_TYPE_CAUSAL
+			FlashAttn:     -1, // LLAMA_FLASH_ATTN_TYPE_AUTO
+		},
 	}
 }
 
@@ -1083,7 +1109,9 @@ func LoadGenerationModel(opts GenerationOptions) (*GenerationModel, error) {
 
 	modelCtxTrain := int(C.get_n_ctx_train(model))
 	ctxSize, batchSize := resolveGenerationContextAndBatch(opts, modelCtxTrain)
-	ctx := C.create_gen_context(model, C.int(ctxSize), C.int(batchSize), C.int(opts.Threads))
+	f := opts.Features
+	ctx := C.create_gen_context(model, C.int(ctxSize), C.int(batchSize), C.int(opts.Threads),
+		C.int(f.CtxType), C.int(f.PoolingType), C.int(f.AttentionType), C.int(f.FlashAttn))
 	if ctx == nil {
 		C.free_model(model)
 		return nil, fmt.Errorf("failed to create generation context: %s", opts.ModelPath)

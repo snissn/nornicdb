@@ -6,6 +6,8 @@ package heimdall
 
 import (
 	"context"
+	"os"
+	"strconv"
 
 	"github.com/orneryd/nornicdb/pkg/localllm"
 )
@@ -22,12 +24,36 @@ func cgoGeneratorLoader(modelPath string, gpuLayers, contextSize, batchSize int)
 	opts.ContextSize = contextSize
 	opts.BatchSize = batchSize
 
+	// Apply Heimdall-specific context features from env
+	if v := envInt("NORNICDB_HEIMDALL_CTX_TYPE"); v != 0 {
+		opts.Features.CtxType = v
+	}
+	if v := envInt("NORNICDB_HEIMDALL_POOLING_TYPE"); v != 0 {
+		opts.Features.PoolingType = v
+	}
+	if v := envInt("NORNICDB_HEIMDALL_ATTENTION_TYPE"); v != 0 {
+		opts.Features.AttentionType = v
+	}
+	if v := envInt("NORNICDB_HEIMDALL_FLASH_ATTN"); v != 0 {
+		opts.Features.FlashAttn = v
+	}
+
 	model, err := localllm.LoadGenerationModel(opts)
 	if err != nil {
 		return nil, err
 	}
 
 	return &cgoGenerator{model: model}, nil
+}
+
+// envInt reads an env var as int, returns 0 if unset or invalid.
+func envInt(key string) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return 0
 }
 
 // cgoGenerator wraps localllm.GenerationModel to implement Generator interface.

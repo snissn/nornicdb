@@ -689,6 +689,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	serverConfig.EmbeddingDimensions = embeddingDim
 	serverConfig.EmbeddingCacheSize = embeddingCache
 	serverConfig.ModelsDir = cfg.Memory.ModelsDir
+	serverConfig.EmbeddingCtxType = cfg.Memory.EmbeddingCtxType
+	serverConfig.EmbeddingPoolingType = cfg.Memory.EmbeddingPoolingType
+	serverConfig.EmbeddingAttentionType = cfg.Memory.EmbeddingAttentionType
+	serverConfig.EmbeddingFlashAttn = cfg.Memory.EmbeddingFlashAttn
 	serverConfig.Headless = headless
 	serverConfig.BasePath = basePath
 	// serverConfig.EnablePprof = enablePprof // Commented out - can be enabled for profiling

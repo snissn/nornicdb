@@ -1,8 +1,8 @@
 # llama.cpp CUDA static library builder
 # Build once, reuse forever - saves ~15 min on every NornicDB build
 #
-# Build: docker build -f docker/Dockerfile.llama-cuda -t timothyswt/llama-cuda-libs:b9106 .
-# Push:  docker push timothyswt/llama-cuda-libs:b9106
+# Build: docker build -f docker/Dockerfile.llama-cuda -t timothyswt/llama-cuda-libs:b9410 .
+# Push:  docker push timothyswt/llama-cuda-libs:b9410
 
 ARG CUDA_VERSION=12.6.0
 
@@ -11,18 +11,18 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git ca-certificates && rm -rf /var/lib/apt/lists/*
 
-ARG LLAMA_VERSION=b9106
+ARG LLAMA_VERSION=b9410
 ARG LLAMA_BUILD_JOBS=2
 WORKDIR /llama
 RUN git clone --depth 1 --branch ${LLAMA_VERSION} https://github.com/ggerganov/llama.cpp.git . && \
     cmake -B build \
       -DLLAMA_STATIC=ON -DBUILD_SHARED_LIBS=OFF \
       -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
-      -DLLAMA_CURL=OFF \
-            -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DGGML_CUDA_NCCL=OFF \
+      -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_CURL=OFF \
+      -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DGGML_CUDA_NCCL=OFF \
       -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON && \
-    cmake --build build --config Release -j${LLAMA_BUILD_JOBS}
+    cmake --build build --config Release --target llama --target ggml -j${LLAMA_BUILD_JOBS}
 
 # Combine and export
 RUN mkdir -p /output/lib /output/include && \
