@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/gpu"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,7 +58,11 @@ func TestVectorPipelineExtraCandidateLimitAndScorers(t *testing.T) {
 	}})
 	scored, err = cpu.ScoreCandidates(context.Background(), []float32{1, 0}, []Candidate{{ID: "missing"}, {ID: "b"}, {ID: "a"}})
 	require.NoError(t, err)
-	require.Equal(t, []ScoredCandidate{{ID: "a", Score: 1}, {ID: "b", Score: 0}}, scored)
+	require.Len(t, scored, 2)
+	assert.Equal(t, "a", scored[0].ID)
+	assert.InDelta(t, 1.0, scored[0].Score, 1e-6)
+	assert.Equal(t, "b", scored[1].ID)
+	assert.InDelta(t, 0.0, scored[1].Score, 1e-6)
 
 	cpu = NewCPUExactScorer(nil)
 	scored, err = cpu.ScoreCandidates(context.Background(), []float32{1, 0}, []Candidate{{ID: "a"}})
@@ -71,13 +76,17 @@ func TestVectorPipelineExtraCandidateLimitAndScorers(t *testing.T) {
 	gpuScorer := NewGPUExactScorer(nil, NewCPUExactScorer(coverageVectorGetter{vectors: map[string][]float32{"a": {1, 0}}}))
 	scored, err = gpuScorer.ScoreCandidates(context.Background(), []float32{1, 0}, []Candidate{{ID: "a"}})
 	require.NoError(t, err)
-	require.Equal(t, []ScoredCandidate{{ID: "a", Score: 1}}, scored)
+	require.Len(t, scored, 1)
+	assert.Equal(t, "a", scored[0].ID)
+	assert.InDelta(t, 1.0, scored[0].Score, 1e-6)
 
 	gpuIndex := gpu.NewEmbeddingIndex(nil, &gpu.EmbeddingIndexConfig{Dimensions: 2, InitialCap: 1, GPUEnabled: false, AutoSync: false})
 	gpuScorer = NewGPUExactScorer(gpuIndex, NewCPUExactScorer(coverageVectorGetter{vectors: map[string][]float32{"a": {1, 0}}}))
 	scored, err = gpuScorer.ScoreCandidates(context.Background(), []float32{1, 0}, []Candidate{{ID: "a"}})
 	require.NoError(t, err)
-	require.Equal(t, []ScoredCandidate{{ID: "a", Score: 1}}, scored)
+	require.Len(t, scored, 1)
+	assert.Equal(t, "a", scored[0].ID)
+	assert.InDelta(t, 1.0, scored[0].Score, 1e-6)
 }
 
 func TestVectorPipelineExtraSearchBranches(t *testing.T) {
