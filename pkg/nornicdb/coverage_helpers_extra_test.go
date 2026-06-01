@@ -188,9 +188,11 @@ func TestDBQueryEmbeddingBranchHelpers(t *testing.T) {
 	emb = &coverageQueryEmbedder{chunks: []string{"a", "b", "c"}, batch: [][]float32{{1, 0, 0}, {}, {0, 1, 0}, {1, 2}}}
 	vec, err = db.embedQueryWithEmbedder(context.Background(), emb, "many")
 	require.NoError(t, err)
-	require.InEpsilon(t, 0.707106, vec[0], 0.0001)
-	require.InEpsilon(t, 0.707106, vec[1], 0.0001)
-	require.InDelta(t, 0.0, vec[2], 0.0001)
+	require.Equal(t, []float32{1, 0, 0}, vec)
+	chunks, embs, err := db.embedQueryChunksWithEmbedder(context.Background(), emb, "many")
+	require.NoError(t, err)
+	require.Equal(t, []string{"a", "b", "c"}, chunks)
+	require.Equal(t, [][]float32{{1, 0, 0}, {}, {0, 1, 0}, {1, 2}}, embs)
 
 	batchErr := errors.New("batch failed")
 	emb = &coverageQueryEmbedder{chunks: []string{"a", "b"}, batchErr: batchErr}
@@ -203,11 +205,11 @@ func TestDBQueryEmbeddingBranchHelpers(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, vec)
 
-	chunks := make([]string, 40)
-	for i := range chunks {
-		chunks[i] = "chunk"
+	manyChunks := make([]string, 40)
+	for i := range manyChunks {
+		manyChunks[i] = "chunk"
 	}
-	gotChunks, err := db.chunkQueryWithEmbedder(context.Background(), &coverageQueryEmbedder{chunks: chunks}, "query")
+	gotChunks, err := db.chunkQueryWithEmbedder(context.Background(), &coverageQueryEmbedder{chunks: manyChunks}, "query")
 	require.NoError(t, err)
 	require.Len(t, gotChunks, 32)
 
@@ -290,6 +292,10 @@ func TestDBPublicQueryEmbeddingAndChunkingBranches(t *testing.T) {
 	vec, err := db.EmbedQuery(context.Background(), "query")
 	require.NoError(t, err)
 	require.Equal(t, []float32{1, 0, 0}, vec)
+	chunks, embs, err := db.EmbedQueryChunks(context.Background(), "query")
+	require.NoError(t, err)
+	require.Equal(t, []string{"default-a", "default-b"}, chunks)
+	require.Equal(t, [][]float32{{1, 0, 0}, {1, 0, 0}}, embs)
 
 	cfg := &embed.Config{Provider: "ollama", Model: "special", Dimensions: 3}
 	specialEmbedder := &coverageQueryEmbedder{chunks: []string{"special"}, embed: []float32{0, 1, 0}}

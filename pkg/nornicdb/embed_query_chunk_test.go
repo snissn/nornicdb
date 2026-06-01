@@ -147,7 +147,7 @@ func TestDB_EmbedQuery_ShortQuery_UsesEmbed(t *testing.T) {
 	require.Equal(t, 0, batchCalls)
 }
 
-func TestDB_EmbedQuery_LongQuery_UsesEmbedBatchOnChunks(t *testing.T) {
+func TestDB_EmbedQuery_LongQuery_UsesFirstChunkForCompatibility(t *testing.T) {
 	emb := &chunkingTestEmbedder{dims: 4}
 	db := &DB{embedQueue: &EmbedQueue{embedder: emb}}
 
@@ -166,6 +166,30 @@ func TestDB_EmbedQuery_LongQuery_UsesEmbedBatchOnChunks(t *testing.T) {
 	require.Equal(t, 0, embedCalls, "expected long query path to avoid single-text embedding")
 	require.Equal(t, 1, batchCalls, "expected long query path to batch-embed chunks once")
 	require.Greater(t, maxLen, 0)
+	require.LessOrEqual(t, maxTokens, 512, "expected all embedded chunks to be <= 512 tokens")
+}
+
+func TestDB_EmbedQueryChunks_LongQuery_ReturnsChunkEmbeddings(t *testing.T) {
+	emb := &chunkingTestEmbedder{dims: 4}
+	db := &DB{embedQueue: &EmbedQueue{embedder: emb}}
+
+	longQuery := loadLargeDocQuery(t)
+	chunks, embs, err := db.EmbedQueryChunks(context.Background(), longQuery)
+	require.NoError(t, err)
+	require.Greater(t, len(chunks), 1)
+	require.Len(t, embs, len(chunks))
+	for _, vec := range embs {
+		require.Len(t, vec, 4)
+	}
+
+	emb.mu.Lock()
+	embedCalls := emb.embedCalls
+	batchCalls := emb.embedBatchCall
+	maxTokens := emb.maxTokens
+	emb.mu.Unlock()
+
+	require.Equal(t, 0, embedCalls, "expected long query path to avoid single-text embedding")
+	require.Equal(t, 1, batchCalls, "expected long query path to batch-embed chunks once")
 	require.LessOrEqual(t, maxTokens, 512, "expected all embedded chunks to be <= 512 tokens")
 }
 
@@ -240,7 +264,7 @@ func TestDB_EmbedQueryWithEmbedder_EdgeBranches(t *testing.T) {
 		require.Nil(t, vec)
 	})
 
-	t.Run("batch averages only valid dimensions and normalizes", func(t *testing.T) {
+	t.Run("batch returns first valid chunk for single-vector compatibility", func(t *testing.T) {
 		db := &DB{}
 		emb := &scriptedBatchEmbedder{
 			batchVecs: [][]float32{
@@ -253,9 +277,8 @@ func TestDB_EmbedQueryWithEmbedder_EdgeBranches(t *testing.T) {
 		vec, err := db.embedQueryWithEmbedder(context.Background(), emb, loadLargeDocQuery(t))
 		require.NoError(t, err)
 		require.Len(t, vec, 3)
-		// Average([1,0,0],[0,1,0]) => [0.5,0.5,0] then normalized.
-		require.InDelta(t, 0.7071, vec[0], 0.01)
-		require.InDelta(t, 0.7071, vec[1], 0.01)
+		require.InDelta(t, 1.0, vec[0], 0.0001)
+		require.InDelta(t, 0.0, vec[1], 0.0001)
 		require.InDelta(t, 0.0, vec[2], 0.0001)
 	})
 }

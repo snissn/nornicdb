@@ -49,7 +49,6 @@ import (
 	"github.com/orneryd/nornicdb/pkg/encryption"
 	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/knowledgepolicy"
-	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/observability"
 	"github.com/orneryd/nornicdb/pkg/replication"
 	"github.com/orneryd/nornicdb/pkg/retention"
@@ -2225,60 +2224,122 @@ func (db *DB) ClearAllEmbeddings() (int, error) {
 	return 0, fmt.Errorf("storage engine does not support ClearAllEmbeddings")
 }
 
-// embedQueryWithEmbedder runs the shared query-embedding logic (chunking + average) with the given embedder.
-func (db *DB) embedQueryWithEmbedder(ctx context.Context, emb embed.Embedder, query string) ([]float32, error) {
+// embedQueryChunksWithEmbedder runs query chunking and embeds each chunk.
+// Callers that can score multiple query vectors should use this shape and keep
+// the best result across chunks instead of collapsing the query into a centroid.
+func (db *DB) embedQueryChunksWithEmbedder(ctx context.Context, emb embed.Embedder, query string) ([]string, [][]float32, error) {
 	if emb == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	chunks, err := db.chunkQueryWithEmbedder(ctx, emb, query)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if len(chunks) <= 1 {
-		return emb.Embed(ctx, query)
+	if len(chunks) == 0 {
+		return nil, nil, nil
 	}
-	const (
-		maxQueryChunks = 32
-	)
-	if len(chunks) > maxQueryChunks {
-		chunks = chunks[:maxQueryChunks]
+	if len(chunks) == 1 {
+		vec, err := emb.Embed(ctx, chunks[0])
+		if err != nil || len(vec) == 0 {
+			return chunks, nil, err
+		}
+		return chunks, [][]float32{vec}, nil
 	}
 	embs, err := emb.EmbedBatch(ctx, chunks)
 	if len(embs) == 0 {
 		if err != nil {
-			return nil, err
+			return chunks, nil, err
 		}
-		return nil, nil
+		return chunks, nil, nil
 	}
-	var sum []float32
-	var count int
+	return chunks, embs, err
+}
+
+// embedQueryWithEmbedder returns a single query embedding for compatibility-only callers.
+// Multi-chunk queries are intentionally not averaged; callers that need full
+// recall should use embedQueryChunksWithEmbedder and score best-of chunks.
+func (db *DB) embedQueryWithEmbedder(ctx context.Context, emb embed.Embedder, query string) ([]float32, error) {
+	_, embs, err := db.embedQueryChunksWithEmbedder(ctx, emb, query)
+	if err != nil || len(embs) == 0 {
+		return nil, err
+	}
 	for _, v := range embs {
-		if len(v) == 0 {
-			continue
+		if len(v) > 0 {
+			return v, nil
 		}
-		if sum == nil {
-			sum = make([]float32, len(v))
-		}
-		if len(v) != len(sum) {
-			continue
-		}
-		for i := range v {
-			sum[i] += v[i]
-		}
-		count++
 	}
-	if count == 0 {
+	return nil, nil
+}
+
+func (db *DB) validateQueryEmbeddingDimensions(dbName string, vec []float32) error {
+	db.dbConfigResolverMu.RLock()
+	resolver := db.dbConfigResolver
+	db.dbConfigResolverMu.RUnlock()
+	if resolver == nil || len(vec) == 0 {
+		return nil
+	}
+	resolvedDims, _, _ := resolver(dbName)
+	if resolvedDims <= 0 {
+		return nil
+	}
+	if len(vec) != resolvedDims {
+		return fmt.Errorf("database %q: %w (index dims %d, query dims %d)",
+			dbName, ErrQueryEmbeddingDimensionMismatch, resolvedDims, len(vec))
+	}
+	return nil
+}
+
+func (db *DB) validateQueryEmbeddingBatchDimensions(dbName string, embs [][]float32) error {
+	for _, vec := range embs {
+		if err := db.validateQueryEmbeddingDimensions(dbName, vec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) embedQueryChunksForDBWithEmbedder(ctx context.Context, dbName string, emb embed.Embedder, query string) ([]string, [][]float32, error) {
+	chunks, embs, err := db.embedQueryChunksWithEmbedder(ctx, emb, query)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := db.validateQueryEmbeddingBatchDimensions(dbName, embs); err != nil {
+		return nil, nil, err
+	}
+	return chunks, embs, nil
+}
+
+// EmbedQueryChunks returns embedder-safe query chunks and one embedding per chunk.
+// This is the preferred API for search paths that should compare best-of chunks.
+func (db *DB) EmbedQueryChunks(ctx context.Context, query string) ([]string, [][]float32, error) {
+	if db.embedQueue == nil || db.embedQueue.embedder == nil {
+		return nil, nil, nil
+	}
+	return db.embedQueryChunksWithEmbedder(ctx, db.embedQueue.embedder, query)
+}
+
+// EmbedQueryChunksForDB returns per-chunk query embeddings using the embedder configured for a database.
+func (db *DB) EmbedQueryChunksForDB(ctx context.Context, dbName string, query string) ([]string, [][]float32, error) {
+	db.mu.RLock()
+	useRegistry := db.embedConfigForDB != nil
+	db.mu.RUnlock()
+	if useRegistry {
+		emb, err := db.getOrCreateEmbedderForDB(dbName)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, nil
+		if emb != nil {
+			return db.embedQueryChunksForDBWithEmbedder(ctx, dbName, emb, query)
+		}
 	}
-	inv := float32(1.0 / float32(count))
-	for i := range sum {
-		sum[i] *= inv
+	chunks, embs, err := db.EmbedQueryChunks(ctx, query)
+	if err != nil {
+		return nil, nil, err
 	}
-	vector.NormalizeInPlace(sum)
-	return sum, nil
+	if err := db.validateQueryEmbeddingBatchDimensions(dbName, embs); err != nil {
+		return nil, nil, err
+	}
+	return chunks, embs, nil
 }
 
 func (db *DB) chunkQueryWithEmbedder(ctx context.Context, emb embed.Embedder, query string) ([]string, error) {
@@ -2339,19 +2400,8 @@ func (db *DB) EmbedQueryForDB(ctx context.Context, dbName string, query string) 
 	if err != nil {
 		return nil, err
 	}
-	db.dbConfigResolverMu.RLock()
-	resolver := db.dbConfigResolver
-	db.dbConfigResolverMu.RUnlock()
-	if resolver == nil || len(vec) == 0 {
-		return vec, nil
-	}
-	resolvedDims, _, _ := resolver(dbName)
-	if resolvedDims <= 0 {
-		return vec, nil
-	}
-	if len(vec) != resolvedDims {
-		return nil, fmt.Errorf("database %q: %w (index dims %d, query dims %d)",
-			dbName, ErrQueryEmbeddingDimensionMismatch, resolvedDims, len(vec))
+	if err := db.validateQueryEmbeddingDimensions(dbName, vec); err != nil {
+		return nil, err
 	}
 	return vec, nil
 }
