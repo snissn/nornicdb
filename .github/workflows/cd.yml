@@ -27,6 +27,7 @@ jobs:
     outputs:
       checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
       version: ${{ steps.meta.outputs.version }}
+      publish_latest: ${{ steps.meta.outputs.publish_latest }}
       docker_repo: ${{ steps.meta.outputs.docker_repo }}
       llama_cpu_image: ${{ steps.meta.outputs.llama_cpu_image }}
       llama_version: ${{ steps.meta.outputs.llama_version }}
@@ -66,6 +67,10 @@ jobs:
             VERSION_INPUT="${GITHUB_REF_NAME}"
           fi
           VERSION_TAG="$(sanitize_tag "$VERSION_INPUT")"
+          PUBLISH_LATEST=false
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && printf '%s' "$VERSION_INPUT" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            PUBLISH_LATEST=true
+          fi
           LLAMA_VERSION="$(sed -n 's/^LLAMA_VERSION ?= //p' Makefile | head -n1)"
           if [ -z "$LLAMA_VERSION" ]; then
             echo "Failed to determine LLAMA_VERSION from Makefile" >&2
@@ -73,6 +78,7 @@ jobs:
           fi
           echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
+          echo "publish_latest=${PUBLISH_LATEST}" >> "$GITHUB_OUTPUT"
           echo "docker_repo=${DOCKERHUB_USERNAME}" >> "$GITHUB_OUTPUT"
           echo "llama_cpu_image=${DOCKERHUB_USERNAME}/llama-cpu-libs:${LLAMA_VERSION}" >> "$GITHUB_OUTPUT"
           echo "llama_version=${LLAMA_VERSION}" >> "$GITHUB_OUTPUT"
@@ -169,6 +175,19 @@ jobs:
         run: |
           docker info 2>/dev/null | grep -i "^ Username:" || (echo "::error::Docker Hub login did not produce an authenticated session"; exit 1)
 
+      - name: Resolve image tags
+        id: image-tags
+        run: |
+          IMAGE_BASE="${{ needs.meta.outputs.docker_repo }}/${{ matrix.image_repo }}"
+          {
+            echo 'value<<EOF'
+            echo "${IMAGE_BASE}:${{ needs.meta.outputs.version }}"
+            if [ "${{ needs.meta.outputs.publish_latest }}" = "true" ]; then
+              echo "${IMAGE_BASE}:latest"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
@@ -177,7 +196,7 @@ jobs:
           platforms: ${{ matrix.platforms }}
           push: true
           provenance: false
-          tags: ${{ needs.meta.outputs.docker_repo }}/${{ matrix.image_repo }}:${{ needs.meta.outputs.version }}
+          tags: ${{ steps.image-tags.outputs.value }}
           build-args: |
             LLAMA_CPU_IMAGE=${{ needs.meta.outputs.llama_cpu_image }}
             ${{ matrix.build_args }}
@@ -230,6 +249,19 @@ jobs:
         run: |
           docker info 2>/dev/null | grep -i "^ Username:" || (echo "::error::Docker Hub login did not produce an authenticated session"; exit 1)
 
+      - name: Resolve image tags
+        id: image-tags
+        run: |
+          IMAGE_BASE="${{ needs.meta.outputs.docker_repo }}/${{ matrix.image_repo }}"
+          {
+            echo 'value<<EOF'
+            echo "${IMAGE_BASE}:${{ needs.meta.outputs.version }}"
+            if [ "${{ needs.meta.outputs.publish_latest }}" = "true" ]; then
+              echo "${IMAGE_BASE}:latest"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push CUDA image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
@@ -238,10 +270,9 @@ jobs:
           platforms: linux/amd64
           push: true
           provenance: false
-          tags: ${{ needs.meta.outputs.docker_repo }}/${{ matrix.image_repo }}:${{ needs.meta.outputs.version }}
+          tags: ${{ steps.image-tags.outputs.value }}
           build-args: |
             LLAMA_CUDA_IMAGE=${{ needs.meta.outputs.llama_cuda_image }}
             ${{ matrix.build_args }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
