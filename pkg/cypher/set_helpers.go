@@ -136,6 +136,9 @@ func (e *StorageExecutor) applySetMapMergeToNode(ctx context.Context, node *stor
 	if m, ok := resolveDirectParamRef(ctx, rightExpr); ok {
 		if props, ok := toStringAnyMap(m); ok {
 			for k, v := range props {
+				if v == nil {
+					continue
+				}
 				setNodeProperty(node, k, normalizePropValue(v))
 			}
 			return
@@ -153,6 +156,9 @@ func (e *StorageExecutor) applySetMapMergeToNode(ctx context.Context, node *stor
 
 	if m, ok := toStringAnyMap(evaluated); ok {
 		for k, v := range m {
+			if v == nil {
+				continue
+			}
 			setNodeProperty(node, k, v)
 		}
 	}

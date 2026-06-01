@@ -454,6 +454,52 @@ func TestMergeNode_OnCreateOnMatchNarySetMapMergePreservesCreated(t *testing.T) 
 	require.Equal(t, "matched-input", verifyMatched.Rows[0][2])
 }
 
+func TestMergeNode_OnCreateOnMatchMapMergeAuditKeysDoNotClobberBranchTimestamps(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	query := `MERGE (p:Pds {url: $node.url}) ON CREATE SET p.created = timestamp(), p += $node ON MATCH SET p.updated = timestamp(), p += $node RETURN p`
+	params := map[string]interface{}{
+		"node": map[string]interface{}{
+			"url":     "https://example.test/audit-clobber",
+			"created": nil,
+			"name":    "first",
+		},
+	}
+
+	_, err := exec.Execute(ctx, query, params)
+	require.NoError(t, err)
+
+	created, err := exec.Execute(ctx, `MATCH (p:Pds {url: $url}) RETURN p.created, p.updated, p.name`, map[string]interface{}{
+		"url": "https://example.test/audit-clobber",
+	})
+	require.NoError(t, err)
+	require.Len(t, created.Rows, 1)
+	require.NotNil(t, created.Rows[0][0], "explicit ON CREATE timestamp must survive later p += $node")
+	require.Nil(t, created.Rows[0][1], "ON MATCH timestamp must not be present on create")
+	require.Equal(t, "first", created.Rows[0][2])
+
+	params["node"] = map[string]interface{}{
+		"url":     "https://example.test/audit-clobber",
+		"created": nil,
+		"updated": nil,
+		"name":    "second",
+	}
+	_, err = exec.Execute(ctx, query, params)
+	require.NoError(t, err)
+
+	matched, err := exec.Execute(ctx, `MATCH (p:Pds {url: $url}) RETURN p.created, p.updated, p.name`, map[string]interface{}{
+		"url": "https://example.test/audit-clobber",
+	})
+	require.NoError(t, err)
+	require.Len(t, matched.Rows, 1)
+	require.NotNil(t, matched.Rows[0][0], "ON MATCH map merge must not remove created")
+	require.NotNil(t, matched.Rows[0][1], "explicit ON MATCH timestamp must survive later p += $node")
+	require.Equal(t, "second", matched.Rows[0][2])
+}
+
 func TestMergeRelationship_Idempotent(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
