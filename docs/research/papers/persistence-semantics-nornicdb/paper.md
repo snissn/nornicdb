@@ -1,7 +1,7 @@
 ---
 title: "Database-Native Persistence Semantics for Agent Memory"
 subtitle: "Workshop-Style Draft"
-author: "NornicDB Project"
+author: "TJ Sweet (OrneryD)"
 date: "May 2026"
 lang: en-US
 keywords:
