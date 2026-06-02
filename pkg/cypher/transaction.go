@@ -400,6 +400,23 @@ func (e *StorageExecutor) executeQueryAgainstStorage(ctx context.Context, cypher
 		return e.executeCompoundMatchCreate(ctx, cypher)
 	}
 
+	// Neo4j allows SET immediately after CREATE. Keep this ahead of the
+	// generic SET router so explicit transactions use the same CREATE...SET
+	// handler as the normal autocommit path.
+	hasSet := containsKeywordOutsideStrings(cypher, "SET")
+	hasOnCreateSet := containsKeywordOutsideStrings(cypher, "ON CREATE SET")
+	hasOnMatchSet := containsKeywordOutsideStrings(cypher, "ON MATCH SET")
+	if strings.HasPrefix(upper, "CREATE") &&
+		!isCreateProcedureCommand(cypher) &&
+		hasSet &&
+		!hasOnCreateSet &&
+		!hasOnMatchSet &&
+		findMultiWordKeywordIndex(cypher, "CREATE", "DECAY PROFILE") != 0 &&
+		findMultiWordKeywordIndex(cypher, "CREATE", "PROMOTION PROFILE") != 0 &&
+		findMultiWordKeywordIndex(cypher, "CREATE", "PROMOTION POLICY") != 0 {
+		return e.executeCreateSet(ctx, cypher)
+	}
+
 	// Check for DELETE queries (MATCH...DELETE, DETACH DELETE)
 	// But NOT if it's a MATCH...CREATE...DELETE pattern (handled above)
 	hasCreate := findKeywordIndex(cypher, "CREATE") > 0

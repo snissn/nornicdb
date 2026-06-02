@@ -2307,7 +2307,6 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 
 	// Find clause boundaries
 	setIdx := findKeywordIndex(normalized, "SET")
-	returnIdx := findKeywordIndex(normalized, "RETURN")
 
 	if setIdx < 0 {
 		return nil, fmt.Errorf("SET clause not found in CREATE...SET query")
@@ -2316,12 +2315,13 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 	// Extract CREATE part (everything before SET)
 	createPart := strings.TrimSpace(normalized[:setIdx])
 
-	// Extract SET part (between SET and RETURN, or end)
-	var setPart string
-	if returnIdx > 0 {
-		setPart = strings.TrimSpace(normalized[setIdx+4 : returnIdx])
-	} else {
-		setPart = strings.TrimSpace(normalized[setIdx+4:])
+	// Extract SET part and any trailing clauses after SET.
+	setTail := strings.TrimSpace(normalized[setIdx+4:])
+	setPart := setTail
+	trailingPart := ""
+	if postSetIdx := firstPostSetClauseIndex(setTail); postSetIdx >= 0 {
+		setPart = strings.TrimSpace(setTail[:postSetIdx])
+		trailingPart = strings.TrimSpace(setTail[postSetIdx:])
 	}
 	setPart = collapseChainedSetClauses(setPart)
 	setPartForAssignments := setPart
@@ -2476,9 +2476,112 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 		}
 	}
 
+	// Process trailing clauses in CREATE...SET pipelines.
+	// Supported forms:
+	//   CREATE (...) SET ... CREATE (...) RETURN ...
+	//   CREATE (...) SET ... WITH x CREATE (...) RETURN ...
+	remainingTrailing := strings.TrimSpace(trailingPart)
+	for remainingTrailing != "" {
+		upperTrailing := strings.ToUpper(remainingTrailing)
+
+		if strings.HasPrefix(upperTrailing, "RETURN ") {
+			break
+		}
+
+		if strings.HasPrefix(upperTrailing, "WITH ") {
+			afterWith := strings.TrimSpace(remainingTrailing[len("WITH "):])
+			nextClauseIdx := -1
+			for _, kw := range []string{"CREATE", "RETURN"} {
+				if idx := findKeywordIndex(afterWith, kw); idx >= 0 {
+					if nextClauseIdx == -1 || idx < nextClauseIdx {
+						nextClauseIdx = idx
+					}
+				}
+			}
+			if nextClauseIdx < 0 {
+				return nil, fmt.Errorf("WITH in CREATE...SET requires CREATE or RETURN clause")
+			}
+			withProjection := strings.TrimSpace(afterWith[:nextClauseIdx])
+			remainingTrailing = strings.TrimSpace(afterWith[nextClauseIdx:])
+			if withProjection == "" {
+				return nil, fmt.Errorf("WITH clause cannot be empty")
+			}
+
+			projectedNodes := make(map[string]*storage.Node)
+			projectedEdges := make(map[string]*storage.Edge)
+			for _, item := range strings.Split(withProjection, ",") {
+				item = strings.TrimSpace(item)
+				if item == "" {
+					continue
+				}
+				alias := ""
+				expr := item
+				if asIdx := findKeywordIndex(item, "AS"); asIdx > 0 {
+					expr = strings.TrimSpace(item[:asIdx])
+					alias = strings.TrimSpace(item[asIdx+2:])
+				}
+				if alias == "" {
+					alias = strings.TrimSpace(expr)
+				}
+				if alias == "" {
+					return nil, fmt.Errorf("invalid WITH item: %q", item)
+				}
+
+				if node, ok := createdNodes[strings.TrimSpace(expr)]; ok {
+					projectedNodes[alias] = node
+					continue
+				}
+				if edge, ok := createdEdges[strings.TrimSpace(expr)]; ok {
+					projectedEdges[alias] = edge
+					continue
+				}
+
+				evaluated := e.evaluateExpressionWithContext(ctx, expr, createdNodes, createdEdges)
+				switch v := evaluated.(type) {
+				case *storage.Node:
+					if v != nil {
+						projectedNodes[alias] = v
+					}
+				case *storage.Edge:
+					if v != nil {
+						projectedEdges[alias] = v
+					}
+				default:
+					return nil, fmt.Errorf("WITH item %q does not resolve to a node or relationship in CREATE...SET scope", item)
+				}
+			}
+
+			clear(createdNodes)
+			for k, v := range projectedNodes {
+				createdNodes[k] = v
+			}
+			clear(createdEdges)
+			for k, v := range projectedEdges {
+				createdEdges[k] = v
+			}
+			continue
+		}
+
+		if strings.HasPrefix(upperTrailing, "CREATE ") {
+			createChunk := remainingTrailing
+			if retIdx := findKeywordIndex(remainingTrailing, "RETURN"); retIdx > 0 {
+				createChunk = strings.TrimSpace(remainingTrailing[:retIdx])
+				remainingTrailing = strings.TrimSpace(remainingTrailing[retIdx:])
+			} else {
+				remainingTrailing = ""
+			}
+			if err := e.applyCreateClausesInScope(ctx, createChunk, createdNodes, createdEdges, result, store); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		return nil, fmt.Errorf("unsupported clause after SET in CREATE...SET query: %s", strings.Fields(remainingTrailing)[0])
+	}
+
 	// Handle RETURN clause
-	if returnIdx > 0 {
-		returnPart := strings.TrimSpace(normalized[returnIdx+6:])
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(remainingTrailing)), "RETURN ") {
+		returnPart := strings.TrimSpace(strings.TrimSpace(remainingTrailing)[len("RETURN "):])
 		returnItems := e.parseReturnItems(returnPart)
 		row := make([]interface{}, len(returnItems))
 
@@ -2533,6 +2636,52 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 	}
 
 	return result, nil
+}
+
+// applyCreateClausesInScope executes one or more CREATE clauses and mutates the
+// provided variable scope maps so trailing CREATE chains in CREATE...SET queries
+// can reference previously created variables.
+func (e *StorageExecutor) applyCreateClausesInScope(
+	ctx context.Context,
+	createPart string,
+	nodeVars map[string]*storage.Node,
+	edgeVars map[string]*storage.Edge,
+	result *ExecuteResult,
+	store storage.Engine,
+) error {
+	createClauses := createKeywordPattern.Split(strings.TrimSpace(createPart), -1)
+	for _, clause := range createClauses {
+		clause = strings.TrimSpace(clause)
+		if clause == "" {
+			continue
+		}
+
+		var nodePatterns []string
+		var relPatterns []string
+		for _, pattern := range e.splitCreatePatterns(clause) {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			if containsOutsideStrings(pattern, "->") || containsOutsideStrings(pattern, "<-") || containsOutsideStrings(pattern, "]-") {
+				relPatterns = append(relPatterns, pattern)
+			} else {
+				nodePatterns = append(nodePatterns, pattern)
+			}
+		}
+
+		for _, np := range nodePatterns {
+			if err := e.processCreateNode(ctx, np, nodeVars, result, store); err != nil {
+				return err
+			}
+		}
+		for _, rp := range relPatterns {
+			if err := e.processCreateRelationship(ctx, rp, nodeVars, edgeVars, result, store); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // applySetMergeToCreated applies SET += property merge to created entities.
