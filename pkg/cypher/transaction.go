@@ -52,6 +52,7 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 
 	// Unwrap engine wrappers (Async/WAL/Namespaced) recursively.
 	engine := e.storage
+	namespaceHint := ""
 	visited := map[storage.Engine]bool{}
 	for engine != nil && !visited[engine] {
 		visited[engine] = true
@@ -64,6 +65,9 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 			continue
 		}
 		if namespacedEngine, ok := engine.(*storage.NamespacedEngine); ok {
+			if namespaceHint == "" {
+				namespaceHint = namespacedEngine.Namespace()
+			}
 			engine = namespacedEngine.GetInnerEngine()
 			continue
 		}
@@ -95,9 +99,22 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 	if !ok {
 		return nil, fmt.Errorf("engine does not support transactions")
 	}
+	if namespaceHint != "" {
+		if primer, ok := txEngine.(interface{ EnsureNamespaceMVCC(string) error }); ok {
+			if err := primer.EnsureNamespaceMVCC(namespaceHint); err != nil {
+				return nil, fmt.Errorf("failed to prime transaction namespace: %w", err)
+			}
+		}
+	}
 	tx, err := txEngine.BeginTransaction()
 	if err != nil {
 		return nil, fmt.Errorf("failed to start transaction: %w", err)
+	}
+	if namespaceHint != "" {
+		if err := tx.SetNamespace(namespaceHint); err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("failed to pin transaction namespace: %w", err)
+		}
 	}
 	if err := tx.SetDeferredConstraintValidation(true); err != nil {
 		_ = tx.Rollback()

@@ -217,3 +217,43 @@ func TestPerNamespaceMVCC_LegacyGlobalCounterSeedsNewNamespace(t *testing.T) {
 	require.Equal(t, legacy+1, v.CommitSequence,
 		"first commit in upgraded namespace must be legacySeed+1, never colliding with pre-existing versions")
 }
+
+func TestEnsureNamespaceMVCC_RecoversSequenceFromExistingHeadsAfterReopen(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := NewBadgerEngine(dir)
+	require.NoError(t, err)
+
+	_, err = engine.CreateNode(&Node{ID: NodeID("nornic:node-1"), Labels: []string{"L"}})
+	require.NoError(t, err)
+
+	persistedBeforeClose, err := engine.loadPersistedNamespaceSequence("nornic")
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), persistedBeforeClose,
+		"non-transactional writes do not persist the namespace sequence, so reopen must recover from MVCC heads")
+
+	require.NoError(t, engine.Close())
+
+	reopened, err := NewBadgerEngine(dir)
+	require.NoError(t, err)
+	defer reopened.Close()
+
+	require.NoError(t, reopened.EnsureNamespaceMVCC("nornic"))
+
+	persistedAfterEnsure, err := reopened.loadPersistedNamespaceSequence("nornic")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), persistedAfterEnsure,
+		"EnsureNamespaceMVCC must persist the recovered namespace floor so later restarts do not fall back to seq=0")
+
+	tx, err := reopened.BeginTransaction()
+	require.NoError(t, err)
+	require.NoError(t, tx.SetNamespace("nornic"))
+	require.Equal(t, uint64(1), tx.readTS.CommitSequence,
+		"transaction snapshot must bind to the recovered namespace sequence instead of seq=0")
+
+	node, err := tx.GetNode(NodeID("nornic:node-1"))
+	require.NoError(t, err)
+	node.Properties = map[string]any{"updated": true}
+	require.NoError(t, tx.UpdateNode(node))
+	require.NoError(t, tx.Commit(),
+		"updating a pre-reopen node must not conflict against a recovered namespace floor")
+}

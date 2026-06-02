@@ -1914,9 +1914,22 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 	}
 
 	// Start implicit transaction
+	if engines.namespace != "" {
+		if primer, ok := txEngine.(interface{ EnsureNamespaceMVCC(string) error }); ok {
+			if err := primer.EnsureNamespaceMVCC(engines.namespace); err != nil {
+				return nil, fmt.Errorf("failed to prime implicit transaction namespace: %w", err)
+			}
+		}
+	}
 	tx, err := txEngine.BeginTransaction()
 	if err != nil {
 		return nil, fmt.Errorf("failed to start implicit transaction: %w", err)
+	}
+	if engines.namespace != "" {
+		if err := tx.SetNamespace(engines.namespace); err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("failed to pin implicit transaction namespace: %w", err)
+		}
 	}
 
 	// Defer constraint validation to commit for implicit transactions.

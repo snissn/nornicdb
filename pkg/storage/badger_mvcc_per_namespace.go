@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -113,10 +114,14 @@ func (b *BadgerEngine) namespaceMVCC(namespace string) (*namespaceMVCCState, err
 	if err != nil {
 		return nil, err
 	}
+	recoveredSeq, recoveredHighWater, err := b.recoverNamespaceMVCCFloor(namespace)
+	if err != nil {
+		return nil, err
+	}
 
 	b.mvccByNamespaceMu.Lock()
-	defer b.mvccByNamespaceMu.Unlock()
 	if existing, ok := b.mvccByNamespace[namespace]; ok {
+		b.mvccByNamespaceMu.Unlock()
 		return existing, nil
 	}
 	if b.mvccByNamespace == nil {
@@ -126,12 +131,77 @@ func (b *BadgerEngine) namespaceMVCC(namespace string) (*namespaceMVCCState, err
 	if b.mvccLegacyGlobalSeed > starting {
 		starting = b.mvccLegacyGlobalSeed
 	}
+	if recoveredSeq > starting {
+		starting = recoveredSeq
+	}
 	state = &namespaceMVCCState{
 		persistKey: mvccNamespaceSequenceKey(namespace),
 	}
 	state.seq.Store(starting)
+	if recoveredHighWater > 0 {
+		state.highWaterNanos.Store(recoveredHighWater)
+	}
 	b.mvccByNamespace[namespace] = state
+	b.mvccByNamespaceMu.Unlock()
+	if recoveredSeq > persisted {
+		b.persistMVCCSequence(namespace)
+	}
 	return state, nil
+}
+
+// EnsureNamespaceMVCC eagerly loads the per-namespace MVCC state so a
+// subsequent BeginTransaction snapshots the namespace's current sequence
+// instead of treating it like a post-begin namespace.
+func (b *BadgerEngine) EnsureNamespaceMVCC(namespace string) error {
+	if namespace == "" {
+		return nil
+	}
+	state, err := b.namespaceMVCC(namespace)
+	if err != nil {
+		return err
+	}
+	persisted, err := b.loadPersistedNamespaceSequence(namespace)
+	if err != nil {
+		return err
+	}
+	recoveredSeq, recoveredHighWater, err := b.recoverNamespaceMVCCFloor(namespace)
+	if err != nil {
+		return err
+	}
+	wantSeq := state.seq.Load()
+	if b.mvccLegacyGlobalSeed > wantSeq {
+		wantSeq = b.mvccLegacyGlobalSeed
+	}
+	if persisted > wantSeq {
+		wantSeq = persisted
+	}
+	if recoveredSeq > wantSeq {
+		wantSeq = recoveredSeq
+	}
+	for {
+		current := state.seq.Load()
+		if wantSeq <= current {
+			break
+		}
+		if state.seq.CompareAndSwap(current, wantSeq) {
+			break
+		}
+	}
+	if recoveredHighWater > 0 {
+		for {
+			current := state.highWaterNanos.Load()
+			if recoveredHighWater <= current {
+				break
+			}
+			if state.highWaterNanos.CompareAndSwap(current, recoveredHighWater) {
+				break
+			}
+		}
+	}
+	if wantSeq > persisted {
+		b.persistMVCCSequence(namespace)
+	}
+	return nil
 }
 
 // snapshotNamespaceVersions captures the current (sequence, high-water
@@ -150,12 +220,16 @@ func (b *BadgerEngine) snapshotNamespaceVersions() map[string]MVCCVersion {
 		return nil
 	}
 	out := make(map[string]MVCCVersion, len(b.mvccByNamespace))
+	now := time.Now().UTC()
 	for ns, state := range b.mvccByNamespace {
 		if state == nil {
 			continue
 		}
 		highWater := state.highWaterNanos.Load()
-		ts := time.Unix(0, int64(highWater)).UTC()
+		ts := now
+		if highWater > ts.UnixNano() {
+			ts = time.Unix(0, highWater).UTC()
+		}
 		out[ns] = MVCCVersion{
 			CommitTimestamp: ts,
 			CommitSequence:  state.seq.Load(),
@@ -188,6 +262,68 @@ func (b *BadgerEngine) loadPersistedNamespaceSequence(namespace string) (uint64,
 		return 0, err
 	}
 	return seq, nil
+}
+
+func (b *BadgerEngine) recoverNamespaceMVCCFloor(namespace string) (uint64, int64, error) {
+	if namespace == "" {
+		return 0, 0, nil
+	}
+	namespacePrefix := []byte(namespace + ":")
+	var maxSeq uint64
+	var maxTS int64
+
+	track := func(version MVCCVersion) {
+		if version.CommitSequence > maxSeq {
+			maxSeq = version.CommitSequence
+		}
+		if ts := version.CommitTimestamp.UTC().UnixNano(); ts > maxTS {
+			maxTS = ts
+		}
+	}
+
+	err := b.db.View(func(txn *badger.Txn) error {
+		for _, prefix := range []byte{prefixNode, prefixEdge} {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = []byte{prefix}
+			opts.PrefetchValues = false
+			it := txn.NewIterator(opts)
+			for it.Rewind(); it.ValidForPrefix(opts.Prefix); it.Next() {
+				key := it.Item().Key()
+				if len(key) <= 1 || !bytes.HasPrefix(key[1:], namespacePrefix) {
+					continue
+				}
+				if prefix == prefixNode {
+					head, err := b.loadNodeMVCCHeadInTxn(txn, NodeID(string(key[1:])))
+					if errors.Is(err, ErrNotFound) {
+						continue
+					}
+					if err != nil {
+						it.Close()
+						return err
+					}
+					track(head.Version)
+					track(head.FloorVersion)
+					continue
+				}
+				head, err := b.loadEdgeMVCCHeadInTxn(txn, EdgeID(string(key[1:])))
+				if errors.Is(err, ErrNotFound) {
+					continue
+				}
+				if err != nil {
+					it.Close()
+					return err
+				}
+				track(head.Version)
+				track(head.FloorVersion)
+			}
+			it.Close()
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return maxSeq, maxTS, nil
 }
 
 // nextNamespaceMVCCSequence atomically advances the namespace's commit
