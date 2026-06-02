@@ -160,6 +160,14 @@ func (b *BadgerEngine) EnsureNamespaceMVCC(namespace string) error {
 	if err != nil {
 		return err
 	}
+	// Hot path: once a live engine has already advanced this namespace's
+	// sequence and high-water mark, re-scanning all heads on every implicit
+	// write transaction is pure overhead. The expensive recovery path is only
+	// needed for cold/stale states (e.g. reopen after migration where the
+	// namespace was initialized at seq=0 before recovery ran).
+	if state.seq.Load() > 0 && state.highWaterNanos.Load() > 0 {
+		return nil
+	}
 	persisted, err := b.loadPersistedNamespaceSequence(namespace)
 	if err != nil {
 		return err
