@@ -3537,6 +3537,121 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 	}
 
 	nodePatternStr := strings.TrimSpace(initialSection[:nodePatternEnd])
+
+	// Detect traversal patterns in the initial MATCH (e.g. (p)-[:REL]->(s)).
+	// When the initial MATCH is a traversal, we must execute it as a full MATCH
+	// to collect the end-node results, since parseNodePattern only extracts the
+	// first node in the pattern.
+	hasTraversal := strings.Contains(nodePatternStr, "->") ||
+		strings.Contains(nodePatternStr, "<-") ||
+		strings.Contains(nodePatternStr, "-[")
+	if hasTraversal {
+		// Build a standalone MATCH query for the initial section and execute it.
+		// The result provides all bound variables (including traversal endpoints)
+		// that will be used as seeds for the OPTIONAL MATCH.
+		// Extract node variable names from the pattern for an explicit RETURN clause
+		// since RETURN * doesn't expand variables in the traversal executor.
+		patternVars := extractNodeVariables(nodePatternStr)
+		returnVars := strings.Join(patternVars, ", ")
+		if returnVars == "" {
+			returnVars = "*"
+		}
+		matchQuery := "MATCH " + initialSection + " RETURN " + returnVars
+		matchResult, matchErr := e.executeMatch(ctx, matchQuery)
+		if matchErr != nil {
+			return nil, fmt.Errorf("failed to execute initial traversal MATCH: %w", matchErr)
+		}
+
+		// Determine the variable that the OPTIONAL MATCH references (the
+		// source variable of the optional relationship pattern).
+		optRelPattern := e.parseOptionalRelPattern(ctx, optMatchPattern)
+		sourceVar := optRelPattern.sourceVar
+
+		// Find the column index for the source variable in the MATCH result.
+		sourceColIdx := -1
+		for ci, col := range matchResult.Columns {
+			if col == sourceVar {
+				sourceColIdx = ci
+				break
+			}
+		}
+		if sourceColIdx < 0 {
+			// Fallback: variable not found in result columns — cannot perform
+			// the OPTIONAL MATCH seed. Return empty result.
+			return &ExecuteResult{
+				Columns: []string{},
+				Rows:    [][]interface{}{},
+			}, nil
+		}
+
+		// Build joined rows by evaluating the OPTIONAL MATCH for each seed row.
+		type multiVarRow struct {
+			values  map[string]interface{} // variable -> node for all MATCH columns
+			related []optionalRelResult
+		}
+		var mvRows []multiVarRow
+		for _, row := range matchResult.Rows {
+			vals := make(map[string]interface{}, len(matchResult.Columns))
+			for ci, col := range matchResult.Columns {
+				vals[col] = row[ci]
+			}
+			seedNode, _ := vals[sourceVar].(*storage.Node)
+			var related []optionalRelResult
+			if seedNode != nil {
+				related = e.findOptionalRelatedNodes(ctx, seedNode, optMatchPattern, optRelPattern)
+			}
+			mvRows = append(mvRows, multiVarRow{values: vals, related: related})
+		}
+
+		// Evaluate RETURN clause against the joined rows.
+		returnPart := restOfQuery
+		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(returnPart)), "RETURN") {
+			// restOfQuery might start with WITH; try to find RETURN inside it
+			retIdx := findKeywordIndex(restOfQuery, "RETURN")
+			if retIdx >= 0 {
+				returnPart = strings.TrimSpace(restOfQuery[retIdx:])
+			}
+		}
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(returnPart)), "RETURN") {
+			returnExpr := strings.TrimSpace(returnPart[6:])
+			returnItems := e.parseReturnItems(returnExpr)
+			result := &ExecuteResult{
+				Columns: make([]string, len(returnItems)),
+				Rows:    [][]interface{}{},
+			}
+			for i, item := range returnItems {
+				if item.alias != "" {
+					result.Columns[i] = item.alias
+				} else {
+					result.Columns[i] = item.expr
+				}
+			}
+			targetVar := optRelPattern.targetVar
+			for _, mvr := range mvRows {
+				if len(mvr.related) == 0 {
+					// Left outer join: no match → null for optional variables
+					outRow := make([]interface{}, len(returnItems))
+					for i, item := range returnItems {
+						outRow[i] = e.resolveReturnExprFromVarMap(ctx, item.expr, mvr.values, targetVar, optRelPattern.relVar, nil, nil)
+					}
+					result.Rows = append(result.Rows, outRow)
+				} else {
+					for _, rel := range mvr.related {
+						outRow := make([]interface{}, len(returnItems))
+						for i, item := range returnItems {
+							outRow[i] = e.resolveReturnExprFromVarMap(ctx, item.expr, mvr.values, targetVar, optRelPattern.relVar, rel.node, rel.edge)
+						}
+						result.Rows = append(result.Rows, outRow)
+					}
+				}
+			}
+			return result, nil
+		}
+
+		// No RETURN found — shouldn't happen for well-formed queries.
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
 	nodePattern := e.parseNodePattern(ctx, nodePatternStr)
 	if nodePattern.variable == "" {
 		return nil, fmt.Errorf("could not parse node pattern from MATCH clause: %q", truncateQuery(nodePatternStr, 50))
@@ -3731,6 +3846,69 @@ func (e *StorageExecutor) collectOptionalMatchInitialNodes(
 		nodes = e.filterNodes(ctx, nodes, nodePattern.variable, whereClause)
 	}
 	return nodes, nil
+}
+
+// resolveReturnExprFromVarMap resolves a RETURN expression against a variable
+// map built from a multi-variable MATCH result row and optional OPTIONAL MATCH results.
+func (e *StorageExecutor) resolveReturnExprFromVarMap(
+	ctx context.Context,
+	expr string,
+	varMap map[string]interface{},
+	targetVar, relVar string,
+	targetNode *storage.Node,
+	targetEdge *storage.Edge,
+) interface{} {
+	expr = strings.TrimSpace(expr)
+
+	// Property access: var.prop
+	if dotIdx := strings.Index(expr, "."); dotIdx > 0 {
+		varName := expr[:dotIdx]
+		propName := expr[dotIdx+1:]
+
+		// Check optional match target/rel first
+		if varName == targetVar {
+			if targetNode == nil {
+				return nil
+			}
+			if val, ok := targetNode.Properties[propName]; ok {
+				return val
+			}
+			return nil
+		}
+		if varName == relVar && targetEdge != nil {
+			if val, ok := targetEdge.Properties[propName]; ok {
+				return val
+			}
+			return nil
+		}
+
+		// Check the varMap (from initial MATCH)
+		if val, ok := varMap[varName]; ok {
+			if node, isNode := val.(*storage.Node); isNode {
+				if node == nil {
+					return nil
+				}
+				if pval, exists := node.Properties[propName]; exists {
+					return pval
+				}
+				return nil
+			}
+		}
+	}
+
+	// Bare variable reference
+	if expr == targetVar {
+		return targetNode
+	}
+	if expr == relVar {
+		return targetEdge
+	}
+	if val, ok := varMap[expr]; ok {
+		return val
+	}
+
+	// Literal / function — delegate to parseValue
+	return e.parseValue(ctx, expr)
 }
 
 // parseOptionalRelPattern parses patterns like (a)-[r:TYPE]->(b:Label)

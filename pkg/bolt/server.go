@@ -401,6 +401,18 @@ type QueryResult struct {
 	Columns  []string
 	Rows     [][]any
 	Metadata map[string]any
+	Stats    *QueryStats // Write counters for ResultSummary
+}
+
+// QueryStats holds write counters emitted in the Bolt PULL completion metadata.
+// Field names match the Neo4j Bolt protocol specification for "stats".
+type QueryStats struct {
+	NodesCreated         int
+	NodesDeleted         int
+	RelationshipsCreated int
+	RelationshipsDeleted int
+	PropertiesSet        int
+	LabelsAdded          int
 }
 
 // BoltAuthenticator is the interface for authenticating Bolt protocol connections.
@@ -2551,6 +2563,8 @@ func (s *Session) handlePull(data []byte) error {
 
 	// Clear result if done
 	if !hasMore {
+		// Capture stats before clearing the result reference.
+		resultStats := s.lastResult.Stats
 		s.lastResult = nil
 		s.resultIndex = 0
 
@@ -2590,6 +2604,24 @@ func (s *Session) handlePull(data []byte) error {
 			metadata["db"] = s.database
 		} else {
 			metadata["db"] = "nornic"
+		}
+
+		// Neo4j Bolt protocol: emit "stats" map when any counter is non-zero.
+		// The Go driver reads this via summary.Counters().
+		if resultStats != nil && (resultStats.NodesCreated > 0 ||
+			resultStats.NodesDeleted > 0 ||
+			resultStats.RelationshipsCreated > 0 ||
+			resultStats.RelationshipsDeleted > 0 ||
+			resultStats.PropertiesSet > 0 ||
+			resultStats.LabelsAdded > 0) {
+			metadata["stats"] = map[string]any{
+				"nodes-created":         int64(resultStats.NodesCreated),
+				"nodes-deleted":         int64(resultStats.NodesDeleted),
+				"relationships-created": int64(resultStats.RelationshipsCreated),
+				"relationships-deleted": int64(resultStats.RelationshipsDeleted),
+				"properties-set":        int64(resultStats.PropertiesSet),
+				"labels-added":          int64(resultStats.LabelsAdded),
+			}
 		}
 
 		// Note: Neo4j does NOT send has_more when it's false
@@ -2633,10 +2665,64 @@ func databaseFromMetadata(metadata map[string]any) (string, bool) {
 
 // handleDiscard handles the DISCARD message.
 func (s *Session) handleDiscard(data []byte) error {
+	// Capture stats before clearing the result.
+	var resultStats *QueryStats
+	if s.lastResult != nil {
+		resultStats = s.lastResult.Stats
+	}
 	s.lastResult = nil
 	s.resultIndex = 0
-	// Neo4j doesn't send has_more when false - just empty metadata
-	if err := s.sendSuccessNoFlush(map[string]any{}); err != nil {
+
+	// Neo4j-style deferred commit: flush pending writes after discard.
+	if s.pendingFlush {
+		if flushable, ok := s.executor.(FlushableExecutor); ok {
+			flushable.Flush()
+		}
+		s.pendingFlush = false
+	}
+
+	// Build completion metadata with stats (same contract as PULL completion).
+	queryType := "r"
+	if s.lastQueryIsWrite {
+		queryType = "w"
+	}
+	bookmark := s.currentBookmark()
+	if s.lastQueryIsWrite {
+		if receiptBookmark, ok := s.bookmarkFromReceipt(); ok {
+			bookmark = receiptBookmark
+		} else {
+			bookmark = s.generateBookmark()
+		}
+	}
+	metadata := map[string]any{
+		"bookmark": bookmark,
+		"type":     queryType,
+		"t_last":   int64(0),
+	}
+	if s.lastQueryDatabase != "" {
+		metadata["db"] = s.lastQueryDatabase
+	} else if s.database != "" {
+		metadata["db"] = s.database
+	} else {
+		metadata["db"] = "nornic"
+	}
+	if resultStats != nil && (resultStats.NodesCreated > 0 ||
+		resultStats.NodesDeleted > 0 ||
+		resultStats.RelationshipsCreated > 0 ||
+		resultStats.RelationshipsDeleted > 0 ||
+		resultStats.PropertiesSet > 0 ||
+		resultStats.LabelsAdded > 0) {
+		metadata["stats"] = map[string]any{
+			"nodes-created":         int64(resultStats.NodesCreated),
+			"nodes-deleted":         int64(resultStats.NodesDeleted),
+			"relationships-created": int64(resultStats.RelationshipsCreated),
+			"relationships-deleted": int64(resultStats.RelationshipsDeleted),
+			"properties-set":        int64(resultStats.PropertiesSet),
+			"labels-added":          int64(resultStats.LabelsAdded),
+		}
+	}
+
+	if err := s.sendSuccessNoFlush(metadata); err != nil {
 		return err
 	}
 	return s.flushIfPending()
@@ -3461,11 +3547,22 @@ func (a *boltQueryExecutorAdapter) Execute(ctx context.Context, query string, pa
 	}
 
 	// Convert result to Bolt format
-	return &QueryResult{
+	qr := &QueryResult{
 		Columns:  result.Columns,
 		Rows:     result.Rows,
 		Metadata: result.Metadata,
-	}, nil
+	}
+	if result.Stats != nil {
+		qr.Stats = &QueryStats{
+			NodesCreated:         result.Stats.NodesCreated,
+			NodesDeleted:         result.Stats.NodesDeleted,
+			RelationshipsCreated: result.Stats.RelationshipsCreated,
+			RelationshipsDeleted: result.Stats.RelationshipsDeleted,
+			PropertiesSet:        result.Stats.PropertiesSet,
+			LabelsAdded:          result.Stats.LabelsAdded,
+		}
+	}
+	return qr, nil
 }
 
 // transactionalBoltQueryExecutorAdapter owns one database-scoped explicit

@@ -990,7 +990,9 @@ func TestBoltCoverage_ServerMessageAndRunHelpers(t *testing.T) {
 		meta, err := AssertSuccess(t, clientConn)
 		require.NoError(t, err)
 		require.NoError(t, <-done)
-		assert.Empty(t, meta)
+		// DISCARD now emits Neo4j-compatible completion metadata (type, bookmark, db).
+		assert.Contains(t, meta, "type")
+		assert.Contains(t, meta, "bookmark")
 		assert.Nil(t, session.lastResult)
 		assert.Zero(t, session.resultIndex)
 

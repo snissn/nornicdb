@@ -521,6 +521,12 @@ func (e *StorageExecutor) applyDeleteReturnProjection(result *ExecuteResult, cyp
 	result.Columns = make([]string, len(returnItems))
 	row := make([]interface{}, len(returnItems))
 
+	// Build a set of deleted variable names for nil-resolution below.
+	deletedVarSet := make(map[string]struct{})
+	for _, v := range strings.Split(deleteVars, ",") {
+		deletedVarSet[strings.TrimSpace(v)] = struct{}{}
+	}
+
 	for i, item := range returnItems {
 		if item.alias != "" {
 			result.Columns[i] = item.alias
@@ -528,20 +534,37 @@ func (e *StorageExecutor) applyDeleteReturnProjection(result *ExecuteResult, cyp
 			result.Columns[i] = item.expr
 		}
 		upperExpr := strings.ToUpper(item.expr)
-		if !strings.HasPrefix(upperExpr, "COUNT(") {
+
+		// COUNT() aggregation over deleted nodes/relationships.
+		if strings.HasPrefix(upperExpr, "COUNT(") {
+			inner := strings.TrimSpace(item.expr[6 : len(item.expr)-1])
+			upperInner := strings.ToUpper(inner)
+			if upperInner == "*" {
+				row[i] = int64(result.Stats.NodesDeleted + result.Stats.RelationshipsDeleted)
+			} else {
+				row[i] = int64(result.Stats.NodesDeleted)
+			}
 			continue
 		}
-		inner := strings.TrimSpace(item.expr[6 : len(item.expr)-1]) // Remove "count(" and ")"
-		upperInner := strings.ToUpper(inner)
-		if upperInner == "*" {
-			row[i] = int64(result.Stats.NodesDeleted + result.Stats.RelationshipsDeleted)
+
+		// Property access on a deleted variable (e.g. s.title after DELETE s)
+		// yields nil — the node no longer exists.
+		if dotIdx := strings.Index(item.expr, "."); dotIdx > 0 {
+			varName := item.expr[:dotIdx]
+			if _, deleted := deletedVarSet[varName]; deleted {
+				row[i] = nil
+				continue
+			}
+		}
+		// Bare reference to a deleted variable yields nil.
+		if _, deleted := deletedVarSet[item.expr]; deleted {
+			row[i] = nil
 			continue
 		}
-		if strings.Contains(upperInner, strings.ToUpper(deleteVars)) {
-			row[i] = int64(result.Stats.NodesDeleted)
-		} else {
-			row[i] = int64(result.Stats.NodesDeleted)
-		}
+
+		// Evaluate non-deleted expressions: string literals, numeric
+		// literals, function calls, etc.
+		row[i] = e.parseValue(context.Background(), item.expr)
 	}
 	result.Rows = [][]interface{}{row}
 }
