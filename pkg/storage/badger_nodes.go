@@ -606,33 +606,46 @@ func (b *BadgerEngine) deleteEmbeddingChunksBatched(nodeID NodeID) error {
 
 func (b *BadgerEngine) writeEmbeddingChunksBatched(nodeID NodeID, embeddings [][]float32) error {
 	const (
-		maxChunksPerTxn = 128
-		maxBytesPerTxn  = 1 << 20 // 1 MiB per txn keeps requests small
+		maxEntriesPerTxn = 256
+		maxBytesPerTxn   = 1 << 20 // 1 MiB per txn keeps requests small
 	)
 
-	for start := 0; start < len(embeddings); {
+	type pendingWrite struct {
+		chunkIndex int
+		kv         embeddingWriteKV
+	}
+	pending := make([]pendingWrite, 0, len(embeddings))
+	for i, emb := range embeddings {
+		kvs, err := buildEmbeddingChunkWriteKVs(nodeID, i, emb)
+		if err != nil {
+			return err
+		}
+		for _, kv := range kvs {
+			pending = append(pending, pendingWrite{chunkIndex: i, kv: kv})
+		}
+	}
+
+	for start := 0; start < len(pending); {
 		next := start
 		err := b.withUpdate(func(txn *badger.Txn) error {
 			bytesUsed := 0
-			chunksWritten := 0
-			for i := start; i < len(embeddings); i++ {
-				embData, err := encodeEmbedding(embeddings[i])
-				if err != nil {
-					return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
-				}
-				if chunksWritten > 0 &&
-					(chunksWritten >= maxChunksPerTxn || bytesUsed+len(embData) > maxBytesPerTxn) {
+			entriesWritten := 0
+			for i := start; i < len(pending); i++ {
+				entry := pending[i]
+				entryBytes := len(entry.kv.val)
+				if entriesWritten > 0 &&
+					(entriesWritten >= maxEntriesPerTxn || bytesUsed+entryBytes > maxBytesPerTxn) {
 					break
 				}
-				if err := txn.Set(embeddingKey(nodeID, i), embData); err != nil {
-					return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
+				if err := txn.Set(entry.kv.key, entry.kv.val); err != nil {
+					return fmt.Errorf("failed to store embedding chunk %d: %w", entry.chunkIndex, err)
 				}
 				next = i + 1
-				chunksWritten++
-				bytesUsed += len(embData)
+				entriesWritten++
+				bytesUsed += entryBytes
 			}
-			if chunksWritten == 0 {
-				return fmt.Errorf("failed to store embedding chunk %d: chunk exceeds per-txn write budget", start)
+			if entriesWritten == 0 {
+				return fmt.Errorf("failed to store embedding payload for chunk %d: entry exceeds per-txn write budget", pending[start].chunkIndex)
 			}
 			return nil
 		})

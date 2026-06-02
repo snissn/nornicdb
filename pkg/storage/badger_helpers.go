@@ -602,6 +602,12 @@ func pendingEmbedKey(nodeID NodeID) []byte {
 	return append([]byte{prefixPendingEmbed}, []byte(nodeID)...)
 }
 
+const (
+	// Keep embedding payloads below the 64KiB Badger entry limit used by this engine profile.
+	maxEmbeddingValueBytes = 60 << 10
+	embeddingShardMarker   = "EMBSHARDv1"
+)
+
 // embeddingKey creates a key for storing a chunk embedding separately.
 // Format: prefix + nodeID + 0x00 + chunkIndex (as bytes)
 func embeddingKey(nodeID NodeID, chunkIndex int) []byte {
@@ -612,6 +618,76 @@ func embeddingKey(nodeID NodeID, chunkIndex int) []byte {
 	// Encode chunk index as 4 bytes (big-endian)
 	key = append(key, byte(chunkIndex>>24), byte(chunkIndex>>16), byte(chunkIndex>>8), byte(chunkIndex))
 	return key
+}
+
+// embeddingChunkPartKey creates a key for a sharded embedding payload part.
+// Format: embeddingKey(nodeID, chunkIndex) + 0x00 + partIndex (2 bytes big-endian)
+func embeddingChunkPartKey(nodeID NodeID, chunkIndex, partIndex int) []byte {
+	base := embeddingKey(nodeID, chunkIndex)
+	key := make([]byte, 0, len(base)+1+2)
+	key = append(key, base...)
+	key = append(key, 0x00)
+	key = append(key, byte(partIndex>>8), byte(partIndex))
+	return key
+}
+
+func embeddingChunkPartPrefix(nodeID NodeID, chunkIndex int) []byte {
+	base := embeddingKey(nodeID, chunkIndex)
+	prefix := make([]byte, 0, len(base)+1)
+	prefix = append(prefix, base...)
+	prefix = append(prefix, 0x00)
+	return prefix
+}
+
+func makeEmbeddingShardMarker(partCount int) []byte {
+	marker := make([]byte, 0, len(embeddingShardMarker)+binary.MaxVarintLen64)
+	marker = append(marker, embeddingShardMarker...)
+	scratch := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutUvarint(scratch, uint64(partCount))
+	marker = append(marker, scratch[:n]...)
+	return marker
+}
+
+func parseEmbeddingShardMarker(data []byte) (int, bool) {
+	if len(data) < len(embeddingShardMarker) || string(data[:len(embeddingShardMarker)]) != embeddingShardMarker {
+		return 0, false
+	}
+	count, n := binary.Uvarint(data[len(embeddingShardMarker):])
+	if n <= 0 || count == 0 {
+		return 0, false
+	}
+	return int(count), true
+}
+
+type embeddingWriteKV struct {
+	key []byte
+	val []byte
+}
+
+func buildEmbeddingChunkWriteKVs(nodeID NodeID, chunkIndex int, emb []float32) ([]embeddingWriteKV, error) {
+	embData, err := encodeEmbedding(emb)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode embedding chunk %d: %w", chunkIndex, err)
+	}
+	baseKey := embeddingKey(nodeID, chunkIndex)
+	if len(embData) <= maxEmbeddingValueBytes {
+		return []embeddingWriteKV{{key: baseKey, val: embData}}, nil
+	}
+	parts := (len(embData) + maxEmbeddingValueBytes - 1) / maxEmbeddingValueBytes
+	kvs := make([]embeddingWriteKV, 0, parts+1)
+	kvs = append(kvs, embeddingWriteKV{key: baseKey, val: makeEmbeddingShardMarker(parts)})
+	for part := 0; part < parts; part++ {
+		start := part * maxEmbeddingValueBytes
+		end := start + maxEmbeddingValueBytes
+		if end > len(embData) {
+			end = len(embData)
+		}
+		kvs = append(kvs, embeddingWriteKV{
+			key: embeddingChunkPartKey(nodeID, chunkIndex, part),
+			val: append([]byte(nil), embData[start:end]...),
+		})
+	}
+	return kvs, nil
 }
 
 // schemaKey stores the persisted schema definition for a database namespace.
@@ -949,7 +1025,27 @@ func (b *BadgerEngine) decodeNodeWithEmbeddings(txn *badger.Txn, data []byte, no
 
 				emb, err := decodeEmbedding(embData)
 				if err != nil {
-					return nil, fmt.Errorf("failed to decode embedding chunk %d: %w", i, err)
+					partCount, sharded := parseEmbeddingShardMarker(embData)
+					if !sharded {
+						return nil, fmt.Errorf("failed to decode embedding chunk %d: %w", i, err)
+					}
+					assembled := make([]byte, 0, partCount*maxEmbeddingValueBytes)
+					for part := 0; part < partCount; part++ {
+						partItem, getErr := txn.Get(embeddingChunkPartKey(nodeID, i, part))
+						if getErr != nil {
+							return nil, fmt.Errorf("failed to get embedding chunk %d part %d: %w", i, part, getErr)
+						}
+						if err := partItem.Value(func(val []byte) error {
+							assembled = append(assembled, val...)
+							return nil
+						}); err != nil {
+							return nil, fmt.Errorf("failed to read embedding chunk %d part %d: %w", i, part, err)
+						}
+					}
+					emb, err = decodeEmbedding(assembled)
+					if err != nil {
+						return nil, fmt.Errorf("failed to decode sharded embedding chunk %d: %w", i, err)
+					}
 				}
 
 				node.ChunkEmbeddings = append(node.ChunkEmbeddings, emb)

@@ -82,13 +82,14 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 			// If embeddings are stored separately, store them now
 			if embeddingsSeparate {
 				for i, emb := range node.ChunkEmbeddings {
-					embKey := embeddingKey(node.ID, i)
-					embData, err := encodeEmbedding(emb)
+					kvs, err := buildEmbeddingChunkWriteKVs(node.ID, i, emb)
 					if err != nil {
-						return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
+						return err
 					}
-					if err := txn.Set(embKey, embData); err != nil {
-						return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
+					for _, kv := range kvs {
+						if err := txn.Set(kv.key, kv.val); err != nil {
+							return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
+						}
 					}
 				}
 			}

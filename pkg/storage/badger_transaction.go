@@ -542,12 +542,13 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 	// If embeddings are stored separately, buffer them
 	if embeddingsSeparate {
 		for i, emb := range node.ChunkEmbeddings {
-			embKey := embeddingKey(node.ID, i)
-			embData, err := encodeEmbedding(emb)
+			kvs, err := buildEmbeddingChunkWriteKVs(node.ID, i, emb)
 			if err != nil {
-				return "", fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
+				return "", err
 			}
-			tx.bufferSet(embKey, embData)
+			for _, kv := range kvs {
+				tx.bufferSet(kv.key, kv.val)
+			}
 		}
 	}
 
