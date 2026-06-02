@@ -705,6 +705,14 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 	// Extract MATCH clause
 	matchClause := strings.TrimSpace(cypher[matchIdx:mergeIdx])
 	mergeClause := strings.TrimSpace(cypher[mergeIdx:])
+
+	// Detect UNWIND between MATCH and MERGE. When present, we must expand the
+	// list and execute the MERGE once per (matched-node × unwind-item) pair,
+	// substituting the unwind variable with each concrete value.
+	unwindIdxInMatch := findKeywordIndex(matchClause, "UNWIND")
+	if unwindIdxInMatch > 0 {
+		return e.executeCompoundMatchUnwindMerge(ctx, cypher, matchClause, mergeClause, unwindIdxInMatch)
+	}
 	windowVar, windowSkip, windowLimit, hasWindow := parseTrailingWithWindow(matchClause)
 	if hasWindow {
 		withIdx := findKeywordIndexInContext(matchClause, "WITH")
@@ -800,6 +808,103 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 		}
 		result.Columns = []string{aggregateCountAlias}
 		result.Rows = [][]interface{}{{countValue}}
+	}
+
+	return result, nil
+}
+
+// executeCompoundMatchUnwindMerge handles MATCH ... UNWIND $param AS var MERGE ...
+// queries by executing the MATCH, resolving the UNWIND list from parameters, and
+// then executing the MERGE clause once per (matched-node × unwind-item) pair with
+// the unwind variable properly substituted.
+func (e *StorageExecutor) executeCompoundMatchUnwindMerge(ctx context.Context, cypher, matchClause, mergeClause string, unwindIdxInMatch int) (*ExecuteResult, error) {
+	params := getParamsFromContext(ctx)
+
+	// Split matchClause into the real MATCH part and the UNWIND part.
+	realMatchClause := strings.TrimSpace(matchClause[:unwindIdxInMatch])
+	unwindPart := strings.TrimSpace(matchClause[unwindIdxInMatch+len("UNWIND"):])
+
+	// Parse "listExpr AS variable" from the UNWIND part.
+	upperUnwind := strings.ToUpper(unwindPart)
+	asIdx := strings.Index(upperUnwind, " AS ")
+	if asIdx <= 0 {
+		return nil, fmt.Errorf("UNWIND requires AS clause in MATCH ... UNWIND ... MERGE query")
+	}
+	listExpr := strings.TrimSpace(unwindPart[:asIdx])
+	unwindVar := strings.TrimSpace(unwindPart[asIdx+4:])
+
+	// Resolve the list to unwind.
+	var listVal interface{}
+	if strings.HasPrefix(listExpr, "$") {
+		paramName := strings.TrimSpace(listExpr[1:])
+		if params != nil {
+			listVal = params[paramName]
+		}
+		if listVal == nil {
+			return nil, fmt.Errorf("UNWIND parameter $%s not found or is null", paramName)
+		}
+	} else {
+		// Evaluate inline list expression.
+		listVal = e.evaluateExpressionWithContext(ctx, listExpr, nil, nil)
+	}
+
+	items := coerceToUnwindItems(listVal)
+	if len(items) == 0 {
+		// UNWIND of empty list produces no rows.
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}, Stats: &QueryStats{}}, nil
+	}
+
+	// Execute the MATCH to get context nodes.
+	matchedNodes, matchedRels, err := e.executeMatchForContext(ctx, realMatchClause)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute MATCH: %v", err)
+	}
+	if len(matchedNodes) == 0 {
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}, Stats: &QueryStats{}}, nil
+	}
+
+	// Parse RETURN clause from merge part if present.
+	returnIdxInMerge := findKeywordIndex(mergeClause, "RETURN")
+	var returnPart string
+	mergeMutationPart := mergeClause
+	if returnIdxInMerge > 0 {
+		returnPart = strings.TrimSpace(mergeClause[returnIdxInMerge:])
+		mergeMutationPart = strings.TrimSpace(mergeClause[:returnIdxInMerge])
+	}
+
+	result := &ExecuteResult{
+		Columns: []string{},
+		Rows:    [][]interface{}{},
+		Stats:   &QueryStats{},
+	}
+
+	// For each matched node context × each unwind item, substitute the variable
+	// and execute the MERGE.
+	for _, nodeContext := range matchedNodes {
+		for _, item := range items {
+			// Substitute the unwind variable in the merge clause with the concrete value.
+			substitutedMerge := e.replaceVariableInMutationQuery(mergeMutationPart, unwindVar, item)
+			fullMerge := substitutedMerge
+			if returnPart != "" {
+				fullMerge = substitutedMerge + " " + returnPart
+			}
+
+			mergeResult, err := e.executeMergeWithContext(ctx, fullMerge, nodeContext, matchedRels)
+			if err != nil {
+				return nil, err
+			}
+
+			if mergeResult.Stats != nil {
+				result.Stats.NodesCreated += mergeResult.Stats.NodesCreated
+				result.Stats.RelationshipsCreated += mergeResult.Stats.RelationshipsCreated
+				result.Stats.PropertiesSet += mergeResult.Stats.PropertiesSet
+			}
+
+			if len(mergeResult.Columns) > 0 && len(result.Columns) == 0 {
+				result.Columns = mergeResult.Columns
+			}
+			result.Rows = append(result.Rows, mergeResult.Rows...)
+		}
 	}
 
 	return result, nil
