@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -92,4 +93,220 @@ func TestBadgerTransaction_GetNodesByLabelLocked_Branches(t *testing.T) {
 	nodes, err = tx.getNodesByLabelLocked("User")
 	require.NoError(t, err)
 	require.NotEmpty(t, nodes)
+}
+
+func TestBadgerTransaction_ConflictHelperAdditionalBranches(t *testing.T) {
+	engine := newTestEngine(t)
+	_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"User"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:n2", Labels: []string{"User"}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e", StartNode: "test:n1", EndNode: "test:n2", Type: "REL"}))
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+
+	// Missing entities on create-conflict checks are non-conflicting.
+	require.NoError(t, tx.checkNodeCreateConflict("test:missing"))
+	require.NoError(t, tx.checkEdgeCreateConflict("test:missing"))
+
+	// snapshotIsolationConflict branches: same sequence (non-max) => false.
+	tx.readTS = MVCCVersion{CommitTimestamp: time.Unix(10, 0).UTC(), CommitSequence: 9}
+	require.False(t, tx.snapshotIsolationConflict(MVCCVersion{
+		CommitTimestamp: time.Unix(20, 0).UTC(),
+		CommitSequence:  9,
+	}))
+	// Max sequence fallback to timestamp compare.
+	tx.readTS = MVCCVersion{CommitTimestamp: time.Unix(10, 0).UTC(), CommitSequence: maxMVCCCommitSequence}
+	require.True(t, tx.snapshotIsolationConflict(MVCCVersion{
+		CommitTimestamp: time.Unix(11, 0).UTC(),
+		CommitSequence:  maxMVCCCommitSequence,
+	}))
+
+	// nil edge shortcut branch.
+	require.NoError(t, tx.checkEdgeEndpointConflicts(nil))
+
+	// Endpoint not found in either head/body => invalid edge.
+	err = tx.checkEdgeEndpointConflicts(&Edge{ID: "test:e-missing", StartNode: "test:missing", EndNode: "test:n2", Type: "REL"})
+	require.ErrorIs(t, err, ErrInvalidEdge)
+}
+
+func TestBadgerTransaction_CheckNodeAdjacencyConflict_Branches(t *testing.T) {
+	engine := newTestEngine(t)
+	_, err := engine.CreateNode(&Node{ID: "test:a", Labels: []string{"N"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:b", Labels: []string{"N"}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e1", StartNode: "test:a", EndNode: "test:b", Type: "REL", Properties: map[string]any{"v": int64(1)}}))
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+
+	// Old read timestamp to force conflict after concurrent edge write.
+	tx.readTS = MVCCVersion{CommitTimestamp: time.Unix(0, 0).UTC(), CommitSequence: 0}
+	require.NoError(t, engine.UpdateEdge(&Edge{ID: "test:e1", StartNode: "test:a", EndNode: "test:b", Type: "REL", Properties: map[string]any{"v": int64(2)}}))
+
+	err = tx.checkNodeAdjacencyConflict("test:a")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrConflict)
+
+	// Node without dictionary/index entries uses empty-prefix path and should not fail.
+	require.NoError(t, tx.checkNodeAdjacencyConflict("test:missing"))
+}
+
+func TestBadgerTransaction_CheckNodeAdjacencyConflict_HeadDecodeErrorBranch(t *testing.T) {
+	engine := newTestEngine(t)
+	_, err := engine.CreateNode(&Node{ID: "test:a", Labels: []string{"N"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:b", Labels: []string{"N"}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e-bad-head", StartNode: "test:a", EndNode: "test:b", Type: "REL"}))
+
+	// Corrupt the edge MVCC head so loadEdgeMVCCHeadInTxn returns a decode error.
+	require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+		headKey, err := engine.mvccEdgeHeadKeyString(txn, "test:e-bad-head")
+		if err != nil {
+			return err
+		}
+		return txn.Set(headKey, []byte{0x01})
+	}))
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+	tx.readTS = MVCCVersion{CommitTimestamp: time.Unix(0, 0).UTC(), CommitSequence: 0}
+
+	err = tx.checkNodeAdjacencyConflict("test:a")
+	require.Error(t, err)
+}
+
+func TestBadgerTransaction_CheckEdgeUniqueness_CompositeMissingPropertyBranches(t *testing.T) {
+	engine := newTestEngine(t)
+	_, err := engine.CreateNode(&Node{ID: "test:a", Labels: []string{"N"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:b", Labels: []string{"N"}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&Edge{
+		ID:         "test:e1",
+		StartNode:  "test:a",
+		EndNode:    "test:b",
+		Type:       "REL",
+		Properties: map[string]any{"k1": "v1", "k2": "v2"},
+	}))
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+
+	c := Constraint{
+		Type:       ConstraintUnique,
+		Label:      "REL",
+		Properties: []string{"k1", "k2"},
+	}
+	candidate := &Edge{
+		ID:         "test:new",
+		StartNode:  "test:a",
+		EndNode:    "test:b",
+		Type:       "REL",
+		Properties: map[string]any{"k1": "v1"}, // Missing k2 triggers allPresent=false branches.
+	}
+
+	// Pending-edge branch (allPresent=false => nil).
+	tx.pendingEdges["test:pending"] = &Edge{
+		ID:         "test:pending",
+		Type:       "REL",
+		Properties: map[string]any{"k1": "v1", "k2": "x"},
+	}
+	require.NoError(t, tx.checkEdgeUniqueness(candidate, c, "test"))
+
+	// Committed-edge branch (allPresent=false => nil).
+	tx.pendingEdges = map[EdgeID]*Edge{}
+	require.NoError(t, tx.checkEdgeUniqueness(candidate, c, "test"))
+}
+
+func TestBadgerTransaction_NodeConstraintExtraBranches(t *testing.T) {
+	engine := newTestEngine(t)
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+
+	schema := engine.GetSchemaForNamespace("test")
+	require.NoError(t, schema.AddConstraint(Constraint{
+		Name:          "domain_status",
+		Type:          ConstraintDomain,
+		Label:         "User",
+		Properties:    []string{"status"},
+		AllowedValues: []any{"ok", "ready"},
+	}))
+	require.NoError(t, schema.AddConstraint(Constraint{
+		Name:       "node_key_user",
+		Type:       ConstraintNodeKey,
+		Label:      "User",
+		Properties: []string{"tenant", "email"},
+	}))
+
+	// Domain constraint branch: disallowed value.
+	err = tx.validateNodeConstraints(&Node{
+		ID:         "test:u1",
+		Labels:     []string{"User"},
+		Properties: map[string]any{"status": "bad"},
+	})
+	require.Error(t, err)
+
+	// Node key pending compareValues mismatch branch.
+	tx.pendingNodes["test:u2"] = &Node{
+		ID:         "test:u2",
+		Labels:     []string{"User"},
+		Properties: map[string]any{"tenant": "t1", "email": "other@example.com"},
+	}
+	err = tx.checkNodeKeyConstraint(&Node{
+		ID:         "test:u3",
+		Labels:     []string{"User"},
+		Properties: map[string]any{"tenant": "t1", "email": "u3@example.com"},
+	}, Constraint{Type: ConstraintNodeKey, Label: "User", Properties: []string{"tenant", "email"}})
+	require.NoError(t, err)
+}
+
+func TestBadgerTransaction_BulkCreateEdges_NodeVisibleDeletedBranch(t *testing.T) {
+	engine := newTestEngine(t)
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	require.NoError(t, tx.SetNamespace("test"))
+	tx.deletedNodes["test:deleted"] = struct{}{}
+
+	err = tx.BulkCreateEdges([]*Edge{{
+		ID:        "test:e-del",
+		StartNode: "test:deleted",
+		EndNode:   "test:other",
+		Type:      "REL",
+	}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "start node")
+}
+
+func TestBadgerTransaction_PinNamespaceFromIDLocked_RefreshFailureBranch(t *testing.T) {
+	engine := NewMemoryEngine()
+	t.Cleanup(func() { _ = engine.Close() })
+	controller := &txLifecycleControllerStub{enabled: true, err: ErrMVCCResourcePressure}
+	engine.SetLifecycleController(controller)
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	require.NotNil(t, tx)
+	defer tx.Rollback()
+
+	tx.mu.Lock()
+	err = tx.pinNamespaceFromIDLocked("test:n1")
+	tx.mu.Unlock()
+	require.ErrorIs(t, err, ErrMVCCResourcePressure)
+	require.Equal(t, "", tx.namespace)
 }

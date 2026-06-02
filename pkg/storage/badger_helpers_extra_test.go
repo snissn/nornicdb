@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -142,4 +143,140 @@ func TestEncodeNodeV1Body_PreservesExistingChunkCount(t *testing.T) {
 	decoded, err := decodeNodeV1(body)
 	require.NoError(t, err)
 	require.EqualValues(t, 99, decoded.EmbedMeta["chunk_count"])
+}
+
+func TestBadgerHelpers_DictionaryKeyWrappersAndLookups(t *testing.T) {
+	engine := NewMemoryEngine()
+	t.Cleanup(func() { _ = engine.Close() })
+
+	version := MVCCVersion{
+		CommitTimestamp: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		CommitSequence:  17,
+	}
+
+	require.NoError(t, engine.db.Update(func(txn *badger.Txn) error {
+		_, err := engine.outgoingIndexKeyString(txn, "test:n1", "test:e1")
+		require.NoError(t, err)
+		_, err = engine.incomingIndexKeyString(txn, "test:n2", "test:e1")
+		require.NoError(t, err)
+		_, err = engine.edgeTypeIndexKeyString(txn, "REL", "test:e1")
+		require.NoError(t, err)
+		_, err = engine.labelIndexKeyString(txn, "Person", "test:n1")
+		require.NoError(t, err)
+
+		_, err = engine.mvccNodeHeadKeyString(txn, "test:n1")
+		require.NoError(t, err)
+		_, err = engine.mvccEdgeHeadKeyString(txn, "test:e1")
+		require.NoError(t, err)
+		_, err = engine.mvccNodeVersionKeyString(txn, "test:n1", version)
+		require.NoError(t, err)
+		_, err = engine.mvccEdgeVersionKeyString(txn, "test:e1", version)
+		require.NoError(t, err)
+		return nil
+	}))
+
+	require.NotNil(t, engine.outgoingIndexKeyStringLookup("test:n1", "test:e1"))
+	require.NotNil(t, engine.incomingIndexKeyStringLookup("test:n2", "test:e1"))
+	require.NotNil(t, engine.edgeTypeIndexKeyStringLookup("REL", "test:e1"))
+	require.NotNil(t, engine.labelIndexKeyStringLookup("Person", "test:n1"))
+	require.NotNil(t, engine.mvccNodeHeadKeyStringLookup("test:n1"))
+	require.NotNil(t, engine.mvccEdgeHeadKeyStringLookup("test:e1"))
+	require.NotNil(t, engine.mvccNodeVersionKeyStringLookup("test:n1", version))
+	require.NotNil(t, engine.mvccEdgeVersionKeyStringLookup("test:e1", version))
+	require.NotNil(t, engine.mvccNodeVersionPrefixString("test:n1"))
+	require.NotNil(t, engine.mvccEdgeVersionPrefixString("test:e1"))
+	require.NotNil(t, engine.outgoingIndexPrefixString("test:n1"))
+	require.NotNil(t, engine.incomingIndexPrefixString("test:n2"))
+
+	require.Nil(t, engine.outgoingIndexKeyStringLookup("test:missing", "test:e1"))
+	require.Nil(t, engine.incomingIndexKeyStringLookup("test:n2", "test:missing"))
+	require.Nil(t, engine.edgeTypeIndexKeyStringLookup("REL", "test:missing"))
+	require.Nil(t, engine.labelIndexKeyStringLookup("Person", "test:missing"))
+	require.Nil(t, engine.mvccNodeHeadKeyStringLookup("test:missing"))
+	require.Nil(t, engine.mvccEdgeHeadKeyStringLookup("test:missing"))
+	require.Nil(t, engine.mvccNodeVersionKeyStringLookup("test:missing", version))
+	require.Nil(t, engine.mvccEdgeVersionKeyStringLookup("test:missing", version))
+	require.Nil(t, engine.mvccNodeVersionPrefixString("test:missing"))
+	require.Nil(t, engine.mvccEdgeVersionPrefixString("test:missing"))
+	require.Nil(t, engine.outgoingIndexPrefixString("test:missing"))
+	require.Nil(t, engine.incomingIndexPrefixString("test:missing"))
+}
+
+func TestBadgerHelpers_EdgeBetweenIndexWriteDeletePaths(t *testing.T) {
+	engine := NewMemoryEngine()
+	t.Cleanup(func() { _ = engine.Close() })
+
+	edge := &Edge{ID: "test:e-between", StartNode: "test:start", EndNode: "test:end", Type: "REL"}
+	require.NoError(t, engine.db.Update(func(txn *badger.Txn) error {
+		require.NoError(t, engine.writeEdgeBetweenIndexesInTxn(txn, edge))
+
+		indexKey := engine.edgeBetweenIndexKeyFromStringIDs(edge.StartNode, edge.EndNode, edge.Type, edge.ID)
+		require.NotNil(t, indexKey)
+		headKey := engine.edgeBetweenHeadKeyFromStringIDs(edge.StartNode, edge.EndNode, edge.Type)
+		require.NotNil(t, headKey)
+
+		_, err := txn.Get(indexKey)
+		require.NoError(t, err)
+		headItem, err := txn.Get(headKey)
+		require.NoError(t, err)
+		require.NoError(t, headItem.Value(func(val []byte) error {
+			require.Equal(t, []byte(edge.ID), val)
+			return nil
+		}))
+
+		// Non-matching head should remain untouched.
+		require.NoError(t, txn.Set(headKey, []byte("test:other")))
+		require.NoError(t, engine.deleteEdgeBetweenIndexesInTxn(txn, edge))
+		_, err = txn.Get(indexKey)
+		require.ErrorIs(t, err, badger.ErrKeyNotFound)
+		headItem, err = txn.Get(headKey)
+		require.NoError(t, err)
+		require.NoError(t, headItem.Value(func(val []byte) error {
+			require.Equal(t, []byte("test:other"), val)
+			return nil
+		}))
+
+		// Matching head should be deleted.
+		require.NoError(t, txn.Set(headKey, []byte(edge.ID)))
+		require.NoError(t, engine.deleteEdgeBetweenHeadIfMatchesInTxn(txn, edge))
+		_, err = txn.Get(headKey)
+		require.ErrorIs(t, err, badger.ErrKeyNotFound)
+
+		// Missing dictionary IDs: should be a safe no-op path.
+		require.NoError(t, engine.deleteEdgeBetweenIndexesInTxn(txn, &Edge{
+			ID:        "test:missing",
+			StartNode: "test:missing-start",
+			EndNode:   "test:missing-end",
+			Type:      "REL",
+		}))
+		return nil
+	}))
+}
+
+func TestBadgerHelpers_EmbeddingShardMarkerHelpers(t *testing.T) {
+	prefix := embeddingChunkPartPrefix("test:node", 7)
+	expectedPrefix := append(embeddingKey("test:node", 7), 0x00)
+	require.True(t, bytes.Equal(expectedPrefix, prefix))
+
+	partKey := embeddingChunkPartKey("test:node", 7, 3)
+	require.True(t, bytes.HasPrefix(partKey, prefix))
+
+	count, ok := parseEmbeddingShardMarker([]byte("not-a-shard-marker"))
+	require.False(t, ok)
+	require.Zero(t, count)
+
+	count, ok = parseEmbeddingShardMarker([]byte(embeddingShardMarker))
+	require.False(t, ok)
+	require.Zero(t, count)
+
+	// Uvarint decode succeeds but count=0 should still be rejected.
+	zeroCountMarker := append([]byte(embeddingShardMarker), byte(0))
+	count, ok = parseEmbeddingShardMarker(zeroCountMarker)
+	require.False(t, ok)
+	require.Zero(t, count)
+
+	marker := makeEmbeddingShardMarker(4)
+	count, ok = parseEmbeddingShardMarker(marker)
+	require.True(t, ok)
+	require.Equal(t, 4, count)
 }

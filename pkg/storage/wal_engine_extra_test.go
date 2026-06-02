@@ -304,3 +304,53 @@ func TestWALEngine_LatestEffectiveAndVisible(t *testing.T) {
 	require.NotNil(t, gotEdge)
 	require.Equal(t, EdgeID("test:e"), gotEdge.ID)
 }
+
+func TestWALEngine_FallbacksForNonOptionalInterfaces(t *testing.T) {
+	base := NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	w := NewWALEngine(&nonMVCCEngine{Engine: base}, nil)
+
+	_, err := base.CreateNode(&Node{ID: "test:n", Labels: []string{"L"}, Properties: map[string]any{}})
+	require.NoError(t, err)
+	_, err = base.CreateNode(&Node{ID: "test:m", Labels: []string{"L"}, Properties: map[string]any{}})
+	require.NoError(t, err)
+	require.NoError(t, base.CreateEdge(&Edge{ID: "test:e", StartNode: "test:n", EndNode: "test:m", Type: "REL"}))
+
+	ok, err := w.IsCurrentTemporalNode(&Node{ID: "test:n"}, time.Now())
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	require.NoError(t, w.RebuildTemporalIndexes(context.Background()))
+	pruned, err := w.PruneTemporalHistory(context.Background(), TemporalPruneOptions{})
+	require.NoError(t, err)
+	require.Zero(t, pruned)
+
+	node, err := w.GetNodeLatestEffective("test:n")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("test:n"), node.ID)
+
+	edge, err := w.GetEdgeLatestEffective("test:e")
+	require.NoError(t, err)
+	require.Equal(t, EdgeID("test:e"), edge.ID)
+
+	node, err = w.GetNodeLatestVisible("test:n")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("test:n"), node.ID)
+
+	edge, err = w.GetEdgeLatestVisible("test:e")
+	require.NoError(t, err)
+	require.Equal(t, EdgeID("test:e"), edge.ID)
+
+	_, err = w.GetNodesByLabelVisibleAt("L", MVCCVersion{})
+	require.ErrorIs(t, err, ErrNotImplemented)
+
+	release := w.RegisterSnapshotReader(SnapshotReaderInfo{})
+	require.NotNil(t, release)
+	release()
+
+	status := w.LifecycleStatus()
+	require.Equal(t, false, status["enabled"])
+	require.NoError(t, w.TriggerPruneNow(context.Background()))
+	require.NoError(t, w.SetLifecycleSchedule(time.Second))
+	require.Nil(t, w.TopLifecycleDebtKeys(5))
+}
