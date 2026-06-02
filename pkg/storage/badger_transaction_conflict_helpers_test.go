@@ -40,6 +40,8 @@ func TestBadgerTransaction_ConflictHelpers(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, tx.SetNamespace("test"))
 	defer tx.Rollback()
+	require.NoError(t, tx.SetDeferredConstraintValidation(true))
+	require.NoError(t, tx.SetSkipCreateExistenceCheck(true))
 
 	// Old readTS to force SI conflicts against current heads.
 	tx.readTS = MVCCVersion{CommitTimestamp: time.Unix(0, 0).UTC(), CommitSequence: 0}
@@ -309,4 +311,94 @@ func TestBadgerTransaction_PinNamespaceFromIDLocked_RefreshFailureBranch(t *test
 	tx.mu.Unlock()
 	require.ErrorIs(t, err, ErrMVCCResourcePressure)
 	require.Equal(t, "", tx.namespace)
+}
+
+func TestBadgerTransaction_Commit_OperationCallbacksMatrix(t *testing.T) {
+	engine := newTestEngine(t)
+	_, err := engine.CreateNode(&Node{ID: "test:s", Labels: []string{"N"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:e", Labels: []string{"N"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:cm-node-delete", Labels: []string{"User"}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&Edge{
+		ID:        "test:cm-edge-deleted-with-node",
+		StartNode: "test:cm-node-delete",
+		EndNode:   "test:e",
+		Type:      "REL",
+	}))
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	require.NoError(t, tx.SetNamespace("test"))
+	defer tx.Rollback()
+
+	require.NoError(t, tx.SetMetadata(map[string]interface{}{"trace_id": "abc123"}))
+
+	tx.operations = []Operation{
+		{
+			Type: OpCreateNode,
+			Node: &Node{
+				ID:         "test:cm-node-create",
+				Labels:     []string{"User"},
+				Properties: map[string]any{"email": "create@example.com"},
+			},
+		},
+		{
+			Type: OpUpdateNode,
+			Node: &Node{
+				ID:         "test:cm-node-update",
+				Labels:     []string{"User"},
+				Properties: map[string]any{"email": "after@example.com"},
+			},
+			OldNode: &Node{
+				ID:         "test:cm-node-update",
+				Labels:     []string{"User"},
+				Properties: map[string]any{"email": "before@example.com"},
+			},
+		},
+		{
+			Type:           OpDeleteNode,
+			NodeID:         "test:cm-node-delete",
+			OldNode:        &Node{ID: "test:cm-node-delete", Labels: []string{"User"}, Properties: map[string]any{"email": "gone@example.com"}},
+			DeletedEdgeIDs: []EdgeID{"test:cm-edge-deleted-with-node"},
+		},
+		{
+			Type: OpCreateEdge,
+			Edge: &Edge{ID: "test:cm-edge-create", StartNode: "test:s", EndNode: "test:e", Type: "REL"},
+		},
+		{
+			Type:    OpUpdateEdge,
+			Edge:    &Edge{ID: "test:cm-edge-update", StartNode: "test:s", EndNode: "test:e", Type: "REL2"},
+			OldEdge: &Edge{ID: "test:cm-edge-update", StartNode: "test:s", EndNode: "test:e", Type: "REL1"},
+		},
+		{
+			Type:    OpDeleteEdge,
+			EdgeID:  "test:cm-edge-delete",
+			OldEdge: &Edge{ID: "test:cm-edge-delete", StartNode: "test:s", EndNode: "test:e", Type: "REL"},
+		},
+		{
+			Type: OpUpdateEmbedding,
+			Node: &Node{ID: "test:cm-embed"},
+		},
+	}
+
+	require.NoError(t, tx.Commit())
+	require.Equal(t, TxStatusCommitted, tx.Status)
+	require.NotZero(t, tx.CommitVersion.CommitSequence)
+}
+
+func TestBadgerTransaction_Commit_WritesWithoutNamespaceBranch(t *testing.T) {
+	engine := newTestEngine(t)
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	tx.operations = []Operation{{Type: OpCreateNode, Node: &Node{ID: "test:cm-no-ns", Labels: []string{"N"}}}}
+	tx.namespace = ""
+
+	err = tx.Commit()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no pinned namespace")
+	require.Equal(t, TxStatusRolledBack, tx.Status)
 }
