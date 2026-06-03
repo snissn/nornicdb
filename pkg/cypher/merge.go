@@ -1039,9 +1039,17 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 		}
 		if candidates == nil {
 			if len(nodeInfo.labels) > 0 {
-				candidates, _ = store.GetNodesByLabel(nodeInfo.labels[0])
+				var err error
+				candidates, err = store.GetNodesByLabel(nodeInfo.labels[0])
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to get nodes by label %q: %w", nodeInfo.labels[0], err)
+				}
 			} else {
-				candidates = store.GetAllNodes()
+				var err error
+				candidates, err = store.AllNodes()
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to get all nodes for match: %w", err)
+				}
 			}
 		}
 
