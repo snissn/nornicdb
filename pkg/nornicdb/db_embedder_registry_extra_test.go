@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	featureflags "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/embed"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
@@ -165,4 +166,51 @@ func TestDB_GetOrCreateEmbedderForDB_SingleFlightWaitPath(t *testing.T) {
 	wg.Wait()
 	require.NoError(t, err)
 	require.Same(t, global, got)
+}
+
+func TestDB_SetEmbedder_ClusteringFlagBranches(t *testing.T) {
+	t.Run("enabled with zero interval stays manual", func(t *testing.T) {
+		cleanup := featureflags.WithGPUClusteringEnabled()
+		t.Cleanup(cleanup)
+
+		base := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		cfg := DefaultConfig()
+		cfg.Memory.KmeansClusterInterval = 0
+
+		db := &DB{baseStorage: base, config: cfg}
+		db.storage = storage.NewNamespacedEngine(base, "nornic")
+		db.searchServices = map[string]*dbSearchService{}
+		db.SetEmbedder(&mockEmbedder{dims: 4, model: "cluster-manual"})
+		t.Cleanup(func() {
+			if db.embedQueue != nil {
+				db.embedQueue.Close()
+			}
+		})
+		require.NotNil(t, db.embedQueue)
+		require.Nil(t, db.clusterTicker)
+	})
+
+	t.Run("enabled with positive interval starts timer", func(t *testing.T) {
+		cleanup := featureflags.WithGPUClusteringEnabled()
+		t.Cleanup(cleanup)
+
+		base := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		cfg := DefaultConfig()
+		cfg.Memory.KmeansClusterInterval = time.Hour
+
+		db := &DB{baseStorage: base, config: cfg}
+		db.storage = storage.NewNamespacedEngine(base, "nornic")
+		db.searchServices = map[string]*dbSearchService{}
+		db.SetEmbedder(&mockEmbedder{dims: 4, model: "cluster-timer"})
+		t.Cleanup(func() {
+			if db.embedQueue != nil {
+				db.embedQueue.Close()
+			}
+		})
+		require.NotNil(t, db.embedQueue)
+		require.NotNil(t, db.clusterTicker)
+		db.stopClusteringTimer()
+	})
 }

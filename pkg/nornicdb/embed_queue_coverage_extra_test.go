@@ -252,3 +252,18 @@ func TestEmbedWorker_ProcessUntilEmpty_RefreshCleanupBranch(t *testing.T) {
 	ew.processUntilEmpty()
 	require.Less(t, time.Since(start), 2*time.Second)
 }
+
+func TestEmbedWorker_NewEmbedWorker_MultiWorkerStartupBranch(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	engine := storage.NewNamespacedEngine(base, "startup-multi")
+	w := NewEmbedWorker(newMockEmbedder(), engine, &EmbedWorkerConfig{
+		NumWorkers:       2,
+		ScanInterval:     time.Hour,
+		BatchDelay:       time.Millisecond,
+		MaxRetries:       1,
+		ChunkSize:        64,
+		ChunkOverlap:     8,
+		DeferWorkerStart: false,
+	})
+	t.Cleanup(func() { w.Close() })
+}
