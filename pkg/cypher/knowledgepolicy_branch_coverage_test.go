@@ -33,6 +33,9 @@ func TestKnowledgePolicyExecuteDDL_Branches(t *testing.T) {
 	}`)
 	require.NoError(t, err)
 
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `ALTER DECAY PROFILE base SET OPTIONS { enabled: false }`)
+	require.NoError(t, err)
+
 	showDecay, err := exec.executeKnowledgePolicyDDL(ctx, `SHOW DECAY PROFILES`)
 	require.NoError(t, err)
 	require.Equal(t, []string{"kind", "name", "scope", "target", "profileRef", "enabled"}, showDecay.Columns)
@@ -56,12 +59,16 @@ func TestKnowledgePolicyExecuteDDL_Branches(t *testing.T) {
 		scoreCap: 0.9
 	}`)
 	require.NoError(t, err)
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `ALTER PROMOTION PROFILE boost SET OPTIONS { multiplier: 1.2, enabled: false }`)
+	require.NoError(t, err)
 
 	_, err = exec.executeKnowledgePolicyDDL(ctx, `CREATE PROMOTION POLICY fact_promote FOR (n:Fact) APPLY {
 		ON ACCESS {
 			SET n.accessCount = n.accessCount + 1
 		}
 	}`)
+	require.NoError(t, err)
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `ALTER PROMOTION POLICY fact_promote SET OPTIONS { enabled: false }`)
 	require.NoError(t, err)
 
 	showPromotionProfiles, err := exec.executeKnowledgePolicyDDL(ctx, `SHOW PROMOTION PROFILES`)
@@ -78,10 +85,20 @@ func TestKnowledgePolicyExecuteDDL_Branches(t *testing.T) {
 	require.Equal(t, "fact_promote", showPolicies.Rows[0][0])
 	require.Equal(t, "Fact", showPolicies.Rows[0][2])
 	require.EqualValues(t, int64(1), showPolicies.Rows[0][5])
+
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `DROP PROMOTION POLICY IF EXISTS fact_promote`)
+	require.NoError(t, err)
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `DROP PROMOTION PROFILE IF EXISTS boost`)
+	require.NoError(t, err)
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `DROP DECAY PROFILE IF EXISTS base_binding`)
+	require.NoError(t, err)
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `DROP DECAY PROFILE IF EXISTS base`)
+	require.NoError(t, err)
 }
 
 func TestKnowledgePolicyProcedure_Branches(t *testing.T) {
 	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
+	ctx := context.Background()
 
 	res, err := exec.callNornicDbKnowledgePolicyDeindexStatus()
 	require.NoError(t, err)
@@ -98,6 +115,41 @@ func TestKnowledgePolicyProcedure_Branches(t *testing.T) {
 
 	_, err = exec.callNornicDbKnowledgePolicyResolve([]interface{}{"missing-entity"})
 	require.EqualError(t, err, "knowledge policy binding table unavailable")
+
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `CREATE DECAY PROFILE base OPTIONS {
+		halfLifeSeconds: 3600,
+		function: 'none',
+		scope: 'NODE',
+		scoreFrom: 'CREATED'
+	}`)
+	require.NoError(t, err)
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `CREATE DECAY PROFILE base_binding FOR (n:Fact) APPLY { DECAY PROFILE 'base' }`)
+	require.NoError(t, err)
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `CREATE PROMOTION PROFILE boost OPTIONS { scope: 'NODE', multiplier: 1.1, scoreFloor: 0.1, scoreCap: 0.9 }`)
+	require.NoError(t, err)
+	_, err = exec.executeKnowledgePolicyDDL(ctx, `CREATE PROMOTION POLICY fact_promote FOR (n:Fact) APPLY { ON ACCESS { SET n.accessCount = n.accessCount + 1 } }`)
+	require.NoError(t, err)
+
+	profiles, err := exec.callNornicDbKnowledgePolicyProfiles()
+	require.NoError(t, err)
+	require.Equal(t, []string{"kind", "Name", "HalfLifeSeconds", "VisibilityThreshold", "ScoreFloor", "Function", "Scope", "DecayEnabled", "ScoreFrom", "ScoreFromProperty", "Enabled", "TargetLabels", "TargetEdgeType", "IsWildcard", "IsEdge", "ProfileRef", "NoDecay", "Order"}, profiles.Columns)
+	require.Len(t, profiles.Rows, 2)
+
+	policies, err := exec.callNornicDbKnowledgePolicyPolicies()
+	require.NoError(t, err)
+	require.Equal(t, []string{"kind", "Name", "Scope", "Multiplier", "ScoreFloor", "ScoreCap", "Enabled", "TargetLabels", "TargetEdgeType", "IsWildcard", "IsEdge"}, policies.Columns)
+	require.Len(t, policies.Rows, 2)
+
+	_, err = exec.callNornicDbKnowledgePolicyResolve([]interface{}{"missing-entity"})
+	require.EqualError(t, err, "entity not found: missing-entity")
+	resolveByLabels, err := exec.callNornicDbKnowledgePolicyResolve([]interface{}{"", "Fact"})
+	require.NoError(t, err)
+	require.Len(t, resolveByLabels.Rows, 1)
+	require.Equal(t, "dry-run", resolveByLabels.Rows[0][0])
+	resolveByEdge, err := exec.callNornicDbKnowledgePolicyResolve([]interface{}{"", "", "LINKS"})
+	require.NoError(t, err)
+	require.Len(t, resolveByEdge.Rows, 1)
+	require.Equal(t, "dry-run", resolveByEdge.Rows[0][0])
 
 	s, err := optionalStringArg([]interface{}{"  x  "}, 0)
 	require.NoError(t, err)
@@ -163,4 +215,33 @@ func TestKnowledgePolicyFunctionHelpers_Branches(t *testing.T) {
 
 	_, err = validateDecayOptions(context.Background(), "42", nil, nil, exec)
 	require.ErrorContains(t, err, "decayScore/decay options must be a map")
+
+	require.Equal(t, "NODE", bindingScope(knowledgepolicy.DecayProfileBinding{}))
+	require.Equal(t, "EDGE", bindingScope(knowledgepolicy.DecayProfileBinding{IsEdge: true}))
+	require.Equal(t, "*", bindingTarget(knowledgepolicy.DecayProfileBinding{IsWildcard: true}))
+	require.Equal(t, "REL", bindingTarget(knowledgepolicy.DecayProfileBinding{IsEdge: true, TargetEdgeType: "REL"}))
+	require.Equal(t, "A:B", bindingTarget(knowledgepolicy.DecayProfileBinding{TargetLabels: []string{"A", "B"}}))
+
+	require.Equal(t, "NODE", promotionPolicyScope(knowledgepolicy.PromotionPolicyDef{}))
+	require.Equal(t, "EDGE", promotionPolicyScope(knowledgepolicy.PromotionPolicyDef{IsEdge: true}))
+	require.Equal(t, "*", promotionPolicyTarget(knowledgepolicy.PromotionPolicyDef{IsWildcard: true}))
+	require.Equal(t, "REL", promotionPolicyTarget(knowledgepolicy.PromotionPolicyDef{IsEdge: true, TargetEdgeType: "REL"}))
+	require.Equal(t, "A:B", promotionPolicyTarget(knowledgepolicy.PromotionPolicyDef{TargetLabels: []string{"A", "B"}}))
+
+	// Unknown function call branch.
+	v, handled := exec.evaluateKnowledgePolicyFunction(context.Background(), "noop(n)", "noop(n)", map[string]*storage.Node{"n": node}, map[string]*storage.Edge{"r": edge})
+	require.False(t, handled)
+	require.Nil(t, v)
+
+	// Memory engine has no decay context, so decay helpers return neutral fallback values.
+	decayScore := exec.evalDecayScore(context.Background(), "decayScore(n, {unknown:'x'})", map[string]*storage.Node{"n": node}, nil)
+	require.Equal(t, 1.0, decayScore)
+	decay := exec.evalDecay(context.Background(), "decay(n, {unknown:'x'})", map[string]*storage.Node{"n": node}, nil)
+	require.Equal(t, map[string]interface{}{"score": 1.0, "applies": false, "reason": "no BadgerEngine"}, decay)
+
+	// Policy fallbacks on missing entity and missing argument.
+	policy := exec.evalPolicy(context.Background(), "policy()", map[string]*storage.Node{"n": node}, nil)
+	require.Equal(t, map[string]interface{}{"targetId": "", "targetScope": "NODE"}, policy)
+	policy = exec.evalPolicy(context.Background(), "policy(missing)", map[string]*storage.Node{"n": node}, nil)
+	require.Equal(t, map[string]interface{}{"targetId": "", "targetScope": "NODE"}, policy)
 }
