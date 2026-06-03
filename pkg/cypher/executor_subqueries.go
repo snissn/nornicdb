@@ -1169,46 +1169,6 @@ func (e *StorageExecutor) seedNodesFromOuterMatch(ctx context.Context, outerPart
 		}
 	}
 
-	// Fast path for simple node-seed queries:
-	//   MATCH (v:Label {k: val})
-	// Avoids full executeInternal round-trip for seed extraction in correlated CALL.
-	if findKeywordIndex(trimmedOuter, "MATCH") == 0 &&
-		!hasOuterPipelineClauses &&
-		findKeywordIndex(trimmedOuter, "WHERE") == -1 &&
-		!strings.Contains(trimmedOuter, "-[") &&
-		!strings.Contains(trimmedOuter, "--") {
-		matchBody := strings.TrimSpace(trimmedOuter[len("MATCH"):])
-		np := e.parseNodePattern(ctx, matchBody)
-		if strings.EqualFold(strings.TrimSpace(np.variable), variable) {
-			var nodes []*storage.Node
-			var err error
-			if len(np.labels) > 0 {
-				nodes, err = e.loadNodesWithTemporalViewport(ctx, np.labels)
-				if err != nil {
-					return nil, err
-				}
-			} else {
-				nodes, err = e.loadNodesWithTemporalViewport(ctx, nil)
-				if err != nil {
-					return nil, err
-				}
-			}
-			if len(np.properties) == 0 {
-				return nodes, nil
-			}
-			filtered := make([]*storage.Node, 0, len(nodes))
-			for _, n := range nodes {
-				if n == nil {
-					continue
-				}
-				if e.nodeMatchesProps(n, np.properties) {
-					filtered = append(filtered, n)
-				}
-			}
-			return filtered, nil
-		}
-	}
-
 	seedQuery := strings.TrimSpace(outerPart) + " RETURN " + variable
 	outerRes, err := e.executeInternal(ctx, seedQuery, nil)
 	if err != nil {

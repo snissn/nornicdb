@@ -142,6 +142,46 @@ func TestDeleteHelpers_StreamExecution_NodeEdgeAndStatsBranches(t *testing.T) {
 	require.EqualValues(t, 3, verifyNodes.Rows[0][0])
 }
 
+func TestDeleteHelpers_StreamExecution_ExpressionDeleteVarsBranches(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "delete_stream_expr_cov")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (a:Tmp {id:'a'}), (b:Tmp {id:'b'}), (c:Tmp {id:'c'})", nil)
+	require.NoError(t, err)
+
+	// String branch in executeDeleteStreaming switch via RETURN id(n).
+	res, err := exec.executeDeleteStreaming(ctx, "MATCH (n:Tmp)", "id(n)", false)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, res.Stats.NodesDeleted)
+
+	verify, err := exec.Execute(ctx, "MATCH (n:Tmp) RETURN count(n)", nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, verify.Rows[0][0])
+
+	_, err = exec.Execute(ctx, "CREATE (x:Tmp {id:'x'}), (y:Tmp {id:'y'}), (x)-[:R]->(y)", nil)
+	require.NoError(t, err)
+
+	// Map branch with _edgeId key via map projection expression.
+	res, err = exec.executeDeleteStreaming(ctx, "MATCH ()-[r:R]->()", "{_edgeId: id(r)}", false)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, res.Stats.RelationshipsDeleted)
+
+	verify, err = exec.Execute(ctx, "MATCH ()-[r:R]->() RETURN count(r)", nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, verify.Rows[0][0])
+
+	// Map branch with _nodeId key via map projection expression.
+	res, err = exec.executeDeleteStreaming(ctx, "MATCH (n:Tmp)", "{_nodeId: id(n)}", false)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, res.Stats.NodesDeleted)
+
+	verify, err = exec.Execute(ctx, "MATCH (n:Tmp) RETURN count(n)", nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, verify.Rows[0][0])
+}
+
 func TestWherePartNodePattern(t *testing.T) {
 	np := nodePatternInfo{labels: []string{"A"}}
 	out := wherePartNodePattern(np, "n")

@@ -321,6 +321,9 @@ func (n *NamespacedEngine) GetNodesByLabel(label string) ([]*Node, error) {
 
 	var filtered []*Node
 	for _, node := range allNodes {
+		if node == nil {
+			continue
+		}
 		if n.hasNodePrefix(node.ID) {
 			filtered = append(filtered, n.toUserNode(node))
 		}

@@ -1962,6 +1962,15 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 		if returnIdx > setIdx && returnIdx < setEnd {
 			setEnd = returnIdx
 		}
+		// SET in relationship MERGE chains must terminate before a following
+		// top-level MERGE clause; otherwise the assignment parser consumes
+		// trailing MERGE text into the RHS expression.
+		if nextMergeRel := findKeywordIndexInContext(cypher[setIdx+3:], "MERGE"); nextMergeRel >= 0 {
+			mergeAbs := setIdx + 3 + nextMergeRel
+			if mergeAbs > setIdx && mergeAbs < setEnd {
+				setEnd = mergeAbs
+			}
+		}
 		setClause := strings.TrimSpace(cypher[setIdx+3 : setEnd])
 		if propertiesSet := e.applySetToRelationshipWithContext(ctx, edge, relVar, setClause, nodeContext, relContext); propertiesSet > 0 {
 			if err := store.UpdateEdge(edge); err != nil {

@@ -1726,28 +1726,6 @@ func (e *StorageExecutor) evaluateWhereForContext(ctx context.Context, whereClau
 		return e.evaluateWhereForContext(ctx, left, nodes) || e.evaluateWhereForContext(ctx, right, nodes)
 	}
 
-	// If this clause references exactly one bound variable, route through
-	// evaluateWhere to preserve semantics like NOT (n)-[:TYPE]->().
-	referenced := ""
-	for varName := range nodes {
-		if strings.Contains(clause, "("+varName+")") ||
-			strings.Contains(clause, "("+varName+":") ||
-			strings.Contains(clause, varName+".") ||
-			strings.HasPrefix(clause, varName+")") ||
-			strings.HasPrefix(clause, varName+":") {
-			if referenced != "" && referenced != varName {
-				referenced = "__multi__"
-				break
-			}
-			referenced = varName
-		}
-	}
-	if referenced != "" && referenced != "__multi__" {
-		if node := nodes[referenced]; node != nil {
-			return e.evaluateWhere(ctx, node, referenced, clause)
-		}
-	}
-
 	// Relationship existence predicate across two bound variables:
 	// (a)-[:TYPE]->(b) or (a)<-[:TYPE]-(b)
 	relForwardRe := regexp.MustCompile(`^\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*-\s*\[:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*->\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$`)
@@ -1785,6 +1763,28 @@ func (e *StorageExecutor) evaluateWhereForContext(ctx context.Context, whereClau
 			}
 		}
 		return false
+	}
+
+	// If this clause references exactly one bound variable, route through
+	// evaluateWhere to preserve semantics like NOT (n)-[:TYPE]->().
+	referenced := ""
+	for varName := range nodes {
+		if strings.Contains(clause, "("+varName+")") ||
+			strings.Contains(clause, "("+varName+":") ||
+			strings.Contains(clause, varName+".") ||
+			strings.HasPrefix(clause, varName+")") ||
+			strings.HasPrefix(clause, varName+":") {
+			if referenced != "" && referenced != varName {
+				referenced = "__multi__"
+				break
+			}
+			referenced = varName
+		}
+	}
+	if referenced != "" && referenced != "__multi__" {
+		if node := nodes[referenced]; node != nil {
+			return e.evaluateWhere(ctx, node, referenced, clause)
+		}
 	}
 
 	// Fallback: parse/evaluate as expression with full node context.
