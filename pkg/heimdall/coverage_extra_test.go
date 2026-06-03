@@ -1762,6 +1762,7 @@ var Plugin = &pluginImpl{}
 		assert.False(t, looksLikeLocalModel("gpt-4o-mini"))
 		assert.Equal(t, "Label", getLabelType([]string{"Label"}))
 		assert.Equal(t, "", getLabelType(nil))
+		assert.Equal(t, "", getStringProp(nil, "k"))
 		assert.Equal(t, "value", getStringProp(map[string]interface{}{"k": "value"}, "k"))
 		assert.Equal(t, "", getStringProp(map[string]interface{}{"k": 42}, "k"))
 		assert.NotEmpty(t, truncateContentToTokenEstimate(strings.Repeat("z", 5000), 100))

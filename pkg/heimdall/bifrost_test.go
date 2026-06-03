@@ -1,6 +1,7 @@
 package heimdall
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,6 +10,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type failingFlushWriter struct {
+	header http.Header
+}
+
+func (w *failingFlushWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingFlushWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+
+func (w *failingFlushWriter) WriteHeader(int) {}
+func (w *failingFlushWriter) Flush()          {}
 
 func TestNewBifrost(t *testing.T) {
 	t.Run("disabled when BifrostEnabled is false", func(t *testing.T) {
@@ -200,6 +219,24 @@ func TestBifrost_RequestConfirmation(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, `"type":"confirmation_request"`)
 	assert.Contains(t, body, "Delete all nodes?")
+}
+
+func TestBifrost_RequestConfirmation_PropagatesBroadcastError(t *testing.T) {
+	cfg := Config{
+		Enabled:        true,
+		BifrostEnabled: true,
+	}
+	bifrost := NewBifrost(cfg)
+	require.NotNil(t, bifrost)
+
+	w := &failingFlushWriter{}
+	bifrost.RegisterClient("bad-client", w, w)
+	defer bifrost.UnregisterClient("bad-client")
+
+	confirmed, err := bifrost.RequestConfirmation("dangerous action")
+	require.Error(t, err)
+	assert.False(t, confirmed)
+	assert.Contains(t, err.Error(), "write failed")
 }
 
 func TestBifrost_Stats(t *testing.T) {
