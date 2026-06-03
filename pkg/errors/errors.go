@@ -42,6 +42,9 @@ var (
 	// DDL parse/validation errors.
 	ErrInvalidFulltextRelationshipTypes = stderrors.New("cypher: invalid fulltext relationship types")
 	ErrInvalidMergeChainQuery           = stderrors.New("cypher: invalid merge chain query")
+	// ErrExpressionEvaluationFailed marks expression-evaluation failures that must
+	// surface to callers instead of being treated as literal fallback values.
+	ErrExpressionEvaluationFailed = stderrors.New("cypher: expression evaluation failed")
 )
 
 type mergeCommitTimeUniqueConflictError struct {

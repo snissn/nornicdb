@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	nerrors "github.com/orneryd/nornicdb/pkg/errors"
 )
 
 func (e *StorageExecutor) preprocessShellCommands(ctx context.Context, cypher string, explicitParams map[string]interface{}) (string, context.Context, *ExecuteResult, error) {
@@ -347,14 +349,42 @@ func (e *StorageExecutor) evaluateParamMapExpression(ctx context.Context, mapExp
 
 		result, err := e.executeInternal(ctx, "RETURN "+valueExpr+" AS value", params)
 		if err != nil {
-			return nil, fmt.Errorf("failed to evaluate parameter %s: %w", key, err)
+			return nil, fmt.Errorf("%w: parameter %s: %w", nerrors.ErrExpressionEvaluationFailed, key, err)
 		}
 		if len(result.Rows) == 0 || len(result.Rows[0]) == 0 {
-			return nil, fmt.Errorf("parameter %s produced no value", key)
+			return nil, fmt.Errorf("%w: parameter %s produced no value", nerrors.ErrExpressionEvaluationFailed, key)
 		}
-		out[key] = result.Rows[0][0]
+		value := result.Rows[0][0]
+		if isUnevaluatedParameterExpression(valueExpr, value) {
+			return nil, fmt.Errorf("%w: parameter %s unresolved expression %q", nerrors.ErrExpressionEvaluationFailed, key, strings.TrimSpace(valueExpr))
+		}
+		out[key] = value
 	}
 	return out, nil
+}
+
+func isUnevaluatedParameterExpression(expr string, value interface{}) bool {
+	got, ok := value.(string)
+	if !ok {
+		return false
+	}
+	trimmed := strings.TrimSpace(expr)
+	if strings.TrimSpace(got) != trimmed {
+		return false
+	}
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "'") || strings.HasPrefix(trimmed, "\"") {
+		return false
+	}
+	if strings.EqualFold(trimmed, "true") || strings.EqualFold(trimmed, "false") || strings.EqualFold(trimmed, "null") {
+		return false
+	}
+	if isNumericLiteral(trimmed) {
+		return false
+	}
+	return true
 }
 
 func topLevelColonIndex(input string) int {
