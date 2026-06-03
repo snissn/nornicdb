@@ -127,3 +127,39 @@ func TestExecuteMergeWithContext_RelationshipChainAndSet(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 0, res2.Stats.RelationshipsCreated)
 }
+
+func TestExecuteMergeWithChain_RelationshipBranchesAndChainBreak(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "merge_chain_rel_branches_cov")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	res, err := exec.executeMergeWithChain(ctx, `
+		MERGE (a:A {id:'a'})
+		MERGE (b:B {id:'b'})
+		MERGE (a)-[:R0]->(b)
+		WITH a
+		MATCH (b:B {id:'b'}) MERGE (a)-[:R1]->(b)
+		MERGE (a)-[:R2]->(b)
+		RETURN a.id AS aid
+	`)
+	require.NoError(t, err)
+	require.Equal(t, []string{"aid"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "a", res.Rows[0][0])
+	require.EqualValues(t, 3, res.Stats.RelationshipsCreated)
+
+	verify, err := exec.Execute(ctx, "MATCH (a:A {id:'a'})-[r]->(b:B {id:'b'}) RETURN count(r)", nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, verify.Rows[0][0])
+
+	// MATCH parse error in chained segment should break the chain and return zero rows.
+	res2, err := exec.executeMergeWithChain(ctx, `
+		MERGE (x:A {id:'x'})
+		WITH x
+		MATCH (bad
+		RETURN x.id AS xid
+	`)
+	require.NoError(t, err)
+	require.Empty(t, res2.Rows)
+}
