@@ -1478,9 +1478,17 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				// Find ALL matching nodes for this pattern (for cartesian product)
 				var matchingNodes []*storage.Node
 				if len(nodeInfo.labels) > 0 {
-					matchingNodes, _ = store.GetNodesByLabel(nodeInfo.labels[0])
+					var err error
+					matchingNodes, err = store.GetNodesByLabel(nodeInfo.labels[0])
+					if err != nil {
+						return nil, fmt.Errorf("failed to get nodes by label %q in MATCH segment: %w", nodeInfo.labels[0], err)
+					}
 				} else {
-					matchingNodes, _ = store.AllNodes()
+					var err error
+					matchingNodes, err = store.AllNodes()
+					if err != nil {
+						return nil, fmt.Errorf("failed to get all nodes in MATCH segment: %w", err)
+					}
 				}
 
 				// Filter by additional labels
@@ -1637,8 +1645,10 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 						}
 						exists, err := hasRelationshipOfType(store, startNode.ID, endNode.ID, rc.edgeType)
 						if err != nil {
-							keep = false
-							break
+							return nil, fmt.Errorf(
+								"failed relationship existence check for %s-[:%s]->%s: %w",
+								rc.startVar, rc.edgeType, rc.endVar, err,
+							)
 						}
 						if exists {
 							keep = false
