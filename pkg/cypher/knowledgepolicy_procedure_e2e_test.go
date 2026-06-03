@@ -127,6 +127,47 @@ func TestE2E_ShowPromotionPolicies_RowShapes(t *testing.T) {
 	assert.Equal(t, 1, row[5])
 }
 
+func TestE2E_ShowPromotionProfiles_RowShapes(t *testing.T) {
+	be, err := storage.NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = be.Close() })
+
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(be, "test"))
+	ctx := context.Background()
+
+	_, err = exec.Execute(ctx, "CREATE PROMOTION PROFILE promo_alpha OPTIONS { multiplier: 1.25, scoreFloor: 0.4, scoreCap: 0.95, scope: 'NODE' }", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE PROMOTION PROFILE promo_beta OPTIONS { multiplier: 2.0, scoreFloor: 0.2, scoreCap: 0.99, scope: 'EDGE' }", nil)
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, "SHOW PROMOTION PROFILES", nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"name", "scope", "multiplier", "scoreFloor", "scoreCap", "enabled"}, result.Columns)
+	require.Len(t, result.Rows, 2)
+
+	rows := make(map[string][]interface{}, len(result.Rows))
+	for _, row := range result.Rows {
+		require.Len(t, row, 6)
+		name, ok := row[0].(string)
+		require.True(t, ok)
+		rows[name] = row
+	}
+
+	require.Contains(t, rows, "promo_alpha")
+	assert.Equal(t, "NODE", rows["promo_alpha"][1])
+	assert.Equal(t, 1.25, rows["promo_alpha"][2])
+	assert.Equal(t, 0.4, rows["promo_alpha"][3])
+	assert.Equal(t, 0.95, rows["promo_alpha"][4])
+	assert.Equal(t, true, rows["promo_alpha"][5])
+
+	require.Contains(t, rows, "promo_beta")
+	assert.Equal(t, "EDGE", rows["promo_beta"][1])
+	assert.Equal(t, 2.0, rows["promo_beta"][2])
+	assert.Equal(t, 0.2, rows["promo_beta"][3])
+	assert.Equal(t, 0.99, rows["promo_beta"][4])
+	assert.Equal(t, true, rows["promo_beta"][5])
+}
+
 func TestE2E_CallNornicDbKnowledgePolicyProfilesAndPolicies(t *testing.T) {
 	be, err := storage.NewBadgerEngineInMemory()
 	require.NoError(t, err)

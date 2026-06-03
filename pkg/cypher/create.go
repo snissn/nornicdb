@@ -1408,8 +1408,14 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				if err != nil {
 					return nil, err
 				}
-				allCombinations = clauseMatches
-				hadMatchPatterns = true
+				// Only accept the shortcut when it actually produced rows.
+				// If it yields zero rows, fall back to the explicit MATCH pattern scan below
+				// so relationship-create shapes like MATCH (...) CREATE (new)-[:R]->(...) don't
+				// silently no-op when shortcut parsing is overly conservative.
+				if len(clauseMatches) > 0 {
+					allCombinations = clauseMatches
+					hadMatchPatterns = true
+				}
 			}
 		}
 
@@ -1953,7 +1959,17 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				}
 				var cnt int64
 				for _, combination := range allCombinations {
-					if e.evaluateExpressionWithContext(ctx, inner, combination, edgeVars) != nil {
+					// COUNT(expr) after MATCH...CREATE should be able to see both matched
+					// bindings (from combination) and newly-created bindings (nodeVars).
+					// Using combination alone makes COUNT(newVar) incorrectly return 0.
+					combined := make(map[string]*storage.Node, len(nodeVars)+len(combination))
+					for k, v := range nodeVars {
+						combined[k] = v
+					}
+					for k, v := range combination {
+						combined[k] = v
+					}
+					if e.evaluateExpressionWithContext(ctx, inner, combined, edgeVars) != nil {
 						cnt++
 					}
 				}
