@@ -850,19 +850,6 @@ func (e *StorageExecutor) resolveCorrelatedImportValue(ctx context.Context, oute
 		}
 		return val, true, nil
 	}
-	if len(outerResult.Rows) == 1 && importCol >= 0 && importCol < len(outerResult.Rows[0]) {
-		val := outerResult.Rows[0][importCol]
-		if cache != nil {
-			byVar, ok := cache[seedID]
-			if !ok {
-				byVar = make(map[string]interface{}, 4)
-				cache[seedID] = byVar
-			}
-			byVar[importVar] = val
-		}
-		return val, true, nil
-	}
-
 	// Fallback for OPTIONAL MATCH imports: resolve the imported variable using
 	// a seed-scoped OPTIONAL MATCH query. This preserves correlated semantics for
 	// patterns like:

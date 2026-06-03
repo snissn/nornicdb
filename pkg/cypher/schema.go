@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	nerrors "github.com/orneryd/nornicdb/pkg/errors"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -1580,13 +1581,16 @@ func (e *StorageExecutor) executeCreateFulltextIndex(ctx context.Context, cypher
 	// match it.
 	if matches := fulltextRelIndexPattern.FindStringSubmatch(cypher); matches != nil {
 		indexName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
+		relTypes, err := parseFulltextRelationshipTypes(matches[3])
+		if err != nil {
+			return nil, err
+		}
 		propertiesStr := matches[4]
 		properties := e.parseQualifiedIndexProperties(propertiesStr)
 		if len(properties) == 0 {
 			return nil, fmt.Errorf("no properties found in fulltext index definition")
 		}
-		if err := schema.AddFulltextRelationshipIndex(indexName, []string{relType}, properties); err != nil {
+		if err := schema.AddFulltextRelationshipIndex(indexName, relTypes, properties); err != nil {
 			return nil, fmt.Errorf("failed to add fulltext relationship index: %w", err)
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -1707,6 +1711,53 @@ func parseDomainValueList(raw string) ([]interface{}, error) {
 	}
 
 	return values, nil
+}
+
+func parseFulltextRelationshipTypes(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nerrors.ErrInvalidFulltextRelationshipTypes
+	}
+
+	types := make([]string, 0, 2)
+	var cur strings.Builder
+	inBacktick := false
+
+	flush := func() error {
+		part := normalizeIdentifierToken(strings.TrimSpace(cur.String()))
+		cur.Reset()
+		if part == "" {
+			return nerrors.ErrInvalidFulltextRelationshipTypes
+		}
+		types = append(types, part)
+		return nil
+	}
+
+	for _, r := range raw {
+		switch r {
+		case '`':
+			inBacktick = !inBacktick
+			cur.WriteRune(r)
+		case '|':
+			if inBacktick {
+				cur.WriteRune(r)
+				continue
+			}
+			if err := flush(); err != nil {
+				return nil, err
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+
+	if inBacktick {
+		return nil, nerrors.ErrInvalidFulltextRelationshipTypes
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	return types, nil
 }
 
 func normalizeIdentifierToken(v string) string {

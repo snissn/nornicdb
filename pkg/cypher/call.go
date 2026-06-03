@@ -698,6 +698,11 @@ func (e *StorageExecutor) executeCallTailSetBased(
 		}
 		return res, true
 	}
+	// Preserve typed relationship semantics by delegating non-fast-path typed
+	// tails to executeCallTail's per-row fallback.
+	if callTailHasRelationshipTypeConstraint(tail) {
+		return nil, false
+	}
 	relationshipTail := strings.Contains(tail, "-[") || strings.Contains(tail, "]-")
 	upperTail := strings.ToUpper(tail)
 	// Relationship tails that aggregate over path length still benefit from a
@@ -841,6 +846,47 @@ func (e *StorageExecutor) executeCallTailSetBased(
 		res.Columns = append([]string{}, expectedCols...)
 	}
 	return res, true
+}
+
+func callTailHasRelationshipTypeConstraint(tail string) bool {
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(tail); i++ {
+		ch := tail[i]
+		if inSingle {
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		if ch == '\'' {
+			inSingle = true
+			continue
+		}
+		if ch == '"' {
+			inDouble = true
+			continue
+		}
+		if ch != '[' {
+			continue
+		}
+		end := strings.IndexByte(tail[i+1:], ']')
+		if end < 0 {
+			return false
+		}
+		segment := tail[i+1 : i+1+end]
+		if strings.Contains(segment, ":") {
+			return true
+		}
+		i += end
+	}
+	return false
 }
 func (e *StorageExecutor) tryExecuteCallTailVariableLengthMaxLengthFastPath(
 	ctx context.Context,

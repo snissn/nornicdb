@@ -33,6 +33,15 @@ var (
 	// a concurrent MERGE race. Retry-aware clients can safely replay because the
 	// winner's committed node will be observed on the next attempt.
 	ErrMergeCommitTimeUniqueConflict = stderrors.New("merge commit-time unique conflict")
+	// Procedure catalog lifecycle errors.
+	ErrProcedureCatalogReadFailed         = stderrors.New("cypher: procedure catalog read failed")
+	ErrProcedureCatalogRecordDecodeFailed = stderrors.New("cypher: procedure catalog record decode failed")
+	ErrProcedureCatalogRecordInvalid      = stderrors.New("cypher: procedure catalog record invalid")
+	ErrProcedureRegistryReloadFailed      = stderrors.New("cypher: procedure registry reload failed")
+
+	// DDL parse/validation errors.
+	ErrInvalidFulltextRelationshipTypes = stderrors.New("cypher: invalid fulltext relationship types")
+	ErrInvalidMergeChainQuery           = stderrors.New("cypher: invalid merge chain query")
 )
 
 type mergeCommitTimeUniqueConflictError struct {

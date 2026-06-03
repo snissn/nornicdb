@@ -125,7 +125,7 @@ var (
 	// or  ()-[var:Type]->()  /  ()<-[var:Type]-()  — Neo4j accepts any
 	// direction marker because the index is direction-agnostic. The
 	// surrounding empty node patterns (`()`) are mandatory.
-	fulltextRelIndexPattern = regexp.MustCompile(`(?is)^\s*CREATE\s+FULLTEXT\s+INDEX\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*<?-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*>?\s*\(\s*\)\s+ON\s+EACH\s+\[([^\]]+)\]` + ddlOptionsTail + `\s*$`)
+	fulltextRelIndexPattern = regexp.MustCompile(`(?is)^\s*CREATE\s+FULLTEXT\s+INDEX\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*<?-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*([^\]]+?)\s*\]\s*-\s*>?\s*\(\s*\)\s+ON\s+EACH\s+\[([^\]]+)\]` + ddlOptionsTail + `\s*$`)
 
 	// Vector index patterns
 	vectorIndexPattern      = regexp.MustCompile(`(?is)^\s*CREATE\s+VECTOR\s+INDEX\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ON\s+\(\s*(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s*\)`)

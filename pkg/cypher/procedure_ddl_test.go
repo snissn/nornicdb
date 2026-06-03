@@ -3,8 +3,10 @@ package cypher
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"testing"
 
+	nerrors "github.com/orneryd/nornicdb/pkg/errors"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
@@ -101,106 +103,83 @@ func TestLoadPersistedProcedures_BranchCoverage(t *testing.T) {
 	ClearUserProcedures()
 	t.Cleanup(ClearUserProcedures)
 
-	base := newTestMemoryEngine(t)
-	store := storage.NewNamespacedEngine(base, "test")
-	exec := NewStorageExecutor(store)
-	ctx := context.Background()
+	t.Run("loads valid persisted procedures", func(t *testing.T) {
+		base := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
 
-	// no record property -> ignored
-	_, err := store.CreateNode(&storage.Node{
-		ID:         procedureCatalogNodeID("nornic.norecord"),
-		Labels:     []string{procedureCatalogLabel},
-		Properties: map[string]interface{}{"name": "nornic.norecord"},
+		valid := persistedProcedureRecord{
+			Name:      "nornic.loadedProc",
+			Mode:      "READ",
+			Body:      "RETURN 42 AS value",
+			Signature: buildProcedureSignature("nornic.loadedProc", nil),
+		}
+		validBlob, err := msgpack.Marshal(valid)
+		require.NoError(t, err)
+		_, err = store.CreateNode(&storage.Node{
+			ID:     procedureCatalogNodeID("nornic.loadedProc"),
+			Labels: []string{procedureCatalogLabel},
+			Properties: map[string]interface{}{
+				"record": base64.StdEncoding.EncodeToString(validBlob),
+			},
+		})
+		require.NoError(t, err)
+
+		ClearUserProcedures()
+		require.NoError(t, exec.loadPersistedProcedures())
+
+		res, err := exec.Execute(ctx, "CALL nornic.loadedProc()", nil)
+		require.NoError(t, err)
+		require.Len(t, res.Rows, 1)
+		require.Equal(t, int64(42), res.Rows[0][0])
 	})
-	require.NoError(t, err)
 
-	// invalid base64 -> ignored
-	_, err = store.CreateNode(&storage.Node{
-		ID:     procedureCatalogNodeID("nornic.badb64"),
-		Labels: []string{procedureCatalogLabel},
-		Properties: map[string]interface{}{
-			"record": "not-valid-base64",
-		},
+	t.Run("returns decode error for invalid record payload", func(t *testing.T) {
+		base := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(store)
+
+		_, err := store.CreateNode(&storage.Node{
+			ID:     procedureCatalogNodeID("nornic.badb64"),
+			Labels: []string{procedureCatalogLabel},
+			Properties: map[string]interface{}{
+				"record": "not-valid-base64",
+			},
+		})
+		require.NoError(t, err)
+
+		err = exec.loadPersistedProcedures()
+		require.Error(t, err)
+		require.True(t, errors.Is(err, nerrors.ErrProcedureCatalogRecordDecodeFailed))
 	})
-	require.NoError(t, err)
 
-	// invalid msgpack payload -> ignored
-	_, err = store.CreateNode(&storage.Node{
-		ID:     procedureCatalogNodeID("nornic.badpack"),
-		Labels: []string{procedureCatalogLabel},
-		Properties: map[string]interface{}{
-			"record": base64.StdEncoding.EncodeToString([]byte("bad-msgpack")),
-		},
+	t.Run("returns invalid record error when compile fails", func(t *testing.T) {
+		base := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(store)
+
+		invalidMode := persistedProcedureRecord{
+			Name:      "nornic.invalidMode",
+			Mode:      "NOPE",
+			Body:      "RETURN 1 AS value",
+			Signature: buildProcedureSignature("nornic.invalidMode", nil),
+		}
+		invalidBlob, err := msgpack.Marshal(invalidMode)
+		require.NoError(t, err)
+		_, err = store.CreateNode(&storage.Node{
+			ID:     procedureCatalogNodeID("nornic.invalidMode"),
+			Labels: []string{procedureCatalogLabel},
+			Properties: map[string]interface{}{
+				"record": base64.StdEncoding.EncodeToString(invalidBlob),
+			},
+		})
+		require.NoError(t, err)
+
+		err = exec.loadPersistedProcedures()
+		require.Error(t, err)
+		require.True(t, errors.Is(err, nerrors.ErrProcedureCatalogRecordInvalid))
 	})
-	require.NoError(t, err)
-
-	// compile failure (invalid mode) -> ignored
-	invalidMode := persistedProcedureRecord{
-		Name:      "nornic.invalidMode",
-		Mode:      "NOPE",
-		Body:      "RETURN 1 AS value",
-		Signature: buildProcedureSignature("nornic.invalidMode", nil),
-	}
-	invalidBlob, err := msgpack.Marshal(invalidMode)
-	require.NoError(t, err)
-	_, err = store.CreateNode(&storage.Node{
-		ID:     procedureCatalogNodeID("nornic.invalidMode"),
-		Labels: []string{procedureCatalogLabel},
-		Properties: map[string]interface{}{
-			"record": base64.StdEncoding.EncodeToString(invalidBlob),
-		},
-	})
-	require.NoError(t, err)
-
-	valid := persistedProcedureRecord{
-		Name:      "nornic.loadedProc",
-		Mode:      "READ",
-		Body:      "RETURN 42 AS value",
-		Signature: buildProcedureSignature("nornic.loadedProc", nil),
-	}
-	validBlob, err := msgpack.Marshal(valid)
-	require.NoError(t, err)
-	_, err = store.CreateNode(&storage.Node{
-		ID:     procedureCatalogNodeID("nornic.loadedProc"),
-		Labels: []string{procedureCatalogLabel},
-		Properties: map[string]interface{}{
-			"record": base64.StdEncoding.EncodeToString(validBlob),
-		},
-	})
-	require.NoError(t, err)
-
-	validSecond := persistedProcedureRecord{
-		Name:      "nornic.loadedProcTwo",
-		Mode:      "READ",
-		Body:      "RETURN 7 AS value",
-		Signature: buildProcedureSignature("nornic.loadedProcTwo", nil),
-	}
-	validSecondBlob, err := msgpack.Marshal(validSecond)
-	require.NoError(t, err)
-	_, err = store.CreateNode(&storage.Node{
-		ID:     procedureCatalogNodeID("nornic.loadedProcTwo"),
-		Labels: []string{procedureCatalogLabel},
-		Properties: map[string]interface{}{
-			"record": base64.StdEncoding.EncodeToString(validSecondBlob),
-		},
-	})
-	require.NoError(t, err)
-
-	ClearUserProcedures()
-	require.NoError(t, exec.loadPersistedProcedures())
-
-	res, err := exec.Execute(ctx, "CALL nornic.loadedProc()", nil)
-	require.NoError(t, err)
-	require.Len(t, res.Rows, 1)
-	require.Equal(t, int64(42), res.Rows[0][0])
-
-	res, err = exec.Execute(ctx, "CALL nornic.loadedProcTwo()", nil)
-	require.NoError(t, err)
-	require.Len(t, res.Rows, 1)
-	require.Equal(t, int64(7), res.Rows[0][0])
-
-	_, err = exec.Execute(ctx, "CALL nornic.invalidMode()", nil)
-	require.Error(t, err)
 }
 
 func TestDropProcedure_ErrorBranches(t *testing.T) {
@@ -226,4 +205,22 @@ func TestDropProcedure_ErrorBranches(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not allowed inside an active transaction")
 	_, _ = exec.Execute(ctx, "ROLLBACK", nil)
+
+	t.Run("reload failure is surfaced with typed error", func(t *testing.T) {
+		_, err := exec.Execute(ctx, "CREATE OR REPLACE PROCEDURE nornic.to_drop() MODE READ AS RETURN 1 AS value", nil)
+		require.NoError(t, err)
+
+		_, err = store.CreateNode(&storage.Node{
+			ID:     procedureCatalogNodeID("nornic.bad_reload"),
+			Labels: []string{procedureCatalogLabel},
+			Properties: map[string]interface{}{
+				"record": "not-valid-base64",
+			},
+		})
+		require.NoError(t, err)
+
+		_, err = exec.executeDropProcedure(ctx, "DROP PROCEDURE nornic.to_drop")
+		require.Error(t, err)
+		require.True(t, errors.Is(err, nerrors.ErrProcedureRegistryReloadFailed))
+	})
 }

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	nerrors "github.com/orneryd/nornicdb/pkg/errors"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -2267,6 +2268,9 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 	defer func() {
 		e.fabricRecordBindings = originalFabricBindings
 	}()
+	if strings.TrimSpace(cypher) == "" {
+		return nil, nerrors.ErrInvalidMergeChainQuery
+	}
 
 	// Substitute parameters
 	if params := getParamsFromContext(ctx); params != nil {
@@ -2287,7 +2291,7 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 	// Each segment is: [initial MERGE] or [MATCH ... MERGE relationship]
 	segments := e.splitMergeChainSegments(cypher)
 	if len(segments) == 0 {
-		return nil, fmt.Errorf("invalid MERGE...WITH chain: no segments found")
+		return nil, nerrors.ErrInvalidMergeChainQuery
 	}
 
 	// Context to track bound variables (node variable -> *storage.Node)
@@ -2446,6 +2450,14 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 							return nil, err
 						}
 						result.Stats.RelationshipsCreated++
+					} else {
+						mergedNode, mergeVarName, err := e.executeMergeNodeSegment(ctx, clause)
+						if err != nil {
+							return nil, err
+						}
+						if mergedNode != nil && mergeVarName != "" {
+							segmentNodeCtx[mergeVarName] = mergedNode
+						}
 					}
 				case strings.HasPrefix(upperClause, "FOREACH"):
 					_, err := e.executeForeachWithContext(ctx, clause, segmentNodeCtx, segmentRelCtx)
@@ -2570,7 +2582,7 @@ func splitMergeChainClauseBlock(block string) []string {
 		return nil
 	}
 
-	keywords := []string{"OPTIONAL MATCH", "MATCH", "FOREACH", "RETURN"}
+	keywords := []string{"OPTIONAL MATCH", "MATCH", "MERGE", "FOREACH", "RETURN"}
 
 	// Find the first clause start at top level.
 	start := -1

@@ -2,10 +2,12 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/config"
+	nerrors "github.com/orneryd/nornicdb/pkg/errors"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -311,6 +313,22 @@ func TestSchemaErrorCases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("duplicate vector index should be idempotent, got error: %v", err)
 		}
+	})
+
+	t.Run("FulltextRelationshipIndexSupportsMultipleTypes", func(t *testing.T) {
+		_, err := exec.executeCreateFulltextIndex(ctx, "CREATE FULLTEXT INDEX rel_ft_multi FOR ()-[r:OWNS|MANAGES]-() ON EACH [r.note, r.summary]")
+		require.NoError(t, err)
+
+		idx, ok := store.GetSchema().GetFulltextIndex("rel_ft_multi")
+		require.True(t, ok)
+		require.Equal(t, []string{"OWNS", "MANAGES"}, idx.RelationshipTypes)
+		require.Equal(t, []string{"note", "summary"}, idx.Properties)
+	})
+
+	t.Run("FulltextRelationshipIndexRejectsInvalidTypeList", func(t *testing.T) {
+		_, err := exec.executeCreateFulltextIndex(ctx, "CREATE FULLTEXT INDEX rel_ft_bad FOR ()-[r:OWNS|]-() ON EACH [r.note]")
+		require.Error(t, err)
+		require.True(t, errors.Is(err, nerrors.ErrInvalidFulltextRelationshipTypes))
 	})
 }
 

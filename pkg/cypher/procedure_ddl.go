@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	nerrors "github.com/orneryd/nornicdb/pkg/errors"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/vmihailenco/msgpack/v5"
@@ -141,7 +142,9 @@ func (e *StorageExecutor) executeDropProcedure(ctx context.Context, cypher strin
 	}
 	// Keep implementation simple and deterministic: refresh user registry from persisted catalog.
 	ClearUserProcedures()
-	_ = e.loadPersistedProcedures()
+	if err := e.loadPersistedProcedures(); err != nil {
+		return nil, fmt.Errorf("%w: %v", nerrors.ErrProcedureRegistryReloadFailed, err)
+	}
 
 	return &ExecuteResult{
 		Columns: []string{"name", "status"},
@@ -244,7 +247,7 @@ func ensureLabel(labels []string, label string) []string {
 func (e *StorageExecutor) loadPersistedProcedures() error {
 	nodes, err := e.storage.GetNodesByLabel(procedureCatalogLabel)
 	if err != nil {
-		return nil
+		return fmt.Errorf("%w: %v", nerrors.ErrProcedureCatalogReadFailed, err)
 	}
 	for _, node := range nodes {
 		raw, ok := node.Properties["record"]
@@ -258,21 +261,23 @@ func (e *StorageExecutor) loadPersistedProcedures() error {
 		case string:
 			decoded, err := base64.StdEncoding.DecodeString(v)
 			if err != nil {
-				continue
+				return fmt.Errorf("%w: node=%s", nerrors.ErrProcedureCatalogRecordDecodeFailed, node.ID)
 			}
 			payload = decoded
 		default:
-			continue
+			return fmt.Errorf("%w: node=%s", nerrors.ErrProcedureCatalogRecordDecodeFailed, node.ID)
 		}
 		var record persistedProcedureRecord
 		if err := util.DecodeMsgpackBytes(payload, &record); err != nil {
-			continue
+			return fmt.Errorf("%w: node=%s", nerrors.ErrProcedureCatalogRecordDecodeFailed, node.ID)
 		}
 		spec, handler, _, err := e.compilePersistedProcedure(record)
 		if err != nil {
-			continue
+			return fmt.Errorf("%w: node=%s", nerrors.ErrProcedureCatalogRecordInvalid, node.ID)
 		}
-		_ = RegisterUserProcedure(spec, handler)
+		if err := RegisterUserProcedure(spec, handler); err != nil {
+			return fmt.Errorf("%w: %v", nerrors.ErrProcedureRegistryReloadFailed, err)
+		}
 	}
 	return nil
 }
