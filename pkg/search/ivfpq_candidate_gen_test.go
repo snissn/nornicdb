@@ -47,3 +47,25 @@ func TestIVFPQCandidateGen_DefaultNProbeAndNilIndex(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not configured")
 }
+
+func TestIVFPQCandidateGen_DefaultNProbeFromIndexProfile(t *testing.T) {
+	idx := &IVFPQIndex{
+		profile:      IVFPQProfile{Dimensions: 1, NProbe: 4},
+		centroids:    [][]float32{{1}},
+		centroidNorm: [][]float32{{1}},
+		codebooks: []ivfpqCodebook{
+			{SubDim: 1, Codeword: [][]float32{{0}, {1}}},
+		},
+		lists: []ivfpqList{
+			{IDs: []string{"doc-1"}, CodeSize: 1, Codes: []byte{1}},
+		},
+	}
+
+	gen := NewIVFPQCandidateGen(idx, 0)
+	require.Equal(t, 4, gen.nprobe)
+
+	cands, err := gen.SearchCandidates(nil, []float32{1}, 1, -1)
+	require.NoError(t, err)
+	require.Len(t, cands, 1)
+	require.Equal(t, "doc-1", cands[0].ID)
+}

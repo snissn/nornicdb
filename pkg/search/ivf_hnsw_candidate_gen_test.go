@@ -101,3 +101,57 @@ func TestIVFHNSWCandidateGen_ErrorAndFallbackBranches(t *testing.T) {
 	_, err = gen.SearchCandidates(cancelled, query, 5, -1.0)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestIVFHNSWCandidateGen_MoreSearchBranches(t *testing.T) {
+	embCfg := gpu.DefaultEmbeddingIndexConfig(2)
+	embCfg.GPUEnabled = false
+	embCfg.AutoSync = false
+	clusterIndex := gpu.NewClusterIndex(nil, embCfg, &gpu.KMeansConfig{
+		NumClusters:   2,
+		MaxIterations: 5,
+		Tolerance:     0.001,
+		InitMethod:    "kmeans++",
+	})
+	require.NoError(t, clusterIndex.Add("a", []float32{1, 0}))
+	require.NoError(t, clusterIndex.Add("b", []float32{0, 1}))
+	require.NoError(t, clusterIndex.Cluster())
+
+	t.Run("zero clusters to search returns empty", func(t *testing.T) {
+		gen := NewIVFHNSWCandidateGen(clusterIndex, func(int) *HNSWIndex { return NewHNSWIndex(2, DefaultHNSWConfig()) }, 1)
+		gen.numClustersToSearch = 0
+		gen.SetClusterSelector(nil)
+		out, err := gen.SearchCandidates(context.Background(), []float32{1, 0}, 5, -1)
+		require.NoError(t, err)
+		require.Empty(t, out)
+	})
+
+	t.Run("lookup turns nil during per-cluster loop", func(t *testing.T) {
+		hidx := NewHNSWIndex(2, DefaultHNSWConfig())
+		require.NoError(t, hidx.Add("a", []float32{1, 0}))
+
+		calls := 0
+		gen := NewIVFHNSWCandidateGen(clusterIndex, func(int) *HNSWIndex {
+			calls++
+			if calls <= 2 {
+				return hidx // precheck pass
+			}
+			return nil // per-cluster loop branch: idx == nil => continue
+		}, 2)
+		gen.SetClusterSelector(func(context.Context, []float32, int) []int { return []int{0, 1} })
+
+		out, err := gen.SearchCandidates(context.Background(), []float32{1, 0}, 5, -1)
+		require.NoError(t, err)
+		require.Empty(t, out)
+	})
+
+	t.Run("per-cluster search error surfaces", func(t *testing.T) {
+		hidx := NewHNSWIndex(2, DefaultHNSWConfig())
+		require.NoError(t, hidx.Add("a", []float32{1, 0}))
+
+		gen := NewIVFHNSWCandidateGen(clusterIndex, func(int) *HNSWIndex { return hidx }, 1)
+		gen.SetClusterSelector(func(context.Context, []float32, int) []int { return []int{0} })
+
+		_, err := gen.SearchCandidates(context.Background(), []float32{1, 0, 0}, 5, -1)
+		require.Error(t, err)
+	})
+}

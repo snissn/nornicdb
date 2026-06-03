@@ -84,6 +84,9 @@ func (k *KMeansCandidateGen) SearchCandidates(ctx context.Context, query []float
 		bruteGen := NewBruteForceCandidateGen(k.vectorIndex)
 		return bruteGen.SearchCandidates(ctx, query, limit, minSimilarity)
 	}
+	if dims := k.clusterIndex.Dimensions(); dims > 0 && len(query) != dims {
+		return nil, fmt.Errorf("cluster search failed: query dimensions %d != index dimensions %d", len(query), dims)
+	}
 
 	candidateLimit := calculateCandidateLimit(limit)
 	clusterIDs := []int(nil)

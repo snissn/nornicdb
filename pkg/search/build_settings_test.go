@@ -155,4 +155,9 @@ func TestBuildSettings_CurrentBM25AndPersistBranches(t *testing.T) {
 	svc.persistSearchBuildSettings(fulltext, "", "")
 	_, err := os.Stat(filepath.Join(base, "build_settings"))
 	require.NoError(t, err)
+
+	// Error branch: parent path is not a directory; persist should swallow error.
+	badParent := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(badParent, []byte("x"), 0o644))
+	svc.persistSearchBuildSettings(filepath.Join(badParent, "bm25"), "", "")
 }

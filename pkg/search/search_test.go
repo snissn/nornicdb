@@ -752,6 +752,8 @@ func TestVectorOverfetchLimitBoundaries(t *testing.T) {
 		{limit: 5, want: 50},     // minimum floor
 		{limit: 100, want: 1000}, // normal scale
 		{limit: 500, want: 5000}, // hard cap
+		// Overflow-safe path: limit*10 wraps, function clamps defensively.
+		{limit: int(^uint(0) >> 1), want: 5000},
 	}
 	for _, tc := range cases {
 		require.Equal(t, tc.want, vectorOverfetchLimit(tc.limit))
