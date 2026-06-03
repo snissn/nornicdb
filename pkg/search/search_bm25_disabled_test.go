@@ -22,11 +22,17 @@ func TestBM25EngineNormalizationAndFactory(t *testing.T) {
 
 func TestDisabledBM25Index_NoOpContract(t *testing.T) {
 	var idx disabledBM25Index
+	var iface bm25Index = idx
 
 	idx.Index("doc-1", "content")
 	idx.Remove("doc-1")
 	idx.Clear()
 	idx.IndexBatch([]FulltextBatchEntry{{ID: "doc-2", Text: "hello"}})
+	// Exercise the same no-op mutators via interface dispatch too.
+	iface.Index("doc-3", "content")
+	iface.Remove("doc-3")
+	iface.Clear()
+	iface.IndexBatch([]FulltextBatchEntry{{ID: "doc-4", Text: "world"}})
 
 	require.Nil(t, idx.Search("hello", 10))
 	require.Nil(t, idx.PhraseSearch("hello world", 10))

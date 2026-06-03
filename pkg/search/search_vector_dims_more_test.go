@@ -111,3 +111,39 @@ func TestService_MinSimilarityAndCountDimensionFallbacks(t *testing.T) {
 	require.Equal(t, 0, svcNoIndex.EmbeddingCount())
 	require.Equal(t, 0, svcNoIndex.VectorIndexDimensions())
 }
+
+func TestService_ClearVectorIndex_ClearsAllBackendsAndMetadata(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 3)
+
+	vfs, err := NewVectorFileStore(t.TempDir()+"/vectors-clear", 3)
+	require.NoError(t, err)
+	require.NoError(t, vfs.Add("nornic:n1", []float32{1, 0, 0}))
+	svc.vectorFileStore = vfs
+
+	embCfg := gpu.DefaultEmbeddingIndexConfig(3)
+	embCfg.GPUEnabled = false
+	embCfg.AutoSync = false
+	svc.gpuEmbeddingIndex = gpu.NewEmbeddingIndex(nil, embCfg)
+	svc.clusterIndex = gpu.NewClusterIndex(nil, embCfg, gpu.DefaultKMeansConfig())
+	svc.clusterHNSW = map[int]*HNSWIndex{0: NewHNSWIndex(3, DefaultHNSWConfig())}
+	svc.ivfpqIndex = &IVFPQIndex{profile: IVFPQProfile{Dimensions: 3}}
+	svc.hnswIndex = NewHNSWIndex(3, DefaultHNSWConfig())
+	svc.vectorPipeline = NewVectorSearchPipeline(NewBruteForceCandidateGen(svc.vectorIndex), NewCPUExactScorer(svc.vectorIndex))
+
+	svc.nodeLabels["nornic:n1"] = []string{"Doc"}
+	svc.nodeNamedVector["nornic:n1"] = map[string]string{"default": "nornic:n1-named-default"}
+	svc.nodePropVector["nornic:n1"] = map[string]string{"vec": "nornic:n1-prop-vec"}
+	svc.nodeChunkVectors["nornic:n1"] = []string{"nornic:n1-chunk-0"}
+
+	svc.ClearVectorIndex()
+
+	require.Nil(t, svc.vectorPipeline)
+	require.Nil(t, svc.vectorFileStore)
+	require.Nil(t, svc.clusterHNSW)
+	require.Nil(t, svc.ivfpqIndex)
+	require.Nil(t, svc.hnswIndex)
+	require.Empty(t, svc.nodeLabels)
+	require.Empty(t, svc.nodeNamedVector)
+	require.Empty(t, svc.nodePropVector)
+	require.Empty(t, svc.nodeChunkVectors)
+}

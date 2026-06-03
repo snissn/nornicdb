@@ -31,6 +31,7 @@ type graphEdgesStubEngine struct {
 	outErr        error
 	inErr         error
 	cancel        context.CancelFunc
+	cancelIn      context.CancelFunc
 	incomingCalls int
 }
 
@@ -46,6 +47,9 @@ func (e *graphEdgesStubEngine) GetOutgoingEdges(storage.NodeID) ([]*storage.Edge
 
 func (e *graphEdgesStubEngine) GetIncomingEdges(storage.NodeID) ([]*storage.Edge, error) {
 	e.incomingCalls++
+	if e.cancelIn != nil {
+		e.cancelIn()
+	}
 	if e.inErr != nil {
 		return nil, e.inErr
 	}
@@ -63,6 +67,40 @@ func (e *graphNeighborhoodStubEngine) GetNode(id storage.NodeID) (*storage.Node,
 
 type graphNoMVCCEngine struct {
 	storage.Engine
+}
+
+type graphMVCCVisibilityOnlyEngine struct {
+	storage.Engine
+	nodes map[storage.NodeID]*storage.Node
+}
+
+func (e *graphMVCCVisibilityOnlyEngine) GetNodeLatestVisible(id storage.NodeID) (*storage.Node, error) {
+	return e.GetNodeVisibleAt(id, storage.MVCCVersion{})
+}
+
+func (e *graphMVCCVisibilityOnlyEngine) GetNodeVisibleAt(id storage.NodeID, _ storage.MVCCVersion) (*storage.Node, error) {
+	node, ok := e.nodes[id]
+	if !ok {
+		return nil, nil
+	}
+	return node, nil
+}
+
+func (e *graphMVCCVisibilityOnlyEngine) GetEdgeLatestVisible(storage.EdgeID) (*storage.Edge, error) {
+	return nil, nil
+}
+
+func (e *graphMVCCVisibilityOnlyEngine) GetEdgeVisibleAt(storage.EdgeID, storage.MVCCVersion) (*storage.Edge, error) {
+	return nil, nil
+}
+
+type graphSnapshotIndexedErrorEngine struct {
+	*graphSnapshotIndexEngine
+	err error
+}
+
+func (e *graphSnapshotIndexedErrorEngine) GetEdgesByTypeVisibleAt(string, storage.MVCCVersion) ([]*storage.Edge, error) {
+	return nil, e.err
 }
 
 func nodeHeadVersionOrNow(t *testing.T, engine storage.Engine, nodeID storage.NodeID) storage.MVCCVersion {
@@ -1158,4 +1196,325 @@ func TestDiffGraphCollections_OmitsUnchangedEntries(t *testing.T) {
 
 	require.Equal(t, "changed", diff.nodes["changed-node"].Status)
 	require.Equal(t, "changed", diff.edges["changed-edge"].Status)
+}
+
+func TestWriteGraphResolveError_NilNoWrite(t *testing.T) {
+	server, _ := setupTestServer(t)
+	rec := httptest.NewRecorder()
+
+	server.writeGraphResolveError(rec, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "", rec.Body.String())
+}
+
+func TestCollectLatestNeighborhood_CancelledDuringEdgeIteration(t *testing.T) {
+	server := &Server{}
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	engine := &graphNeighborhoodStubEngine{
+		graphEdgesStubEngine: &graphEdgesStubEngine{
+			Engine: base,
+			outgoing: []*storage.Edge{
+				{ID: "ab", StartNode: "a", EndNode: "b", Type: "REL"},
+			},
+			cancel: cancel,
+		},
+		nodes: map[storage.NodeID]*storage.Node{
+			"a": {ID: "a", Labels: []string{"Node"}},
+			"b": {ID: "b", Labels: []string{"Node"}},
+		},
+	}
+
+	_, err := server.collectLatestNeighborhood(ctx, engine, []string{"a"}, 1, 10, newGraphFilterSet(nil, nil))
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCollectLatestPath_CanceledContextBranches(t *testing.T) {
+	server := &Server{}
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := server.collectLatestPath(ctx, base, "a", "b", 10, newGraphFilterSet(nil, nil))
+	require.ErrorIs(t, err, context.Canceled)
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	engine := &graphNeighborhoodStubEngine{
+		graphEdgesStubEngine: &graphEdgesStubEngine{
+			Engine: base,
+			outgoing: []*storage.Edge{
+				{ID: "ab", StartNode: "a", EndNode: "b", Type: "REL"},
+			},
+			cancel: cancel2,
+		},
+		nodes: map[storage.NodeID]*storage.Node{
+			"a": {ID: "a", Labels: []string{"Node"}},
+			"b": {ID: "b", Labels: []string{"Node"}},
+		},
+	}
+	_, err = server.collectLatestPath(ctx2, engine, "a", "b", 10, newGraphFilterSet(nil, nil))
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCollectLatestInducedSubgraph_SkipsSelfAndOutsideEdges(t *testing.T) {
+	server, _ := setupTestServer(t)
+	engine := getDefaultStorage(t, server)
+
+	_, err := engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "c", Labels: []string{"Node"}})
+	require.NoError(t, err)
+
+	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "self", StartNode: "a", EndNode: "a", Type: "REL"}))
+	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "ab", StartNode: "a", EndNode: "b", Type: "REL"}))
+	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "ac", StartNode: "a", EndNode: "c", Type: "REL"}))
+
+	collection, err := server.collectLatestInducedSubgraph(engine, []string{"a", "b"}, newGraphFilterSet(nil, nil))
+	require.NoError(t, err)
+	require.Contains(t, collection.edges, "ab")
+	require.NotContains(t, collection.edges, "self")
+	require.NotContains(t, collection.edges, "ac")
+}
+
+func TestCollectSnapshotInducedSubgraph_AdditionalErrorBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+
+	visibilityOnly := &graphMVCCVisibilityOnlyEngine{
+		Engine: base,
+		nodes:  map[storage.NodeID]*storage.Node{"a": {ID: "a", Labels: []string{"Node"}}},
+	}
+	_, err := server.collectSnapshotInducedSubgraph(visibilityOnly, []string{"a"}, storage.MVCCVersion{}, newGraphFilterSet(nil, nil))
+	require.ErrorIs(t, err, storage.ErrNotImplemented)
+
+	errEngine := &graphSnapshotIndexedErrorEngine{
+		graphSnapshotIndexEngine: &graphSnapshotIndexEngine{
+			Engine: base,
+			nodes: map[storage.NodeID]*storage.Node{
+				"a": {ID: "a", Labels: []string{"Node"}},
+			},
+		},
+		err: fmt.Errorf("indexed edge scan failed"),
+	}
+	_, err = server.collectSnapshotInducedSubgraph(errEngine, []string{"a"}, storage.MVCCVersion{}, newGraphFilterSet(nil, nil))
+	require.EqualError(t, err, "indexed edge scan failed")
+}
+
+func TestCollectSnapshotInducedSubgraph_EmptyResolvedNodesReturnsEarly(t *testing.T) {
+	server, _ := setupTestServer(t)
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+
+	engine := &graphSnapshotIndexEngine{
+		Engine: base,
+		nodes: map[storage.NodeID]*storage.Node{
+			"a": {ID: "a", Labels: []string{"Person"}},
+		},
+		edges: []*storage.Edge{
+			{ID: "ab", StartNode: "a", EndNode: "b", Type: "REL"},
+		},
+	}
+	collection, err := server.collectSnapshotInducedSubgraph(engine, []string{"a"}, storage.MVCCVersion{}, newGraphFilterSet([]string{"Topic"}, nil))
+	require.NoError(t, err)
+	require.Empty(t, collection.nodes)
+	require.Empty(t, collection.edges)
+	require.Equal(t, 0, engine.getEdgesByTypeCalls)
+}
+
+func TestGraphVersionAndEdgeIterationCancellationBranches(t *testing.T) {
+	_, err := parseGraphVersionForField(" ", "as_of")
+	require.EqualError(t, err, "as_of must be a valid datetime")
+
+	ctxOut, cancelOut := context.WithCancel(context.Background())
+	engineOut := &graphEdgesStubEngine{
+		Engine:   storage.NewMemoryEngine(),
+		outgoing: []*storage.Edge{{ID: "o1", StartNode: "a", EndNode: "b", Type: "REL"}},
+		cancel:   cancelOut,
+	}
+	t.Cleanup(func() { _ = engineOut.Close() })
+	_, err = graphEdgesForNode(ctxOut, engineOut, "a")
+	require.ErrorIs(t, err, context.Canceled)
+
+	ctxIn, cancelIn := context.WithCancel(context.Background())
+	engineIn := &graphEdgesStubEngine{
+		Engine:   storage.NewMemoryEngine(),
+		outgoing: []*storage.Edge{},
+		incoming: []*storage.Edge{{ID: "i1", StartNode: "b", EndNode: "a", Type: "REL"}},
+		cancel:   cancelIn,
+	}
+	t.Cleanup(func() { _ = engineIn.Close() })
+	_, err = graphEdgesForNode(ctxIn, engineIn, "a")
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestGraphHandlers_DirectBadJSONBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	nReq := httptest.NewRequest(http.MethodPost, "/nornicdb/graph/nornic/neighborhood", strings.NewReader("{"))
+	nRec := httptest.NewRecorder()
+	server.handleGraphNeighborhood(nRec, nReq)
+	require.Equal(t, http.StatusBadRequest, nRec.Code)
+	require.Contains(t, nRec.Body.String(), "invalid request body")
+
+	pReq := httptest.NewRequest(http.MethodPost, "/nornicdb/graph/nornic/path", strings.NewReader("{"))
+	pRec := httptest.NewRecorder()
+	server.handleGraphPath(pRec, pReq)
+	require.Equal(t, http.StatusBadRequest, pRec.Code)
+	require.Contains(t, pRec.Body.String(), "invalid request body")
+}
+
+func TestCollectLatestNeighborhood_TruncatesWhenNewNeighborExceedsLimit(t *testing.T) {
+	server := &Server{}
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+	engine := &graphNeighborhoodStubEngine{
+		graphEdgesStubEngine: &graphEdgesStubEngine{
+			Engine:   base,
+			outgoing: []*storage.Edge{{ID: "ab", StartNode: "a", EndNode: "b", Type: "REL"}},
+		},
+		nodes: map[storage.NodeID]*storage.Node{
+			"a": {ID: "a", Labels: []string{"Node"}},
+			"b": {ID: "b", Labels: []string{"Node"}},
+		},
+	}
+	collection, err := server.collectLatestNeighborhood(context.Background(), engine, []string{"a"}, 1, 1, newGraphFilterSet(nil, nil))
+	require.NoError(t, err)
+	require.True(t, collection.truncated)
+	require.Contains(t, collection.nodes, "a")
+	require.NotContains(t, collection.nodes, "b")
+}
+
+func TestCollectLatestPath_SkipsMissingOrFilteredNeighborBranches(t *testing.T) {
+	server := &Server{}
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+	engine := &graphNeighborhoodStubEngine{
+		graphEdgesStubEngine: &graphEdgesStubEngine{
+			Engine:   base,
+			outgoing: []*storage.Edge{{ID: "ab", StartNode: "a", EndNode: "b", Type: "REL"}},
+		},
+		nodes: map[storage.NodeID]*storage.Node{
+			"a": {ID: "a", Labels: []string{"Source"}},
+			// "b" intentionally missing to hit nil-node skip branch
+		},
+	}
+
+	_, err := server.collectLatestPath(context.Background(), engine, "a", "b", 10, newGraphFilterSet([]string{"Target"}, nil))
+	require.ErrorIs(t, err, storage.ErrNotFound)
+}
+
+func TestCollectSnapshotInducedSubgraph_SkipsEdgesOutsideResolvedSet(t *testing.T) {
+	server, _ := setupTestServer(t)
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+
+	engine := &graphSnapshotIndexEngine{
+		Engine: base,
+		nodes: map[storage.NodeID]*storage.Node{
+			"a": {ID: "a", Labels: []string{"Node"}},
+			"b": {ID: "b", Labels: []string{"Node"}},
+		},
+		edges: []*storage.Edge{
+			{ID: "ac", StartNode: "a", EndNode: "c", Type: "REL"},
+			{ID: "db", StartNode: "d", EndNode: "b", Type: "REL"},
+			{ID: "ab", StartNode: "a", EndNode: "b", Type: "REL"},
+		},
+	}
+
+	collection, err := server.collectSnapshotInducedSubgraph(engine, []string{"a", "b"}, storage.MVCCVersion{}, newGraphFilterSet(nil, nil))
+	require.NoError(t, err)
+	require.Contains(t, collection.edges, "ab")
+	require.NotContains(t, collection.edges, "ac")
+	require.NotContains(t, collection.edges, "db")
+}
+
+func TestGraphEdgesForNode_OutgoingDuplicateAndLoopCancellationBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+
+	dupEngine := &graphEdgesStubEngine{
+		Engine: base,
+		outgoing: []*storage.Edge{
+			{ID: "e1", StartNode: "a", EndNode: "b", Type: "REL"},
+			{ID: "e1", StartNode: "a", EndNode: "b", Type: "REL"},
+		},
+	}
+	edges, err := graphEdgesForNode(context.Background(), dupEngine, "a")
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+
+	ctxOut, cancelOut := context.WithCancel(context.Background())
+	outCancel := &graphEdgesStubEngine{
+		Engine:   base,
+		outgoing: []*storage.Edge{{ID: "o1", StartNode: "a", EndNode: "b", Type: "REL"}},
+		cancelIn: cancelOut,
+	}
+	_, err = graphEdgesForNode(ctxOut, outCancel, "a")
+	require.ErrorIs(t, err, context.Canceled)
+
+	ctxIn, cancelIn := context.WithCancel(context.Background())
+	inCancel := &graphEdgesStubEngine{
+		Engine:   base,
+		outgoing: []*storage.Edge{},
+		incoming: []*storage.Edge{{ID: "i1", StartNode: "b", EndNode: "a", Type: "REL"}},
+		cancelIn: cancelIn,
+	}
+	_, err = graphEdgesForNode(ctxIn, inCancel, "a")
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestGraphHandlers_ResolveAndCollectionErrorBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	// handleGraphPath: resolveGraphStorage error branch (missing path value).
+	pathReq := httptest.NewRequest(http.MethodPost, "/nornicdb/graph/path", strings.NewReader(`{"source_node_id":"a","target_node_id":"b"}`))
+	pathRec := httptest.NewRecorder()
+	server.handleGraphPath(pathRec, pathReq)
+	require.Equal(t, http.StatusBadRequest, pathRec.Code)
+	require.Contains(t, pathRec.Body.String(), "database path parameter is required")
+
+	// handleGraphNeighborhood: collection error branch via canceled context.
+	engine := getDefaultStorage(t, server)
+	_, err := engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	nbReq := httptest.NewRequest(http.MethodPost, "/nornicdb/graph/neighborhood", strings.NewReader(`{"node_ids":["a"],"depth":1}`)).WithContext(
+		context.WithValue(ctx, contextKeyClaims, &auth.JWTClaims{Username: "admin", Roles: []string{"admin"}}),
+	)
+	nbReq.SetPathValue("database", server.dbManager.DefaultDatabaseName())
+	nbRec := httptest.NewRecorder()
+	server.handleGraphNeighborhood(nbRec, nbReq)
+	require.Equal(t, http.StatusInternalServerError, nbRec.Code)
+}
+
+func TestCollectLatestNeighborhood_CanceledInsideEdgeLoop(t *testing.T) {
+	server := &Server{}
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	engine := &graphNeighborhoodStubEngine{
+		graphEdgesStubEngine: &graphEdgesStubEngine{
+			Engine: base,
+			outgoing: []*storage.Edge{
+				{ID: "ab", StartNode: "a", EndNode: "b", Type: "REL"},
+			},
+			incoming: []*storage.Edge{},
+			cancelIn: cancel,
+		},
+		nodes: map[storage.NodeID]*storage.Node{
+			"a": {ID: "a", Labels: []string{"Node"}},
+			"b": {ID: "b", Labels: []string{"Node"}},
+		},
+	}
+
+	_, err := server.collectLatestNeighborhood(ctx, engine, []string{"a"}, 1, 10, newGraphFilterSet(nil, nil))
+	require.ErrorIs(t, err, context.Canceled)
 }

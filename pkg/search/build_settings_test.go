@@ -116,6 +116,14 @@ func TestLoadAndSaveSearchBuildSettings_EdgeBranches(t *testing.T) {
 		err := saveSearchBuildSettings(filepath.Join(parentFile, "build_settings"), searchBuildSettingsSnapshot{FormatVersion: searchBuildSettingsFormatVersion})
 		require.Error(t, err)
 	})
+
+	t.Run("save returns create error when target path is a directory", func(t *testing.T) {
+		targetDir := filepath.Join(t.TempDir(), "build_settings")
+		require.NoError(t, os.MkdirAll(targetDir, 0o755))
+
+		err := saveSearchBuildSettings(targetDir, searchBuildSettingsSnapshot{FormatVersion: searchBuildSettingsFormatVersion})
+		require.Error(t, err)
+	})
 }
 
 func TestComposeRoutingBuildSettings_ClampsAndDefaults(t *testing.T) {
