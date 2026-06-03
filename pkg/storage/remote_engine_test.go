@@ -25,6 +25,49 @@ type errReadCloser struct{}
 func (e *errReadCloser) Read(_ []byte) (int, error) { return 0, fmt.Errorf("read failed") }
 func (e *errReadCloser) Close() error               { return nil }
 
+type fakeRemoteTransport struct {
+	queryFn            func(context.Context, string, map[string]interface{}) ([][]interface{}, error)
+	queryWithColumnsFn func(context.Context, string, map[string]interface{}) ([]string, [][]interface{}, error)
+	queryBatchFn       func(context.Context, []remoteStatement) error
+	beginCypherTxFn    func(context.Context) (RemoteCypherTx, error)
+	closeFn            func() error
+}
+
+func (f *fakeRemoteTransport) query(ctx context.Context, statement string, params map[string]interface{}) ([][]interface{}, error) {
+	if f.queryFn != nil {
+		return f.queryFn(ctx, statement, params)
+	}
+	return nil, nil
+}
+
+func (f *fakeRemoteTransport) queryWithColumns(ctx context.Context, statement string, params map[string]interface{}) ([]string, [][]interface{}, error) {
+	if f.queryWithColumnsFn != nil {
+		return f.queryWithColumnsFn(ctx, statement, params)
+	}
+	return nil, nil, nil
+}
+
+func (f *fakeRemoteTransport) queryBatch(ctx context.Context, statements []remoteStatement) error {
+	if f.queryBatchFn != nil {
+		return f.queryBatchFn(ctx, statements)
+	}
+	return nil
+}
+
+func (f *fakeRemoteTransport) beginCypherTx(ctx context.Context) (RemoteCypherTx, error) {
+	if f.beginCypherTxFn != nil {
+		return f.beginCypherTxFn(ctx)
+	}
+	return nil, nil
+}
+
+func (f *fakeRemoteTransport) close() error {
+	if f.closeFn != nil {
+		return f.closeFn()
+	}
+	return nil
+}
+
 func makeTXResponse(rows [][]interface{}, errs []map[string]string) io.ReadCloser {
 	data := make([]map[string]interface{}, 0, len(rows))
 	for _, row := range rows {
@@ -1157,4 +1200,163 @@ func TestRemoteEngineQueryCypherAndHTTPClosedBranches(t *testing.T) {
 	if _, _, err := tx.QueryCypher(context.Background(), "RETURN 1", nil); err == nil {
 		t.Fatalf("expected QueryCypher on closed transaction to fail")
 	}
+}
+
+func TestRemoteEngineHTTPBeginCypherTx_ErrorPaths(t *testing.T) {
+	t.Run("response body read fails", func(t *testing.T) {
+		engine := makeEngineWithTransport(t, "http://remote.example", func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: &errReadCloser{}}, nil
+		})
+		_, err := engine.BeginCypherTx(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "read failed") {
+			t.Fatalf("expected body read error, got: %v", err)
+		}
+	})
+
+	t.Run("open response decode fails", func(t *testing.T) {
+		engine := makeEngineWithTransport(t, "http://remote.example", func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"commit":`)),
+			}, nil
+		})
+		_, err := engine.BeginCypherTx(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "remote tx open decode failed") {
+			t.Fatalf("expected decode error, got: %v", err)
+		}
+	})
+
+	t.Run("open response contains error payload", func(t *testing.T) {
+		engine := makeEngineWithTransport(t, "http://remote.example", func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"errors":[{"code":"Neo.ClientError.Statement.InvalidSyntax","message":"bad query"}]}`,
+				)),
+			}, nil
+		})
+		_, err := engine.BeginCypherTx(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "InvalidSyntax") {
+			t.Fatalf("expected open payload error, got: %v", err)
+		}
+	})
+
+	t.Run("open response missing commit URL", func(t *testing.T) {
+		engine := makeEngineWithTransport(t, "http://remote.example", func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"results":[],"errors":[],"commit":"   "}`)),
+			}, nil
+		})
+		_, err := engine.BeginCypherTx(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "empty commit URL") {
+			t.Fatalf("expected empty commit URL error, got: %v", err)
+		}
+	})
+}
+
+func TestRemoteEngineHTTPQueryCypher_EmptyResultsBranches(t *testing.T) {
+	engine := makeEngineWithTransport(t, "http://remote.example", func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx/commit"):
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`)),
+			}, nil
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx"):
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"results":[],"errors":[],"commit":"http://remote.example/db/remote_db/tx/4/commit"}`,
+				)),
+			}, nil
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx/4"):
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`)),
+			}, nil
+		default:
+			return &http.Response{
+				StatusCode: 404,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`)),
+			}, nil
+		}
+	})
+
+	cols, rows, err := engine.QueryCypher(context.Background(), "RETURN 1", nil)
+	if err != nil {
+		t.Fatalf("QueryCypher failed: %v", err)
+	}
+	if len(cols) != 0 || len(rows) != 0 {
+		t.Fatalf("expected empty result set, got cols=%v rows=%v", cols, rows)
+	}
+
+	tx, err := engine.BeginCypherTx(context.Background())
+	if err != nil {
+		t.Fatalf("BeginCypherTx failed: %v", err)
+	}
+	cols, rows, err = tx.QueryCypher(context.Background(), "RETURN 1", nil)
+	if err != nil {
+		t.Fatalf("tx.QueryCypher failed: %v", err)
+	}
+	if len(cols) != 0 || len(rows) != 0 {
+		t.Fatalf("expected empty tx result set, got cols=%v rows=%v", cols, rows)
+	}
+}
+
+func TestRemoteEngineBatchGetNodes_BranchCoverage(t *testing.T) {
+	t.Run("skip not found entries and keep valid node", func(t *testing.T) {
+		eng := &RemoteEngine{
+			transport: &fakeRemoteTransport{
+				queryFn: func(_ context.Context, _ string, params map[string]interface{}) ([][]interface{}, error) {
+					id := params["id"].(string)
+					switch id {
+					case "n1":
+						return nil, ErrNotFound
+					case "n2":
+						return [][]interface{}{
+							{map[string]interface{}{"id": "n2", "labels": []interface{}{"Person"}, "properties": map[string]interface{}{"id": "n2"}}},
+						}, nil
+					default:
+						return nil, nil
+					}
+				},
+			},
+			schema: NewSchemaManager(),
+		}
+
+		nodes, err := eng.BatchGetNodes([]NodeID{"n1", "n2"})
+		if err != nil {
+			t.Fatalf("BatchGetNodes failed: %v", err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected exactly one node, got %d", len(nodes))
+		}
+		if got := nodes["n2"]; got == nil || got.ID != "n2" {
+			t.Fatalf("expected node n2, got %#v", got)
+		}
+	})
+
+	t.Run("propagate non-notfound query error", func(t *testing.T) {
+		eng := &RemoteEngine{
+			transport: &fakeRemoteTransport{
+				queryFn: func(_ context.Context, _ string, _ map[string]interface{}) ([][]interface{}, error) {
+					return nil, fmt.Errorf("query exploded")
+				},
+			},
+			schema: NewSchemaManager(),
+		}
+
+		_, err := eng.BatchGetNodes([]NodeID{"n1"})
+		if err == nil || !strings.Contains(err.Error(), "query exploded") {
+			t.Fatalf("expected query error, got: %v", err)
+		}
+	})
 }
