@@ -2157,6 +2157,27 @@ func (e *StorageExecutor) parseReturnClauseWithContext(ctx context.Context, retu
 			alias = e.expressionToAlias(expr)
 		}
 
+		upperExpr := strings.ToUpper(strings.TrimSpace(expr))
+		if upperExpr == "COUNT(*)" {
+			columns = append(columns, alias)
+			values = append(values, int64(1))
+			continue
+		}
+		if strings.HasPrefix(upperExpr, "COUNT(") && strings.HasSuffix(upperExpr, ")") {
+			inner := strings.TrimSpace(expr[len("COUNT(") : len(expr)-1])
+			columns = append(columns, alias)
+			if _, ok := nodes[inner]; ok {
+				values = append(values, int64(1))
+				continue
+			}
+			if _, ok := rels[inner]; ok {
+				values = append(values, int64(1))
+				continue
+			}
+			values = append(values, int64(0))
+			continue
+		}
+
 		value := e.evaluateExpressionWithContext(ctx, expr, nodes, rels)
 		columns = append(columns, alias)
 		values = append(values, value)
@@ -2198,6 +2219,23 @@ func (e *StorageExecutor) parseReturnClause(ctx context.Context, returnClause st
 		}
 
 		// Evaluate expression
+		upperExpr := strings.ToUpper(strings.TrimSpace(expr))
+		if upperExpr == "COUNT(*)" {
+			columns = append(columns, alias)
+			values = append(values, int64(1))
+			continue
+		}
+		if strings.HasPrefix(upperExpr, "COUNT(") && strings.HasSuffix(upperExpr, ")") {
+			inner := strings.TrimSpace(expr[len("COUNT(") : len(expr)-1])
+			columns = append(columns, alias)
+			if strings.EqualFold(inner, varName) && node != nil {
+				values = append(values, int64(1))
+			} else {
+				values = append(values, int64(0))
+			}
+			continue
+		}
+
 		value := e.evaluateExpression(ctx, expr, varName, node)
 		columns = append(columns, alias)
 		values = append(values, value)
