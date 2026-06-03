@@ -2,11 +2,42 @@ package config
 
 import (
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNormalizeTelemetryListen(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty", in: "", want: ""},
+		{name: "numeric", in: "9090", want: ":9090"},
+		{name: "numeric with spaces", in: " 8081 ", want: ":8081"},
+		{name: "already prefixed", in: ":9090", want: ":9090"},
+		{name: "host and port", in: "127.0.0.1:9090", want: "127.0.0.1:9090"},
+		{name: "nondigit", in: "abc", want: "abc"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, normalizeTelemetryListen(tc.in))
+		})
+	}
+}
+
+func TestGetParserType_DefaultWhenParserValueUnset(t *testing.T) {
+	prev := GetParserType()
+	defer SetParserType(prev)
+
+	// Simulate startup state before init has stored parser type.
+	parserType = atomic.Value{}
+	assert.Equal(t, ParserTypeNornic, GetParserType())
+}
 
 // ============================================================================
 // FeatureFlagsConfig Heimdall getters
