@@ -5,7 +5,7 @@ All notable changes to NornicDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-06-03
+## [v1.1.5] - 2026-06-03
 
 Post-`v1.1.4` stabilization focused on Cypher/Bolt correctness, storage resilience, and deterministic behavior under real Neo4j-driver query shapes. This range also includes broad coverage expansion; all test/coverage work is bundled under a single item below.
 
