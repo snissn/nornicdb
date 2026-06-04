@@ -5,6 +5,50 @@ All notable changes to NornicDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-06-03
+
+Post-`v1.1.4` stabilization focused on Cypher/Bolt correctness, storage resilience, and deterministic behavior under real Neo4j-driver query shapes. This range also includes broad coverage expansion; all test/coverage work is bundled under a single item below.
+
+### Changed
+
+- **Storage embedding persistence now shards oversized chunk payloads in Badger.** Large embedding chunks are written/read using size-aware shard keys with backward-compatible decode logic for legacy single-value chunks. This prevents value-size failures on valid large embeddings while keeping existing data readable.
+- **Search query chunk scoring now uses best-match chunk score instead of average score.** This improves relevance for multi-chunk documents where one strong matching chunk should dominate ranking.
+- **Version metadata updated** to reflect the current post-`v1.1.4` development state.
+
+### Fixed
+
+- **Cypher MATCH+CREATE error handling now surfaces storage failures instead of silent no-op results.** Label/all-node lookups and relationship-existence checks in compound MATCH...CREATE paths now return explicit errors.
+- **Cypher MATCH...CREATE relationship creation regressions fixed.** The following common Neo4j-compatible patterns now execute correctly again:
+  - `MATCH (a),(b) CREATE (a)-[:R]->(b)`
+  - `MATCH (s) CREATE (n)-[:R]->(s)`
+- **Cypher CREATE...SET clause-boundary parsing fixed.** Trailing `CREATE`/`WITH`/`RETURN` after `SET` are now parsed as clauses (not expression text), and explicit transaction routing now matches autocommit behavior for CREATE...SET execution.
+- **Cypher `SET x = x + "..."` self-reference mutations fixed.** In-place property concatenation/update now writes the computed value instead of silently no-oping.
+- **Cypher MATCH...CREATE projection correctness fixed.** `COUNT(expr)` in post-create return projections now evaluates against both matched and newly created bindings, preventing false zero counts.
+- **Cypher MERGE return aggregation correctness fixed.** `COUNT(*)` / `COUNT(var)` in MERGE return projection paths now produce deterministic Neo4j-compatible values instead of intermittent `nil`.
+- **Cypher shell parameter expression failures are now surfaced explicitly.** Expression-evaluation errors are no longer swallowed in shell parameter processing.
+- **Cypher merge-chain correctness tightened.** Post-`WITH` MERGE-chain clause splitting and execution were corrected so node MERGE segments are not dropped; invalid empty merge-chain shapes now return typed `ErrInvalidMergeChainQuery` errors.
+- **Cypher relationship-WHERE evaluation ordering fixed.** Relationship-pattern WHERE clauses are now evaluated before single-variable shortcut routing in multi-match paths.
+- **Cypher chained MERGE relationship SET parsing fixed.** Relationship `SET` parsing now stops at the next top-level MERGE boundary in chained clauses.
+- **Cypher MATCH...UNWIND...MERGE loop variable substitution fixed.** UNWIND variables are now expanded per-item (instead of treated as literal identifiers) when UNWIND appears between MATCH and MERGE.
+- **Cypher/Bolt multi-hop OPTIONAL MATCH regression fixed.** `MATCH ... OPTIONAL MATCH ...` after traversal now seeds optional matches from the full initial traversal result, preventing false zero-row outcomes.
+- **Bolt write counters now populate Neo4j-compatible summary stats.** PULL/DISCARD completion metadata now includes write stats so ResultSummary counters are correct.
+- **Cypher RETURN-after-DETACH-DELETE projection fixed.** Non-COUNT return expressions now resolve correctly instead of returning null placeholders.
+- **Storage namespaced label scans hardened.** Nil-node handling in namespaced `GetNodesByLabel` no longer panics in edge cases.
+- **Storage MVCC namespace state recovery fixed after migration/reopen.** Missing namespace counters are recovered from existing heads and transaction startup now primes namespace MVCC state, preventing false snapshot conflicts on migrated/reopened stores.
+- **Badger recovery behavior improved for stale/cold namespaces while keeping hot-path cost low.**
+- **Search mismatched-dimension panic fixed.** Query paths now handle dimension mismatch safely instead of panicking.
+- **CI architecture-related flaky float precision assertion fixed.**
+
+### Tests
+
+- **Bundled test/coverage work:** expanded deterministic regression and branch coverage across `cypher`, `storage`, `search`, `server`, `nornicdb`, `heimdall`, and `config`, including many new correctness-focused edge-case tests.
+
+### Technical Details
+
+- **Range covered**: `v1.1.4..main`
+- **Commits in range**: 33 (non-merge)
+- **Repository delta**: 220 files changed, +23,707 / -1,496 lines
+
 ## [v1.1.3] - 2026-05-29
 
 Maintenance release: **llama.cpp upgraded to b9410** with configurable per-model context features, plus several storage and Bolt correctness fixes discovered through expanded test coverage. No on-disk format changes; existing databases upgrade transparently.
