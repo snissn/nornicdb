@@ -86,7 +86,63 @@ func (e *StorageExecutor) applySetToNode(ctx context.Context, node *storage.Node
 			continue
 		}
 
+		if strings.HasPrefix(assignment, varName+":") {
+			labelExpr := strings.TrimSpace(assignment[len(varName)+1:])
+			if labelExpr == "" {
+				continue
+			}
+			if strings.HasPrefix(labelExpr, "$(") && strings.HasSuffix(labelExpr, ")") {
+				innerExpr := strings.TrimSpace(labelExpr[2 : len(labelExpr)-1])
+				labelValue, ok := resolveContextPathRef(ctx, innerExpr)
+				if !ok {
+					labelValue = e.evaluateExpressionWithContext(ctx, innerExpr, map[string]*storage.Node{varName: node}, nil)
+				}
+				labels := toStringSlice(labelValue)
+				if len(labels) == 0 {
+					labels = toStringSlice(e.parseValue(ctx, innerExpr))
+				}
+				for _, label := range labels {
+					if label == "" || !isValidIdentifier(label) || containsReservedKeyword(label) || containsString(node.Labels, label) {
+						continue
+					}
+					node.Labels = append(node.Labels, label)
+				}
+				continue
+			}
+			if !isValidIdentifier(labelExpr) || containsReservedKeyword(labelExpr) {
+				continue
+			}
+			if !containsString(node.Labels, labelExpr) {
+				node.Labels = append(node.Labels, labelExpr)
+			}
+			continue
+		}
+
 		if !strings.HasPrefix(assignment, varName+".") {
+			if assignment == varName || strings.HasPrefix(assignment, varName+" =") {
+				eqIdx := strings.Index(assignment, "=")
+				if eqIdx <= 0 {
+					continue
+				}
+				right := strings.TrimSpace(assignment[eqIdx+1:])
+				if v, ok := resolveDirectParamRef(ctx, right); ok {
+					if props, ok := toStringAnyMap(v); ok {
+						node.Properties = cloneStringAnyMap(props)
+						continue
+					}
+				}
+				if v, ok := resolveContextPathRef(ctx, right); ok {
+					if props, ok := toStringAnyMap(v); ok {
+						node.Properties = cloneStringAnyMap(props)
+						continue
+					}
+				}
+				evaluated := e.evaluateExpressionWithContext(ctx, right, map[string]*storage.Node{varName: node}, nil)
+				if props, ok := toStringAnyMap(evaluated); ok {
+					node.Properties = cloneStringAnyMap(props)
+				}
+				continue
+			}
 			continue
 		}
 
@@ -134,6 +190,17 @@ func (e *StorageExecutor) applySetMapMergeToNode(ctx context.Context, node *stor
 	// expression-evaluator path keeps map[string]any from widening to
 	// map[string]interface{} with []interface{} value slices.
 	if m, ok := resolveDirectParamRef(ctx, rightExpr); ok {
+		if props, ok := toStringAnyMap(m); ok {
+			for k, v := range props {
+				if v == nil {
+					continue
+				}
+				setNodeProperty(node, k, normalizePropValue(v))
+			}
+			return
+		}
+	}
+	if m, ok := resolveContextPathRef(ctx, rightExpr); ok {
 		if props, ok := toStringAnyMap(m); ok {
 			for k, v := range props {
 				if v == nil {

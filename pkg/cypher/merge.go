@@ -2019,6 +2019,34 @@ func (e *StorageExecutor) applySetToRelationshipWithContext(ctx context.Context,
 			continue
 		}
 
+		if assignment == varName || strings.HasPrefix(assignment, varName+" =") {
+			eqIdx := strings.Index(assignment, "=")
+			if eqIdx <= 0 {
+				continue
+			}
+			right := strings.TrimSpace(assignment[eqIdx+1:])
+			if v, ok := resolveDirectParamRef(ctx, right); ok {
+				if props, ok := toStringAnyMap(v); ok {
+					edge.Properties = cloneStringAnyMap(props)
+					propertiesSet += len(props)
+					continue
+				}
+			}
+			if v, ok := resolveContextPathRef(ctx, right); ok {
+				if props, ok := toStringAnyMap(v); ok {
+					edge.Properties = cloneStringAnyMap(props)
+					propertiesSet += len(props)
+					continue
+				}
+			}
+			evaluated := e.evaluateSetExpressionWithContext(ctx, right, nodeContext, fullRelContext)
+			if props, ok := toStringAnyMap(evaluated); ok {
+				edge.Properties = cloneStringAnyMap(props)
+				propertiesSet += len(props)
+			}
+			continue
+		}
+
 		if plusEqIdx := strings.Index(assignment, "+="); plusEqIdx > 0 {
 			left := strings.TrimSpace(assignment[:plusEqIdx])
 			right := strings.TrimSpace(assignment[plusEqIdx+2:])
@@ -2097,6 +2125,63 @@ func (e *StorageExecutor) applySetToNodeWithContext(ctx context.Context, node *s
 			right := strings.TrimSpace(assignment[plusEqIdx+2:])
 			if left == varName {
 				e.applySetMapMergeToNode(ctx, node, varName, right, fullContext, relContext)
+			}
+			continue
+		}
+
+		if assignment == varName || strings.HasPrefix(assignment, varName+" =") {
+			eqIdx := strings.Index(assignment, "=")
+			if eqIdx <= 0 {
+				continue
+			}
+			right := strings.TrimSpace(assignment[eqIdx+1:])
+			if v, ok := resolveDirectParamRef(ctx, right); ok {
+				if props, ok := toStringAnyMap(v); ok {
+					node.Properties = cloneStringAnyMap(props)
+					continue
+				}
+			}
+			if v, ok := resolveContextPathRef(ctx, right); ok {
+				if props, ok := toStringAnyMap(v); ok {
+					node.Properties = cloneStringAnyMap(props)
+					continue
+				}
+			}
+			evaluated := e.evaluateSetExpressionWithContext(ctx, right, fullContext, relContext)
+			if props, ok := toStringAnyMap(evaluated); ok {
+				node.Properties = cloneStringAnyMap(props)
+			}
+			continue
+		}
+
+		if strings.HasPrefix(assignment, varName+":") {
+			labelExpr := strings.TrimSpace(assignment[len(varName)+1:])
+			if labelExpr == "" {
+				continue
+			}
+			if strings.HasPrefix(labelExpr, "$(") && strings.HasSuffix(labelExpr, ")") {
+				innerExpr := strings.TrimSpace(labelExpr[2 : len(labelExpr)-1])
+				labelValue, ok := resolveContextPathRef(ctx, innerExpr)
+				if !ok {
+					labelValue = e.evaluateExpressionWithContext(ctx, innerExpr, fullContext, relContext)
+				}
+				labels := toStringSlice(labelValue)
+				if len(labels) == 0 {
+					labels = toStringSlice(e.parseValue(ctx, innerExpr))
+				}
+				for _, label := range labels {
+					if label == "" || !isValidIdentifier(label) || containsReservedKeyword(label) || containsString(node.Labels, label) {
+						continue
+					}
+					node.Labels = append(node.Labels, label)
+				}
+				continue
+			}
+			if !isValidIdentifier(labelExpr) || containsReservedKeyword(labelExpr) {
+				continue
+			}
+			if !containsString(node.Labels, labelExpr) {
+				node.Labels = append(node.Labels, labelExpr)
 			}
 			continue
 		}

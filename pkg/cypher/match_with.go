@@ -84,6 +84,11 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 	// Extract WITH clause expressions
 	// Check for WHERE between WITH and RETURN (filters aggregated results, like SQL HAVING)
 	withSection := strings.TrimSpace(cypher[withIdx+4 : returnIdx])
+	callSection := ""
+	if callIdx := findKeywordIndex(withSection, "CALL"); callIdx > 0 {
+		callSection = strings.TrimSpace(withSection[callIdx:])
+		withSection = strings.TrimSpace(withSection[:callIdx])
+	}
 	var withClause string
 	var postWithWhere string
 
@@ -400,6 +405,21 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 			}
 
 			computedRows = append(computedRows, computedRow{node: node, values: values})
+		}
+	}
+
+	if callSection != "" {
+		for _, cr := range computedRows {
+			nodeScope := make(map[string]*storage.Node, len(cr.values))
+			for alias, value := range cr.values {
+				if node, ok := value.(*storage.Node); ok && node != nil {
+					nodeScope[alias] = node
+				}
+			}
+			evaluatedCall := e.substituteBoundVariablesInCall(callSection, nodeScope)
+			if _, err := e.executeCall(ctx, evaluatedCall); err != nil {
+				return nil, err
+			}
 		}
 	}
 

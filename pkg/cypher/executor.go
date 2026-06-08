@@ -2930,6 +2930,22 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		return e.executeMatchWithCallSubquery(ctx, cypher)
 	}
 
+	// MATCH ... CALL procedure() must route before generic MATCH ... CREATE/MERGE
+	// detection because procedure names such as db.create.setNodeVectorProperty
+	// contain clause-looking tokens that are not outer query clauses.
+	if startsWithMatch {
+		callIdx := findKeywordIndex(cypher, "CALL")
+		if callIdx > 0 {
+			callPart := strings.TrimSpace(cypher[callIdx:])
+			if !isCallSubquery(callPart) {
+				if findKeywordIndex(cypher[:callIdx], "WITH") > 0 {
+					return e.executeMatchWithClause(ctx, cypher)
+				}
+				return e.executeMatchWithCallProcedure(ctx, cypher)
+			}
+		}
+	}
+
 	// MERGE queries get special handling - they have their own ON CREATE SET / ON MATCH SET logic
 	if startsWithMerge {
 		// Complex MERGE pipelines that include OPTIONAL MATCH / WITH / WHERE should
@@ -3069,19 +3085,6 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 			return e.executeMatchWithOptionalMatch(ctx, cypher)
 		}
 		return e.executeCompoundMatchOptionalMatch(ctx, cypher)
-	}
-
-	// Compound queries: MATCH ... CALL procedure() ... (procedure with bound variables)
-	if startsWithMatch && findKeywordIndex(cypher, "CALL") > 0 {
-		// Check if it's a procedure call (not a subquery)
-		callIdx := findKeywordIndex(cypher, "CALL")
-		if callIdx > 0 {
-			callPart := strings.TrimSpace(cypher[callIdx:])
-			if !isCallSubquery(callPart) {
-				// It's a procedure call - handle with bound variables
-				return e.executeMatchWithCallProcedure(ctx, cypher)
-			}
-		}
 	}
 
 	switch {

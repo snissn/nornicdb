@@ -384,8 +384,8 @@ func NewExecutor() *Executor {
 	}
 }
 
-// Execute executes a Cypher query.
-func (e *Executor) Execute(ctx context.Context, cypher string, params map[string]any) (*Result, error) {
+// parses and validates a Cypher query but, does not execute.
+func (e *Executor) ParseAndValidate(ctx context.Context, cypher string, params map[string]any) (*Result, error) {
 	// Parse query
 	query, err := e.parser.Parse(cypher)
 	if err != nil {
@@ -403,7 +403,6 @@ func (e *Executor) Execute(ctx context.Context, cypher string, params map[string
 		Rows:    make([]map[string]any, 0),
 	}
 
-	// TODO: Implement execution
 	_ = query
 
 	return result, nil

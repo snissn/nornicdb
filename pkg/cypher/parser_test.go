@@ -458,7 +458,7 @@ func TestExecutorExecute(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("simple match", func(t *testing.T) {
-		result, err := executor.Execute(ctx, "MATCH (n) RETURN n", nil)
+		result, err := executor.ParseAndValidate(ctx, "MATCH (n) RETURN n", nil)
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
@@ -471,7 +471,7 @@ func TestExecutorExecute(t *testing.T) {
 		params := map[string]any{
 			"name": "Alice",
 		}
-		result, err := executor.Execute(ctx, "MATCH (n {name: $name}) RETURN n", params)
+		result, err := executor.ParseAndValidate(ctx, "MATCH (n {name: $name}) RETURN n", params)
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
@@ -481,7 +481,7 @@ func TestExecutorExecute(t *testing.T) {
 	})
 
 	t.Run("invalid query", func(t *testing.T) {
-		_, err := executor.Execute(ctx, "", nil)
+		_, err := executor.ParseAndValidate(ctx, "", nil)
 		if err == nil {
 			t.Error("expected error for empty query")
 		}

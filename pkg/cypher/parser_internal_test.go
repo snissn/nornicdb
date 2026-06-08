@@ -117,7 +117,7 @@ func TestParserRejectsUnterminatedStringLiteral(t *testing.T) {
 	require.ErrorContains(t, err, "unterminated string")
 
 	executor := NewExecutor()
-	_, err = executor.Execute(context.Background(), `RETURN "Alice`, nil)
+	_, err = executor.ParseAndValidate(context.Background(), `RETURN "Alice`, nil)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unterminated string")
 }
@@ -143,7 +143,7 @@ func TestParserRejectsBareOptionalClause(t *testing.T) {
 func TestExecutorExecuteAdditionalBranches(t *testing.T) {
 	executor := NewExecutor()
 
-	result, err := executor.Execute(context.Background(), "RETURN 1", map[string]any{"x": 1})
+	result, err := executor.ParseAndValidate(context.Background(), "RETURN 1", map[string]any{"x": 1})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Empty(t, result.Columns)

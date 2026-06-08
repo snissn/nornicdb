@@ -1846,6 +1846,7 @@ func clearEnvVars(t *testing.T) {
 		"NORNICDB_STORAGE_SERIALIZER",
 		"NORNICDB_HEIMDALL_MCP_ENABLE",
 		"NORNICDB_HEIMDALL_MCP_TOOLS",
+		"NORNICDB_HEIMDALL_ENABLED",
 	}
 	for _, v := range envVars {
 		os.Unsetenv(v)

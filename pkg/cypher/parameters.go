@@ -290,6 +290,22 @@ func resolveParamPathRef(ctx context.Context, expr string) (interface{}, bool) {
 	return resolveSetMergeSourceFromParams(params, strings.TrimSpace(expr[1:]))
 }
 
+// resolveContextPathRef resolves a bare identifier or dotted path against the
+// current query parameters. This is used by MERGE pattern parsing and SET label
+// expressions so row-scoped values like row.uuid and row.labels can be read
+// without forcing them through Cypher string literal parsing.
+func resolveContextPathRef(ctx context.Context, expr string) (interface{}, bool) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil, false
+	}
+	params := getParamsFromContext(ctx)
+	if params == nil {
+		return nil, false
+	}
+	return resolveSetMergeSourceFromParams(params, expr)
+}
+
 // isCompositeParamValue reports whether a parameter value is a typed list
 // shape that would lose type information if stringified into Cypher
 // literal syntax. Scalars (string, numeric, bool, nil) are always safe to
