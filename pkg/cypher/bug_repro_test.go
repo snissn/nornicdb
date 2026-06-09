@@ -389,3 +389,26 @@ func TestBug7_UnwindMergeWithInlineSetNodeVectorPropertyPersistsRows(t *testing.
 		assert.Contains(t, labels, "Extra")
 	}
 }
+
+func TestBug8_MatchUnwindCreateWithListPropertyPersistsAllRows(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE (:Anchor {uuid:'a'})`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+		MATCH (x:Anchor {uuid:'a'})
+		UNWIND [{id:'r0', vec:[0.1,0.2]}, {id:'r1', vec:[0.3,0.4]}, {id:'r2', vec:[0.5,0.6]}] AS r
+		CREATE (c:Item {id:r.id, vec:r.vec})
+	`, nil)
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, `MATCH (c:Item) RETURN count(c) AS c`, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 1)
+	assert.Equal(t, int64(3), res.Rows[0][0])
+}

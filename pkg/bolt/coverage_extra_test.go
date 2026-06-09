@@ -401,7 +401,7 @@ func TestBoltCoverage_PackStreamValueIntoSpecializedTypes(t *testing.T) {
 		{name: "float64 slice", value: []float64{1.5, 2.5}, marker: 0x92},
 		{name: "float32 slice", value: []float32{1.5, 2.5}, marker: 0x92},
 		{name: "map slice", value: []map[string]any{{"k": "v"}}, marker: 0x91},
-		{name: "time", value: now, marker: 0xCB},
+		{name: "time", value: now, marker: 0xB3},
 		{name: "duration", value: 1500 * time.Millisecond, marker: 0xC9},
 	}
 

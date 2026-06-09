@@ -3,6 +3,7 @@ package bolt
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -81,5 +82,45 @@ func TestEncodePackStreamValueInto_StorageEdgeStructure(t *testing.T) {
 
 	if got == nil {
 		t.Fatalf("expected decoded value, got nil")
+	}
+}
+
+func TestEncodePackStreamValueInto_TimeUsesDateTimeUTCStructure(t *testing.T) {
+	dt := time.Date(2026, 6, 9, 18, 47, 32, 123456789, time.FixedZone("MST", -7*3600))
+	data := encodePackStreamValueInto(nil, dt)
+	if len(data) < 2 {
+		t.Fatalf("unexpected encoded length: %d", len(data))
+	}
+	if data[0] != 0xB3 || data[1] != 0x49 {
+		t.Fatalf("expected DateTime struct header B3 49, got=%x", data[:2])
+	}
+}
+
+func TestDecodePackStreamValue_DateTimeStructures(t *testing.T) {
+	sec := int64(1791537396)
+	nanos := int64(123456789)
+	offset := int64(-7 * 3600)
+
+	// UTC-patched DateTime: struct(3) sig=0x49 [seconds, nanos, offsetSeconds]
+	utcPatched := []byte{0xB3, 0x49}
+	utcPatched = encodePackStreamIntInto(utcPatched, sec)
+	utcPatched = encodePackStreamIntInto(utcPatched, nanos)
+	utcPatched = encodePackStreamIntInto(utcPatched, offset)
+	v, _, err := decodePackStreamValue(utcPatched, 0)
+	if err != nil {
+		t.Fatalf("decode utc-patched datetime failed: %v", err)
+	}
+	if _, ok := v.(time.Time); !ok {
+		t.Fatalf("expected time.Time for utc-patched datetime, got %T", v)
+	}
+
+	// Legacy DateTime: struct(3) sig=0x46 [seconds, nanos, offsetSeconds]
+	legacy := append([]byte{0xB3, 0x46}, utcPatched[2:]...)
+	v, _, err = decodePackStreamValue(legacy, 0)
+	if err != nil {
+		t.Fatalf("decode legacy datetime failed: %v", err)
+	}
+	if _, ok := v.(time.Time); !ok {
+		t.Fatalf("expected time.Time for legacy datetime, got %T", v)
 	}
 }

@@ -386,10 +386,7 @@ func encodePackStreamValueInto(dst []byte, v any) []byte {
 		}
 		return dst
 	case time.Time:
-		// Encode as Unix millis to avoid allocations and keep a stable scalar representation.
-		// NOTE: Neo4j has native temporal types; we can upgrade to proper PackStream
-		// temporal structures later without changing the executor.
-		return encodePackStreamIntInto(dst, val.UnixNano()/int64(time.Millisecond))
+		return encodePackStreamDateTimeInto(dst, val)
 	case time.Duration:
 		// Encode duration as milliseconds (signed).
 		return encodePackStreamIntInto(dst, val.Milliseconds())
@@ -443,6 +440,8 @@ func encodePackStreamValue(v any) []byte {
 		buf[0] = 0xC1
 		binary.BigEndian.PutUint64(buf[1:], math.Float64bits(val))
 		return buf
+	case time.Time:
+		return encodePackStreamDateTime(val)
 	case string:
 		return encodePackStreamString(val)
 	// List types
@@ -508,6 +507,19 @@ func encodePackStreamValue(v any) []byte {
 		// Unknown type - encode as null
 		return []byte{0xC0}
 	}
+}
+
+func encodePackStreamDateTimeInto(dst []byte, t time.Time) []byte {
+	_, offsetSeconds := t.Zone()
+	dst = append(dst, 0xB3, 0x49) // struct(3), DateTime with UTC patch
+	dst = encodePackStreamIntInto(dst, t.Unix())
+	dst = encodePackStreamIntInto(dst, int64(t.Nanosecond()))
+	dst = encodePackStreamIntInto(dst, int64(offsetSeconds))
+	return dst
+}
+
+func encodePackStreamDateTime(t time.Time) []byte {
+	return encodePackStreamDateTimeInto(nil, t)
 }
 
 func encodePackStreamIntInto(dst []byte, val int64) []byte {
@@ -1436,6 +1448,33 @@ func decodeStructureFields(data []byte, offset int, fieldCount int, signature by
 		}
 		return map[string]any{"_type": "Path", "fields": fields}, fieldsConsumed, nil
 
+	case 0x49, 0x46: // DateTime (utc-patched and legacy): [seconds, nanos, offsetSeconds]
+		if fieldCount >= 3 {
+			sec, okSec := toInt64Field(fields[0])
+			nsec, okNsec := toInt64Field(fields[1])
+			offsetSec, okOffset := toInt64Field(fields[2])
+			if okSec && okNsec && okOffset {
+				loc := time.FixedZone("", int(offsetSec))
+				return time.Unix(sec, nsec).In(loc), fieldsConsumed, nil
+			}
+		}
+		return map[string]any{"_type": "DateTime", "fields": fields}, fieldsConsumed, nil
+
+	case 0x69, 0x66: // DateTime with zone id: [seconds, nanos, zoneId]
+		if fieldCount >= 3 {
+			sec, okSec := toInt64Field(fields[0])
+			nsec, okNsec := toInt64Field(fields[1])
+			zoneID, okZone := fields[2].(string)
+			if okSec && okNsec && okZone {
+				loc, err := time.LoadLocation(zoneID)
+				if err != nil {
+					loc = time.UTC
+				}
+				return time.Unix(sec, nsec).In(loc), fieldsConsumed, nil
+			}
+		}
+		return map[string]any{"_type": "DateTimeZoneId", "fields": fields}, fieldsConsumed, nil
+
 	default:
 		// Generic structure - return as map with signature and fields
 		result := map[string]any{
@@ -1444,6 +1483,33 @@ func decodeStructureFields(data []byte, offset int, fieldCount int, signature by
 			"fields":    fields,
 		}
 		return result, fieldsConsumed, nil
+	}
+}
+
+func toInt64Field(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int16:
+		return int64(n), true
+	case int8:
+		return int64(n), true
+	case uint64:
+		return int64(n), true
+	case uint32:
+		return int64(n), true
+	case uint16:
+		return int64(n), true
+	case uint8:
+		return int64(n), true
+	case uint:
+		return int64(n), true
+	default:
+		return 0, false
 	}
 }
 

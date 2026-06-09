@@ -24,6 +24,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -717,30 +718,11 @@ func evaluateListForPipeline(expr string, row pipelineRow) []interface{} {
 	// as a value. Without plumbing a full parser here we only accept the
 	// `[...]` form and split top-level items.
 	if strings.HasPrefix(expr, "[") && strings.HasSuffix(expr, "]") {
-		inner := strings.TrimSpace(expr[1 : len(expr)-1])
-		if inner == "" {
-			return []interface{}{}
-		}
-		parts := splitTopLevelComma(inner)
-		out := make([]interface{}, 0, len(parts))
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if strings.HasPrefix(p, "{") && strings.HasSuffix(p, "}") {
-				m := parseLiteralMapForPipeline(p)
-				if m == nil {
-					return nil
-				}
-				out = append(out, m)
-				continue
-			}
-			// Scalar — defer to scalar parser (ints / strings / floats).
-			if v, ok := parseLiteralScalarForPipeline(p); ok {
-				out = append(out, v)
-				continue
-			}
+		parsed, ok := parseLiteralValueForPipeline(expr)
+		if !ok {
 			return nil
 		}
-		return out
+		return toAnySlice(parsed)
 	}
 	return nil
 }
@@ -755,8 +737,52 @@ func toAnySlice(v interface{}) []interface{} {
 			out[i] = m
 		}
 		return out
+	case []string:
+		out := make([]interface{}, len(s))
+		for i := range s {
+			out[i] = s[i]
+		}
+		return out
+	case []int:
+		out := make([]interface{}, len(s))
+		for i := range s {
+			out[i] = int64(s[i])
+		}
+		return out
+	case []int64:
+		out := make([]interface{}, len(s))
+		for i := range s {
+			out[i] = s[i]
+		}
+		return out
+	case []float64:
+		out := make([]interface{}, len(s))
+		for i := range s {
+			out[i] = s[i]
+		}
+		return out
+	case []float32:
+		out := make([]interface{}, len(s))
+		for i := range s {
+			out[i] = float64(s[i])
+		}
+		return out
+	case []bool:
+		out := make([]interface{}, len(s))
+		for i := range s {
+			out[i] = s[i]
+		}
+		return out
 	}
-	return nil
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() || (rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array) {
+		return nil
+	}
+	out := make([]interface{}, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		out[i] = rv.Index(i).Interface()
+	}
+	return out
 }
 
 func parseLiteralMapForPipeline(s string) map[string]interface{} {
@@ -777,21 +803,52 @@ func parseLiteralMapForPipeline(s string) map[string]interface{} {
 		}
 		k := strings.TrimSpace(pair[:colon])
 		vRaw := strings.TrimSpace(pair[colon+1:])
-		if v, ok := parseLiteralScalarForPipeline(vRaw); ok {
-			out[k] = v
-			continue
+		v, ok := parseLiteralValueForPipeline(vRaw)
+		if !ok {
+			return nil
 		}
-		if strings.HasPrefix(vRaw, "{") {
-			m := parseLiteralMapForPipeline(vRaw)
-			if m == nil {
-				return nil
-			}
-			out[k] = m
-			continue
-		}
-		return nil
+		out[k] = v
 	}
 	return out
+}
+
+func parseLiteralListForPipeline(s string) ([]interface{}, bool) {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "[") || !strings.HasSuffix(s, "]") {
+		return nil, false
+	}
+	inner := strings.TrimSpace(s[1 : len(s)-1])
+	if inner == "" {
+		return []interface{}{}, true
+	}
+	parts := splitTopLevelComma(inner)
+	out := make([]interface{}, 0, len(parts))
+	for _, part := range parts {
+		v, ok := parseLiteralValueForPipeline(part)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, v)
+	}
+	return out, true
+}
+
+func parseLiteralValueForPipeline(s string) (interface{}, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, false
+	}
+	if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
+		m := parseLiteralMapForPipeline(s)
+		if m == nil {
+			return nil, false
+		}
+		return m, true
+	}
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		return parseLiteralListForPipeline(s)
+	}
+	return parseLiteralScalarForPipeline(s)
 }
 
 func parseLiteralScalarForPipeline(s string) (interface{}, bool) {

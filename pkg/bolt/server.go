@@ -1982,6 +1982,7 @@ func (s *Session) handleHello(data []byte) error {
 		"server":        s.server.config.serverAnnouncement(),
 		"connection_id": "nornic-1",
 		"hints":         map[string]any{},
+		"patch_bolt":    []any{"utc"},
 	})
 }
 
