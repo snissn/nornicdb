@@ -327,3 +327,65 @@ func TestBug6_UnwindMergeSetMapWithIndexedMapPropertyDoesNotPanic(t *testing.T) 
 		require.Len(t, res.Rows, 2)
 	})
 }
+
+func TestBug7_UnwindMergeWithInlineSetNodeVectorPropertyPersistsRows(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	query := `
+		UNWIND $nodes AS node
+		MERGE (n:Entity {uuid: node.uuid})
+		SET n:$(node.labels)
+		SET n = node
+		WITH n, node
+		CALL db.create.setNodeVectorProperty(n, "name_embedding", node.name_embedding)
+		RETURN n.uuid AS uuid
+	`
+
+	params := map[string]interface{}{
+		"nodes": []map[string]interface{}{
+			{
+				"uuid":           "g1",
+				"name":           "Ada",
+				"labels":         []interface{}{"Extra"},
+				"name_embedding": []interface{}{0.1, 0.2, 0.3},
+			},
+			{
+				"uuid":           "g2",
+				"name":           "Grace",
+				"labels":         []interface{}{"Extra"},
+				"name_embedding": []interface{}{0.3, 0.2, 0.1},
+			},
+		},
+	}
+
+	res, err := exec.Execute(ctx, query, params)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 2)
+
+	uuids := make(map[string]bool, len(res.Rows))
+	for _, row := range res.Rows {
+		id, ok := row[0].(string)
+		require.True(t, ok)
+		uuids[id] = true
+	}
+	assert.True(t, uuids["g1"])
+	assert.True(t, uuids["g2"])
+
+	check, err := exec.Execute(ctx, `
+		MATCH (n:Entity)
+		WHERE n.uuid IN ['g1', 'g2']
+		RETURN n.uuid AS uuid, labels(n) AS labels, n.name_embedding AS emb
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, check.Rows, 2)
+	for _, row := range check.Rows {
+		assert.NotNil(t, row[2], "name_embedding should persist on entity")
+		labels, ok := row[1].([]interface{})
+		require.True(t, ok)
+		assert.Contains(t, labels, "Entity")
+		assert.Contains(t, labels, "Extra")
+	}
+}

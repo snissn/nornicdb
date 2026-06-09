@@ -777,6 +777,7 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 				trimmedMutation := strings.TrimSpace(mutationPart)
 				upperMutation := strings.ToUpper(trimmedMutation)
 				useParamExecution := strings.Contains(mutationPart, "+=") ||
+					findKeywordIndexInContext(mutationPart, "CALL") >= 0 ||
 					strings.HasPrefix(upperMutation, "OPTIONAL MATCH") ||
 					(findKeywordIndexInContext(mutationPart, "WITH") >= 0 &&
 						findKeywordIndexInContext(mutationPart, "UNWIND") >= 0)
@@ -790,7 +791,8 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 					}
 					callParams[variable] = item
 					if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(mutationPart)), "OPTIONAL MATCH") &&
-						findKeywordIndexInContext(mutationPart, "MERGE") > 0 {
+						findKeywordIndexInContext(mutationPart, "MERGE") > 0 &&
+						findKeywordIndexInContext(mutationPart, "CALL") < 0 {
 						substitutedMutation := e.replaceVariableInMutationQuery(mutationPart, variable, item)
 						substitutedFull := substitutedMutation
 						if returnPart != "" {
