@@ -55,8 +55,6 @@ import (
 	"strings"
 )
 
-// NOTE: parameterPattern is defined in regex_patterns.go
-
 // getParamKeys returns the keys from a parameter map as a slice.
 //
 // # Parameters

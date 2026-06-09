@@ -1372,7 +1372,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		var postFilterWhere string // WHERE that references multiple vars in one segment, applied after cartesian product
 
 		// Split by MATCH keyword; matchPart is left intact (includes all WHERE clauses)
-		matchClauses := matchKeywordPattern.Split(matchPart, -1)
+		matchClauses := SplitByMatch(matchPart)
 		nonEmptyMatchClauses := make([]string, 0, len(matchClauses))
 		for _, clause := range matchClauses {
 			clause = strings.TrimSpace(clause)
@@ -1704,8 +1704,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 	}
 
 	// Split CREATE part into individual CREATE statements
-	// Uses pre-compiled createKeywordPattern from regex_patterns.go
-	createClauses := createKeywordPattern.Split(createPart, -1)
+	createClauses := SplitByCreate(createPart)
 
 	// For each combination in the cartesian product, execute CREATE
 	for _, combination := range allCombinations {
@@ -2063,29 +2062,19 @@ func (e *StorageExecutor) processCreateNode(ctx context.Context, pattern string,
 
 // processCreateRelationship creates a relationship between nodes in nodeVars
 func (e *StorageExecutor) processCreateRelationship(ctx context.Context, pattern string, nodeVars map[string]*storage.Node, edgeVars map[string]*storage.Edge, result *ExecuteResult, store storage.Engine) error {
-	// Parse the relationship pattern: (a)-[r:TYPE {props}]->(b)
-	// Supports both simple variable refs and inline node definitions
-	// Uses pre-compiled patterns from regex_patterns.go for performance
-
-	// Try forward arrow first: (a)-[...]->(b)
-	matches := relForwardPattern.FindStringSubmatch(pattern)
-
-	isReverse := false
-	if matches == nil {
-		// Try reverse arrow: (a)<-[...]-(b)
-		matches = relReversePattern.FindStringSubmatch(pattern)
-		isReverse = true
+	// Parse relationship pattern: (a)-[r:TYPE {props}]->(b) or (a)<-[r:TYPE]-(b)
+	sourceContent, relContent, targetContent, isReverse, remainder, err := e.parseCreateRelPatternWithVars(pattern)
+	if err != nil {
+		return fmt.Errorf("invalid relationship pattern in CREATE: %s", pattern)
 	}
-
-	if len(matches) < 6 {
+	if strings.TrimSpace(remainder) != "" {
 		return fmt.Errorf("invalid relationship pattern in CREATE: %s", pattern)
 	}
 
-	sourceContent := strings.TrimSpace(matches[1])
-	relVar := matches[2]
-	relType := matches[3]
-	relPropsStr := matches[4]
-	targetContent := strings.TrimSpace(matches[5])
+	relVar, relType, relPropsStr, err := parseCreateRelationshipContent(relContent)
+	if err != nil {
+		return fmt.Errorf("invalid relationship pattern in CREATE: %s", pattern)
+	}
 
 	// Default relationship type
 	if relType == "" {
@@ -2140,6 +2129,44 @@ func (e *StorageExecutor) processCreateRelationship(ctx context.Context, pattern
 	}
 
 	return nil
+}
+
+func parseCreateRelationshipContent(content string) (relVar string, relType string, relPropsStr string, err error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", "", "", nil
+	}
+
+	head := content
+	if braceStart := strings.Index(content, "{"); braceStart >= 0 {
+		braceEnd := strings.LastIndex(content, "}")
+		if braceEnd < braceStart {
+			return "", "", "", fmt.Errorf("invalid relationship properties")
+		}
+		relPropsStr = strings.TrimSpace(content[braceStart : braceEnd+1])
+		if strings.TrimSpace(content[braceEnd+1:]) != "" {
+			return "", "", "", fmt.Errorf("invalid relationship properties")
+		}
+		head = strings.TrimSpace(content[:braceStart])
+	}
+
+	if head == "" {
+		return "", "", relPropsStr, nil
+	}
+
+	if strings.HasPrefix(head, ":") {
+		relType = strings.TrimSpace(head[1:])
+		return relVar, relType, relPropsStr, nil
+	}
+
+	if colon := strings.Index(head, ":"); colon >= 0 {
+		relVar = strings.TrimSpace(head[:colon])
+		relType = strings.TrimSpace(head[colon+1:])
+		return relVar, relType, relPropsStr, nil
+	}
+
+	relVar = strings.TrimSpace(head)
+	return relVar, "", relPropsStr, nil
 }
 
 // resolveOrCreateNode resolves a node reference, creating it if it's an inline definition.
@@ -2675,7 +2702,7 @@ func (e *StorageExecutor) applyCreateClausesInScope(
 	result *ExecuteResult,
 	store storage.Engine,
 ) error {
-	createClauses := createKeywordPattern.Split(strings.TrimSpace(createPart), -1)
+	createClauses := SplitByCreate(strings.TrimSpace(createPart))
 	for _, clause := range createClauses {
 		clause = strings.TrimSpace(clause)
 		if clause == "" {

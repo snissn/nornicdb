@@ -145,7 +145,7 @@ func seedDeterministicLegacySources(t *testing.T, reg *prometheus.Registry) {
 			ConstLabels: prometheus.Labels{
 				"version":    "1.0.0",
 				"commit":     "abc1234",
-				"go_version": "go1.26.0",
+				"go_version": "go1.26.4",
 				"backend":    "badger",
 			},
 		},

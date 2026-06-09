@@ -462,25 +462,23 @@ func (e *StorageExecutor) parseLinkPredictionConfig(ctx context.Context, cypher 
 					}
 					// If evaluation returned nil, the variable wasn't found in nodeVars
 					// Extract variable name for better error message
-					matches := idFunctionPattern.FindStringSubmatch(value)
-					if len(matches) > 1 {
-						return nil, fmt.Errorf("variable %q not found in query context (id(%s) cannot be resolved)", matches[1], matches[1])
+					if varName, ok := parseIDFunctionVariable(value); ok {
+						return nil, fmt.Errorf("variable %q not found in query context (id(%s) cannot be resolved)", varName, varName)
 					}
 				}
-				// Fallback: Extract node variable using pre-compiled pattern
+				// Fallback: Extract node variable from id(...) call
 				// This handles cases where nodeVars is nil (backward compatibility)
-				matches := idFunctionPattern.FindStringSubmatch(value)
-				if len(matches) > 1 {
+				if varName, ok := parseIDFunctionVariable(value); ok {
 					// If nodeVars is available, try to look up the variable
 					if nodeVars != nil {
-						if node, ok := nodeVars[matches[1]]; ok {
+						if node, ok := nodeVars[varName]; ok {
 							config.SourceNode = node.ID
 							continue
 						}
 					}
 					// Otherwise, treat as literal (will likely fail validation)
 					// This maintains backward compatibility but may not work correctly
-					value = matches[1]
+					value = varName
 				}
 			}
 			config.SourceNode = storage.NodeID(value)
@@ -515,6 +513,29 @@ func (e *StorageExecutor) parseLinkPredictionConfig(ctx context.Context, cypher 
 	}
 
 	return config, nil
+}
+
+func parseIDFunctionVariable(expr string) (string, bool) {
+	s := strings.TrimSpace(expr)
+	if len(s) < 2 || !strings.EqualFold(s[:2], "id") {
+		return "", false
+	}
+	open := 2
+	for open < len(s) && s[open] == ' ' {
+		open++
+	}
+	if open >= len(s) || s[open] != '(' {
+		return "", false
+	}
+	inside, rest, ok := extractParenSection(s[open:])
+	if !ok || strings.TrimSpace(rest) != "" {
+		return "", false
+	}
+	name, trailing, ok := parseIdentifierToken(strings.TrimSpace(inside))
+	if !ok || strings.TrimSpace(trailing) != "" {
+		return "", false
+	}
+	return name, true
 }
 
 // formatLinkPredictionResults formats topology predictions as Neo4j-compatible result

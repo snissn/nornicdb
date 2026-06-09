@@ -1688,7 +1688,7 @@ func (e *StorageExecutor) tryAsyncCreateNodeBatch(ctx context.Context, cypher st
 		createPart = strings.TrimSpace(cypher[:returnIdx])
 	}
 
-	createClauses := createKeywordPattern.Split(createPart, -1)
+	createClauses := SplitByCreate(createPart)
 	if len(createClauses) == 0 {
 		return nil, nil, false
 	}

@@ -300,12 +300,10 @@ func (e *StorageExecutor) extractFulltextParams(cypher string) (indexName, query
 func parseFulltextQuery(query string) (terms, excludeTerms, mustHaveTerms []string) {
 	query = strings.ToLower(query)
 
-	// Handle quoted phrases using pre-compiled pattern from regex_patterns.go
-	phrases := fulltextPhrasePattern.FindAllStringSubmatch(query, -1)
-	for _, match := range phrases {
-		mustHaveTerms = append(mustHaveTerms, match[1])
-	}
-	query = fulltextPhrasePattern.ReplaceAllString(query, "")
+	// Handle quoted phrases.
+	var phrases []string
+	query, phrases = extractQuotedPhrasesAndStrip(query)
+	mustHaveTerms = append(mustHaveTerms, phrases...)
 
 	// Split by spaces and operators
 	words := strings.Fields(query)
@@ -344,6 +342,37 @@ func parseFulltextQuery(query string) (terms, excludeTerms, mustHaveTerms []stri
 	}
 
 	return terms, excludeTerms, mustHaveTerms
+}
+
+func extractQuotedPhrasesAndStrip(s string) (stripped string, phrases []string) {
+	var out strings.Builder
+	out.Grow(len(s))
+
+	inQuote := false
+	phraseStart := 0
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch == '"' && (i == 0 || s[i-1] != '\\') {
+			if !inQuote {
+				inQuote = true
+				phraseStart = i + 1
+			} else {
+				inQuote = false
+				if phraseStart <= i {
+					phrases = append(phrases, s[phraseStart:i])
+				}
+			}
+			// Preserve token spacing where phrase used to be.
+			out.WriteByte(' ')
+			continue
+		}
+		if !inQuote {
+			out.WriteByte(ch)
+		}
+	}
+
+	return out.String(), phrases
 }
 
 // isFulltextWildcard reports whether the query should be treated as

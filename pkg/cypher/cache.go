@@ -734,26 +734,65 @@ func (sc *SmartQueryCache) evictOldestLRU() {
 }
 
 // extractLabelsFromQuery extracts node labels from a Cypher query string.
-// Uses regex to find patterns like :Label, (:Label), and :Label:AnotherLabel
-// Note: labelRegex is defined in regex_patterns.go for centralized pre-compilation
-
+// It scans for label tokens like :Label and :Label:AnotherLabel while skipping
+// quoted string content.
 func extractLabelsFromQuery(cypher string) []string {
-	matches := labelRegex.FindAllStringSubmatch(cypher, -1)
 	seen := make(map[string]struct{})
 	var labels []string
 
-	for _, match := range matches {
-		if len(match) > 1 {
-			label := match[1]
-			// Skip common non-label patterns
-			if label == "RETURN" || label == "WHERE" || label == "AND" || label == "OR" {
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(cypher); i++ {
+		ch := cypher[i]
+		if ch == '\'' && !inDouble && (i == 0 || cypher[i-1] != '\\') {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle && (i == 0 || cypher[i-1] != '\\') {
+			inDouble = !inDouble
+			continue
+		}
+		if inSingle || inDouble {
+			continue
+		}
+
+		if ch != ':' {
+			continue
+		}
+		// Skip type-cast and namespace-style double-colon constructs.
+		if i+1 < len(cypher) && cypher[i+1] == ':' {
+			continue
+		}
+
+		start := i + 1
+		if start >= len(cypher) {
+			continue
+		}
+		first := cypher[start]
+		if first < 'A' || first > 'Z' {
+			continue
+		}
+
+		end := start + 1
+		for end < len(cypher) {
+			c := cypher[end]
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+				end++
 				continue
 			}
-			if _, ok := seen[label]; !ok {
-				seen[label] = struct{}{}
-				labels = append(labels, label)
-			}
+			break
 		}
+		label := cypher[start:end]
+		// Skip common non-label patterns
+		if label == "RETURN" || label == "WHERE" || label == "AND" || label == "OR" {
+			i = end - 1
+			continue
+		}
+		if _, ok := seen[label]; !ok {
+			seen[label] = struct{}{}
+			labels = append(labels, label)
+		}
+		i = end - 1
 	}
 
 	return labels

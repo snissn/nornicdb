@@ -84,7 +84,6 @@ func (e *StorageExecutor) nodeMatchesWhereClause(ctx context.Context, node *stor
 }
 
 // evaluateSumArithmetic handles expressions like SUM(n.a) + SUM(n.b)
-// Uses pre-compiled sumPropPattern from regex_patterns.go
 func (e *StorageExecutor) evaluateSumArithmetic(expr string, nodes []*storage.Node, variable string) float64 {
 	// Split by + and - operators (respecting parentheses)
 	parts := splitArithmeticExpression(expr)
@@ -107,10 +106,9 @@ func (e *StorageExecutor) evaluateSumArithmetic(expr string, nodes []*storage.No
 		upperPart := strings.ToUpper(part)
 
 		if strings.HasPrefix(upperPart, "SUM(") {
-			propMatch := sumPropPattern.FindStringSubmatch(part)
-			if len(propMatch) == 3 {
+			if agg := ParseAggregation(part); agg != nil && agg.Function == "SUM" && agg.Property != "" {
 				for _, node := range nodes {
-					if val, exists := node.Properties[propMatch[2]]; exists {
+					if val, exists := node.Properties[agg.Property]; exists {
 						if num, ok := toFloat64(val); ok {
 							value += num
 						}

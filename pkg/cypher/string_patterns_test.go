@@ -508,28 +508,11 @@ func BenchmarkSplitByKeyword(b *testing.B) {
 		SplitByKeyword(query, "MATCH")
 	}
 }
-
-func BenchmarkSplitByKeywordRegex(b *testing.B) {
-	query := "MATCH (a:Person) MATCH (b:Person) WHERE a.name = 'Alice' RETURN a, b"
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		matchKeywordPattern.Split(query, -1)
-	}
-}
-
 func BenchmarkExtractLimit(b *testing.B) {
 	query := "MATCH (n:Person) WHERE n.age > 30 RETURN n LIMIT 100"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		ExtractLimit(query)
-	}
-}
-
-func BenchmarkExtractLimitRegex(b *testing.B) {
-	query := "MATCH (n:Person) WHERE n.age > 30 RETURN n LIMIT 100"
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		limitPattern.FindStringSubmatch(query)
 	}
 }
 
@@ -543,14 +526,6 @@ func BenchmarkParseAggregation(b *testing.B) {
 	}
 }
 
-func BenchmarkParseAggregationRegex(b *testing.B) {
-	expr := "SUM(n.price)"
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		sumPropPattern.FindStringSubmatch(expr)
-	}
-}
-
 func BenchmarkReplaceParameters(b *testing.B) {
 	query := "MATCH (n:Person) WHERE n.name = $name AND n.age > $minAge RETURN n"
 	replacer := func(param string) string {
@@ -559,15 +534,5 @@ func BenchmarkReplaceParameters(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		ReplaceParameters(query, replacer)
-	}
-}
-
-func BenchmarkReplaceParametersRegex(b *testing.B) {
-	query := "MATCH (n:Person) WHERE n.name = $name AND n.age > $minAge RETURN n"
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		parameterPattern.ReplaceAllStringFunc(query, func(match string) string {
-			return "'" + match[1:] + "_value'"
-		})
 	}
 }

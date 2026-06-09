@@ -288,7 +288,7 @@ func (e *StorageExecutor) analyzeMatchClause(query string) *PlanOperator {
 	}
 
 	// Check for variable-length path
-	if varLengthPathPattern.MatchString(query) {
+	if containsVariableLengthPathPattern(query) {
 		return &PlanOperator{
 			OperatorType:  "VarLengthExpand",
 			Description:   "Variable length path expansion",
@@ -317,8 +317,7 @@ func (e *StorageExecutor) analyzeMatchClause(query string) *PlanOperator {
 // and reports index usage or rejection reasons in the plan arguments.
 func (e *StorageExecutor) analyzeNodeScan(query string) *PlanOperator {
 	// Check for label in pattern (n:Label)
-	if matches := labelExtractPattern.FindStringSubmatch(query); matches != nil {
-		label := matches[1]
+	if label, ok := extractFirstNodeLabelFromQuery(query); ok {
 
 		// Check for property filter (n:Label {prop: value})
 		if strings.Contains(query, "{") {
@@ -507,7 +506,7 @@ func (e *StorageExecutor) analyzeReturnClause(query string) *PlanOperator {
 	returnClause = strings.TrimSpace(returnClause)
 
 	// Check for aggregations
-	hasAggregation := aggregationPattern.MatchString(returnClause)
+	hasAggregation := containsAggregateFunc(returnClause)
 
 	if hasAggregation {
 		return &PlanOperator{
@@ -539,6 +538,84 @@ func (e *StorageExecutor) analyzeReturnClause(query string) *PlanOperator {
 	}
 }
 
+func containsVariableLengthPathPattern(query string) bool {
+	for i := 0; i < len(query); i++ {
+		if query[i] != '[' {
+			continue
+		}
+		inside, _, ok := extractBracketSection(query[i:])
+		if !ok {
+			continue
+		}
+		inner := strings.TrimSpace(inside)
+		if !strings.HasPrefix(inner, "*") {
+			continue
+		}
+		rangeExpr := strings.TrimSpace(inner[1:])
+		if rangeExpr == "" {
+			return true // [*]
+		}
+		dotIdx := strings.Index(rangeExpr, "..")
+		if dotIdx < 0 {
+			continue
+		}
+		left := strings.TrimSpace(rangeExpr[:dotIdx])
+		right := strings.TrimSpace(rangeExpr[dotIdx+2:])
+		if (left == "" || isAllDigits(left)) && (right == "" || isAllDigits(right)) {
+			return true // [*1..3], [*..5], [*1..]
+		}
+	}
+	return false
+}
+
+func extractFirstNodeLabelFromQuery(query string) (string, bool) {
+	for i := 0; i < len(query); i++ {
+		if query[i] != '(' {
+			continue
+		}
+		inside, _, ok := extractParenSection(query[i:])
+		if !ok {
+			continue
+		}
+		if label, ok := extractLabelFromNodeSection(inside); ok {
+			return label, true
+		}
+	}
+	return "", false
+}
+
+func extractLabelFromNodeSection(inside string) (string, bool) {
+	s := strings.TrimSpace(inside)
+	if s == "" {
+		return "", false
+	}
+	if strings.HasPrefix(s, ":") {
+		label, _, ok := parseIdentifierToken(strings.TrimSpace(s[1:]))
+		return label, ok
+	}
+	if varName, rest, ok := parseIdentifierToken(s); ok {
+		_ = varName
+		rest = strings.TrimSpace(rest)
+		if strings.HasPrefix(rest, ":") {
+			label, _, ok := parseIdentifierToken(strings.TrimSpace(rest[1:]))
+			return label, ok
+		}
+	}
+	return "", false
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // analyzeLimitSkip analyzes LIMIT and SKIP clauses
 func (e *StorageExecutor) analyzeLimitSkip(query string) *PlanOperator {
 	upper := strings.ToUpper(query)
@@ -549,18 +626,18 @@ func (e *StorageExecutor) analyzeLimitSkip(query string) *PlanOperator {
 	}
 
 	// Extract LIMIT value
-	if matches := limitPattern.FindStringSubmatch(query); matches != nil {
-		op.Arguments["limit"] = matches[1]
-		op.Description = fmt.Sprintf("Limit to %s rows", matches[1])
+	if limit := ExtractLimitString(query); limit != "" {
+		op.Arguments["limit"] = limit
+		op.Description = fmt.Sprintf("Limit to %s rows", limit)
 	}
 
 	// Extract SKIP value
-	if matches := skipPattern.FindStringSubmatch(query); matches != nil {
-		op.Arguments["skip"] = matches[1]
+	if skip := ExtractSkipString(query); skip != "" {
+		op.Arguments["skip"] = skip
 		if op.Description != "" {
-			op.Description += fmt.Sprintf(", skip %s", matches[1])
+			op.Description += fmt.Sprintf(", skip %s", skip)
 		} else {
-			op.Description = fmt.Sprintf("Skip %s rows", matches[1])
+			op.Description = fmt.Sprintf("Skip %s rows", skip)
 		}
 	}
 
@@ -576,12 +653,15 @@ func (e *StorageExecutor) analyzeLimitSkip(query string) *PlanOperator {
 
 // analyzeCallClause analyzes CALL procedure invocations
 func (e *StorageExecutor) analyzeCallClause(query string) *PlanOperator {
-	// Extract procedure name
-	matches := callProcedurePattern.FindStringSubmatch(query)
-
 	procName := "unknown"
-	if matches != nil {
-		procName = matches[1]
+	if callIdx := keywordIndexFrom(query, "CALL", 0, defaultKeywordScanOpts()); callIdx >= 0 {
+		callEnd, ok := keywordSpanAt(query, callIdx, "CALL")
+		if ok {
+			rest := strings.TrimSpace(query[callEnd:])
+			if name, _, ok := parseProcedureNameToken(rest); ok {
+				procName = name
+			}
+		}
 	}
 
 	return &PlanOperator{
@@ -592,6 +672,27 @@ func (e *StorageExecutor) analyzeCallClause(query string) *PlanOperator {
 			"procedure": procName,
 		},
 	}
+}
+
+func parseProcedureNameToken(s string) (string, string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", "", false
+	}
+	start := 0
+	for start < len(s) {
+		_, rest, ok := parseIdentifierToken(s[start:])
+		if !ok {
+			return "", "", false
+		}
+		start = len(s) - len(rest)
+		if strings.HasPrefix(rest, ".") {
+			start++
+			continue
+		}
+		return s[:start], rest, true
+	}
+	return "", "", false
 }
 
 // updatePlanWithStats updates plan operators with actual execution statistics

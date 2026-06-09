@@ -291,26 +291,23 @@ func (e *StorageExecutor) validateSetAssignments(assignments []string) error {
 // (e.g. (o)-[:R]->(pharmacy) yields ["o", "pharmacy"]). Used to know which bindings the pipeline must return.
 func extractCreateVariableRefs(createPart string) []string {
 	seen := make(map[string]bool)
-	createClauses := createKeywordPattern.Split(createPart, -1)
+	exec := &StorageExecutor{}
+	createClauses := SplitByCreate(createPart)
 	for _, clause := range createClauses {
 		clause = strings.TrimSpace(clause)
 		if clause == "" {
 			continue
 		}
-		// Relationship pattern: (a)-[...]->(b) or (a)<-[...]-(b)
-		if matches := relForwardPattern.FindStringSubmatch(clause); len(matches) >= 6 {
-			src := strings.TrimSpace(matches[1])
-			tgt := strings.TrimSpace(matches[5])
-			if isSimpleVariable(src) {
-				seen[src] = true
+		for _, pattern := range exec.splitCreatePatterns(clause) {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
 			}
-			if isSimpleVariable(tgt) {
-				seen[tgt] = true
+			_, pattern = parseCreatePathAssignment(pattern)
+			src, _, tgt, _, remainder, err := exec.parseCreateRelPatternWithVars(pattern)
+			if err != nil || strings.TrimSpace(remainder) != "" {
+				continue
 			}
-		}
-		if matches := relReversePattern.FindStringSubmatch(clause); len(matches) >= 6 {
-			src := strings.TrimSpace(matches[1])
-			tgt := strings.TrimSpace(matches[5])
 			if isSimpleVariable(src) {
 				seen[src] = true
 			}

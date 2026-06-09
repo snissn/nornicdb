@@ -84,11 +84,6 @@ func (h *IndexHint) String() string {
 	}
 }
 
-// Regex patterns for parsing index hints are defined in regex_patterns.go:
-// - indexHintPattern: USING INDEX n:Label(property)
-// - scanHintPattern: USING SCAN n:Label
-// - joinHintPattern: USING JOIN ON n
-
 // ParseIndexHints extracts all index hints from a Cypher query.
 //
 // Parameters:
@@ -106,63 +101,161 @@ func (h *IndexHint) String() string {
 //	// cleanQuery = "MATCH (n:Person)  WHERE n.name = 'Alice' RETURN n"
 func ParseIndexHints(query string) ([]IndexHint, string) {
 	var hints []IndexHint
-	cleanQuery := query
+	var clean strings.Builder
+	pos := 0
+	for {
+		usingIdx := keywordIndexFrom(query, "USING", pos, defaultKeywordScanOpts())
+		if usingIdx < 0 {
+			clean.WriteString(query[pos:])
+			break
+		}
 
-	// Parse USING INDEX hints
-	indexMatches := indexHintPattern.FindAllStringSubmatch(query, -1)
-	for _, match := range indexMatches {
-		if len(match) >= 4 {
-			props := strings.Split(match[3], ",")
-			for i := range props {
-				props[i] = strings.TrimSpace(props[i])
-			}
-
-			hint := IndexHint{
-				Type:       HintIndex,
-				Variable:   match[1],
-				Label:      match[2],
-				Property:   props[0],
-				Properties: props,
-			}
+		clean.WriteString(query[pos:usingIdx])
+		if hint, end, ok := parseSingleIndexHint(query, usingIdx); ok {
 			hints = append(hints, hint)
+			pos = end
+			continue
+		}
+
+		// Not a valid hint form; keep "USING" text and continue scanning.
+		clean.WriteString(query[usingIdx : usingIdx+5])
+		pos = usingIdx + 5
+	}
+
+	return hints, strings.Join(strings.Fields(clean.String()), " ")
+}
+
+func parseSingleIndexHint(query string, usingIdx int) (IndexHint, int, bool) {
+	usingEnd, ok := keywordSpanAt(query, usingIdx, "USING")
+	if !ok {
+		return IndexHint{}, usingIdx, false
+	}
+	rest := strings.TrimSpace(query[usingEnd:])
+	restStart := usingEnd + (len(query[usingEnd:]) - len(rest))
+	if rest == "" {
+		return IndexHint{}, usingIdx, false
+	}
+
+	if startsWithKeywordFold(rest, "INDEX") {
+		indexEnd, ok := keywordSpanAt(rest, 0, "INDEX")
+		if !ok {
+			return IndexHint{}, usingIdx, false
+		}
+		hint, consumed, ok := parseIndexHintSpec(rest[indexEnd:])
+		if !ok {
+			return IndexHint{}, usingIdx, false
+		}
+		return hint, restStart + indexEnd + consumed, true
+	}
+
+	if startsWithKeywordFold(rest, "SCAN") {
+		scanEnd, ok := keywordSpanAt(rest, 0, "SCAN")
+		if !ok {
+			return IndexHint{}, usingIdx, false
+		}
+		hint, consumed, ok := parseScanHintSpec(rest[scanEnd:])
+		if !ok {
+			return IndexHint{}, usingIdx, false
+		}
+		return hint, restStart + scanEnd + consumed, true
+	}
+
+	if startsWithKeywordFold(rest, "JOIN") {
+		joinEnd, ok := keywordSpanAt(rest, 0, "JOIN")
+		if !ok {
+			return IndexHint{}, usingIdx, false
+		}
+		hint, consumed, ok := parseJoinHintSpec(rest[joinEnd:])
+		if !ok {
+			return IndexHint{}, usingIdx, false
+		}
+		return hint, restStart + joinEnd + consumed, true
+	}
+
+	return IndexHint{}, usingIdx, false
+}
+
+func parseIndexHintSpec(s string) (IndexHint, int, bool) {
+	original := s
+	s = strings.TrimSpace(s)
+	trimmedPrefix := len(original) - len(s)
+	variable, rest, ok := parseIdentifierToken(s)
+	if !ok {
+		return IndexHint{}, 0, false
+	}
+	rest = strings.TrimSpace(rest)
+	if !strings.HasPrefix(rest, ":") {
+		return IndexHint{}, 0, false
+	}
+	label, rest, ok := parseIdentifierToken(strings.TrimSpace(rest[1:]))
+	if !ok {
+		return IndexHint{}, 0, false
+	}
+	rest = strings.TrimSpace(rest)
+	inside, trailing, ok := extractParenSection(rest)
+	if !ok {
+		return IndexHint{}, 0, false
+	}
+	props := splitTopLevelComma(inside)
+	parsedProps := make([]string, 0, len(props))
+	for _, p := range props {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if name, _, ok := parseIdentifierToken(p); ok {
+			parsedProps = append(parsedProps, name)
+		} else {
+			return IndexHint{}, 0, false
 		}
 	}
-	// Remove index hints from query
-	cleanQuery = indexHintPattern.ReplaceAllString(cleanQuery, "")
-
-	// Parse USING SCAN hints
-	scanMatches := scanHintPattern.FindAllStringSubmatch(cleanQuery, -1)
-	for _, match := range scanMatches {
-		if len(match) >= 3 {
-			hint := IndexHint{
-				Type:     HintScan,
-				Variable: match[1],
-				Label:    match[2],
-			}
-			hints = append(hints, hint)
-		}
+	if len(parsedProps) == 0 {
+		return IndexHint{}, 0, false
 	}
-	// Remove scan hints from query
-	cleanQuery = scanHintPattern.ReplaceAllString(cleanQuery, "")
+	consumed := trimmedPrefix + len(s) - len(trailing)
+	return IndexHint{
+		Type:       HintIndex,
+		Variable:   variable,
+		Label:      label,
+		Property:   parsedProps[0],
+		Properties: parsedProps,
+	}, consumed, true
+}
 
-	// Parse USING JOIN hints
-	joinMatches := joinHintPattern.FindAllStringSubmatch(cleanQuery, -1)
-	for _, match := range joinMatches {
-		if len(match) >= 2 {
-			hint := IndexHint{
-				Type:     HintJoin,
-				Variable: match[1],
-			}
-			hints = append(hints, hint)
-		}
+func parseScanHintSpec(s string) (IndexHint, int, bool) {
+	original := s
+	s = strings.TrimSpace(s)
+	trimmedPrefix := len(original) - len(s)
+	variable, rest, ok := parseIdentifierToken(s)
+	if !ok {
+		return IndexHint{}, 0, false
 	}
-	// Remove join hints from query
-	cleanQuery = joinHintPattern.ReplaceAllString(cleanQuery, "")
+	rest = strings.TrimSpace(rest)
+	if !strings.HasPrefix(rest, ":") {
+		return IndexHint{}, 0, false
+	}
+	label, rest, ok := parseIdentifierToken(strings.TrimSpace(rest[1:]))
+	if !ok {
+		return IndexHint{}, 0, false
+	}
+	consumed := trimmedPrefix + len(s) - len(rest)
+	return IndexHint{Type: HintScan, Variable: variable, Label: label}, consumed, true
+}
 
-	// Clean up extra whitespace
-	cleanQuery = strings.Join(strings.Fields(cleanQuery), " ")
-
-	return hints, cleanQuery
+func parseJoinHintSpec(s string) (IndexHint, int, bool) {
+	original := s
+	s = strings.TrimSpace(s)
+	trimmedPrefix := len(original) - len(s)
+	onEnd, ok := keywordSpanAt(s, 0, "ON")
+	if !ok {
+		return IndexHint{}, 0, false
+	}
+	variable, rest, ok := parseIdentifierToken(strings.TrimSpace(s[onEnd:]))
+	if !ok {
+		return IndexHint{}, 0, false
+	}
+	consumed := trimmedPrefix + len(s) - len(rest)
+	return IndexHint{Type: HintJoin, Variable: variable}, consumed, true
 }
 
 // IndexHintContext holds index hints for a query execution.

@@ -103,11 +103,10 @@ func (e *StorageExecutor) executeAggregation(ctx context.Context, nodes []*stora
 					row[i] = int64(len(groupNodes))
 				} else {
 					// COUNT(n.property) - count non-null values
-					propMatch := countPropPattern.FindStringSubmatch(item.expr)
-					if len(propMatch) == 3 {
+					if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "COUNT" && agg.Property != "" {
 						count := int64(0)
 						for _, node := range groupNodes {
-							if _, exists := node.Properties[propMatch[2]]; exists {
+							if _, exists := node.Properties[agg.Property]; exists {
 								count++
 							}
 						}
@@ -118,13 +117,12 @@ func (e *StorageExecutor) executeAggregation(ctx context.Context, nodes []*stora
 				}
 
 			case strings.HasPrefix(upperExpr, "SUM("):
-				propMatch := sumPropPattern.FindStringSubmatch(item.expr)
-				if len(propMatch) == 3 {
+				if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "SUM" && agg.Property != "" {
 					var sumInt int64
 					var sumFloat float64
 					hasFloat := false
 					for _, node := range groupNodes {
-						if val, exists := node.Properties[propMatch[2]]; exists {
+						if val, exists := node.Properties[agg.Property]; exists {
 							switch v := val.(type) {
 							case int64:
 								sumInt += v
@@ -150,12 +148,11 @@ func (e *StorageExecutor) executeAggregation(ctx context.Context, nodes []*stora
 				}
 
 			case strings.HasPrefix(upperExpr, "AVG("):
-				propMatch := avgPropPattern.FindStringSubmatch(item.expr)
-				if len(propMatch) == 3 {
+				if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "AVG" && agg.Property != "" {
 					sum := float64(0)
 					count := 0
 					for _, node := range groupNodes {
-						if val, exists := node.Properties[propMatch[2]]; exists {
+						if val, exists := node.Properties[agg.Property]; exists {
 							if num, ok := toFloat64(val); ok {
 								sum += num
 								count++
@@ -172,13 +169,12 @@ func (e *StorageExecutor) executeAggregation(ctx context.Context, nodes []*stora
 				}
 
 			case strings.HasPrefix(upperExpr, "MIN("):
-				propMatch := minPropPattern.FindStringSubmatch(item.expr)
-				if len(propMatch) == 3 {
+				if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "MIN" && agg.Property != "" {
 					var minInt *int64
 					var minFloat *float64
 					hasFloat := false
 					for _, node := range groupNodes {
-						if val, exists := node.Properties[propMatch[2]]; exists {
+						if val, exists := node.Properties[agg.Property]; exists {
 							switch v := val.(type) {
 							case int64:
 								if minInt == nil || v < *minInt {
@@ -209,13 +205,12 @@ func (e *StorageExecutor) executeAggregation(ctx context.Context, nodes []*stora
 				}
 
 			case strings.HasPrefix(upperExpr, "MAX("):
-				propMatch := maxPropPattern.FindStringSubmatch(item.expr)
-				if len(propMatch) == 3 {
+				if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "MAX" && agg.Property != "" {
 					var maxInt *int64
 					var maxFloat *float64
 					hasFloat := false
 					for _, node := range groupNodes {
-						if val, exists := node.Properties[propMatch[2]]; exists {
+						if val, exists := node.Properties[agg.Property]; exists {
 							switch v := val.(type) {
 							case int64:
 								if maxInt == nil || v > *maxInt {
@@ -246,13 +241,12 @@ func (e *StorageExecutor) executeAggregation(ctx context.Context, nodes []*stora
 				}
 
 			case strings.HasPrefix(upperExpr, "COLLECT("):
-				propMatch := collectPropPattern.FindStringSubmatch(item.expr)
 				collected := make([]interface{}, 0)
-				if len(propMatch) >= 2 {
+				if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "COLLECT" {
 					for _, node := range groupNodes {
-						if len(propMatch) == 3 && propMatch[2] != "" {
+						if agg.Property != "" {
 							// COLLECT(n.property)
-							if val, exists := node.Properties[propMatch[2]]; exists {
+							if val, exists := node.Properties[agg.Property]; exists {
 								collected = append(collected, val)
 							}
 						} else {
@@ -297,11 +291,10 @@ func (e *StorageExecutor) executeAggregationSingleGroup(ctx context.Context, nod
 
 		// Handle COUNT(DISTINCT n.property)
 		case strings.HasPrefix(upperExpr, "COUNT(") && strings.Contains(upperExpr, "DISTINCT"):
-			propMatch := countDistinctPropPattern.FindStringSubmatch(item.expr)
-			if len(propMatch) == 3 {
+			if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "COUNT" && agg.Distinct && agg.Property != "" {
 				seen := make(map[interface{}]bool)
 				for _, node := range nodes {
-					if val, exists := node.Properties[propMatch[2]]; exists && val != nil {
+					if val, exists := node.Properties[agg.Property]; exists && val != nil {
 						seen[val] = true
 					}
 				}
@@ -329,11 +322,10 @@ func (e *StorageExecutor) executeAggregationSingleGroup(ctx context.Context, nod
 				}
 				row[i] = count
 			} else {
-				propMatch := countPropPattern.FindStringSubmatch(item.expr)
-				if len(propMatch) == 3 {
+				if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "COUNT" && agg.Property != "" {
 					count := int64(0)
 					for _, node := range nodes {
-						if _, exists := node.Properties[propMatch[2]]; exists {
+						if _, exists := node.Properties[agg.Property]; exists {
 							count++
 						}
 					}
@@ -345,14 +337,13 @@ func (e *StorageExecutor) executeAggregationSingleGroup(ctx context.Context, nod
 
 		case strings.HasPrefix(upperExpr, "SUM("):
 			inner := item.expr[4 : len(item.expr)-1] // Extract inner expression
-			propMatch := sumPropPattern.FindStringSubmatch(item.expr)
-			if len(propMatch) == 3 {
+			if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "SUM" && agg.Property != "" {
 				// SUM(n.property) - preserve integer type if all values are integers
 				var sumInt int64
 				var sumFloat float64
 				hasFloat := false
 				for _, node := range nodes {
-					if val, exists := node.Properties[propMatch[2]]; exists {
+					if val, exists := node.Properties[agg.Property]; exists {
 						switch v := val.(type) {
 						case int64:
 							sumInt += v
@@ -390,12 +381,11 @@ func (e *StorageExecutor) executeAggregationSingleGroup(ctx context.Context, nod
 			}
 
 		case strings.HasPrefix(upperExpr, "AVG("):
-			propMatch := avgPropPattern.FindStringSubmatch(item.expr)
-			if len(propMatch) == 3 {
+			if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "AVG" && agg.Property != "" {
 				sum := float64(0)
 				count := 0
 				for _, node := range nodes {
-					if val, exists := node.Properties[propMatch[2]]; exists {
+					if val, exists := node.Properties[agg.Property]; exists {
 						if num, ok := toFloat64(val); ok {
 							sum += num
 							count++
@@ -412,13 +402,12 @@ func (e *StorageExecutor) executeAggregationSingleGroup(ctx context.Context, nod
 			}
 
 		case strings.HasPrefix(upperExpr, "MIN("):
-			propMatch := minPropPattern.FindStringSubmatch(item.expr)
-			if len(propMatch) == 3 {
+			if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "MIN" && agg.Property != "" {
 				var minInt *int64
 				var minFloat *float64
 				hasFloat := false
 				for _, node := range nodes {
-					if val, exists := node.Properties[propMatch[2]]; exists {
+					if val, exists := node.Properties[agg.Property]; exists {
 						switch v := val.(type) {
 						case int64:
 							if minInt == nil || v < *minInt {
@@ -449,13 +438,12 @@ func (e *StorageExecutor) executeAggregationSingleGroup(ctx context.Context, nod
 			}
 
 		case strings.HasPrefix(upperExpr, "MAX("):
-			propMatch := maxPropPattern.FindStringSubmatch(item.expr)
-			if len(propMatch) == 3 {
+			if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "MAX" && agg.Property != "" {
 				var maxInt *int64
 				var maxFloat *float64
 				hasFloat := false
 				for _, node := range nodes {
-					if val, exists := node.Properties[propMatch[2]]; exists {
+					if val, exists := node.Properties[agg.Property]; exists {
 						switch v := val.(type) {
 						case int64:
 							if maxInt == nil || v > *maxInt {
@@ -491,14 +479,13 @@ func (e *StorageExecutor) executeAggregationSingleGroup(ctx context.Context, nod
 			inner := item.expr[17 : len(item.expr)-1]
 			inner = strings.TrimSpace(inner)
 
-			propMatch := collectDistinctPropPattern.FindStringSubmatch(item.expr)
 			seen := make(map[string]bool) // Use string key for map comparison
 			collected := make([]interface{}, 0)
 
-			if len(propMatch) == 3 {
+			if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "COLLECT" && agg.Distinct && agg.Property != "" {
 				// Simple property access: COLLECT(DISTINCT n.property)
 				for _, node := range nodes {
-					if val, exists := node.Properties[propMatch[2]]; exists && val != nil {
+					if val, exists := node.Properties[agg.Property]; exists && val != nil {
 						key := fmt.Sprintf("%v", val)
 						if !seen[key] {
 							seen[key] = true
@@ -534,14 +521,13 @@ func (e *StorageExecutor) executeAggregationSingleGroup(ctx context.Context, nod
 				suffix = ""
 			}
 
-			propMatch := collectPropPattern.FindStringSubmatch(item.expr)
 			collected := make([]interface{}, 0)
 
-			if len(propMatch) >= 2 && (len(propMatch) < 3 || propMatch[2] != "") {
-				// Simple property or variable access: COLLECT(n) or COLLECT(n.property)
+			if agg := ParseAggregation(item.expr); agg != nil && agg.Function == "COLLECT" && agg.Property != "" {
+				// Simple property access: COLLECT(n.property)
 				for _, node := range nodes {
-					if len(propMatch) == 3 && propMatch[2] != "" {
-						if val, exists := node.Properties[propMatch[2]]; exists {
+					if agg.Property != "" {
+						if val, exists := node.Properties[agg.Property]; exists {
 							collected = append(collected, val)
 						}
 					} else {
