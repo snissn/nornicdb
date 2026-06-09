@@ -555,8 +555,14 @@ func TestVectorIndexWithDifferentOptions(t *testing.T) {
 		{
 			name:      "DefaultOptions",
 			query:     "CREATE VECTOR INDEX vec2 FOR (n:Node) ON (n.vec)",
-			wantDims:  1024,     // default
+			wantDims:  -1,       // executor default
 			wantSimFn: "cosine", // default
+		},
+		{
+			name:      "QuotedOptionKeys",
+			query:     `CREATE VECTOR INDEX vec3 FOR (n:Node) ON (n.embedding) OPTIONS {indexConfig: {"vector.dimensions": 384, "vector.similarity_function": "dot"}}`,
+			wantDims:  384,
+			wantSimFn: "dot",
 		},
 	}
 
@@ -565,6 +571,21 @@ func TestVectorIndexWithDifferentOptions(t *testing.T) {
 			_, err := exec.Execute(ctx, tt.query, nil)
 			if err != nil {
 				t.Fatalf("Failed to create vector index: %v", err)
+			}
+
+			idx, exists := store.GetSchema().GetVectorIndex(strings.Fields(tt.query)[3])
+			if !exists {
+				t.Fatalf("expected vector index %q to exist", strings.Fields(tt.query)[3])
+			}
+			wantDims := tt.wantDims
+			if wantDims < 0 {
+				wantDims = exec.GetDefaultEmbeddingDimensions()
+			}
+			if idx.Dimensions != wantDims {
+				t.Fatalf("expected dimensions=%d, got=%d", wantDims, idx.Dimensions)
+			}
+			if idx.SimilarityFunc != tt.wantSimFn {
+				t.Fatalf("expected similarity=%q, got=%q", tt.wantSimFn, idx.SimilarityFunc)
 			}
 		})
 	}
@@ -578,8 +599,8 @@ func TestVectorIndexWithDifferentOptions(t *testing.T) {
 			vectorCount++
 		}
 	}
-	if vectorCount != 2 {
-		t.Errorf("Expected 2 vector indexes, got %d", vectorCount)
+	if vectorCount != 3 {
+		t.Errorf("Expected 3 vector indexes, got %d", vectorCount)
 	}
 }
 
@@ -912,6 +933,7 @@ func TestCreateIndex_Neo4jCompatibilitySyntax(t *testing.T) {
 		"CREATE INDEX IF NOT EXISTS FOR (n:Test) ON n.entity_id",
 		"CREATE INDEX rel_uuid IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.uuid)",
 		"CREATE INDEX FOR ()<-[r:RELATES_TO]-() ON (r.uuid, r.group_id)",
+		"CREATE INDEX `rel idx` IF NOT EXISTS FOR ()-[`r`:`RELATES_TO`]-() ON (`r`.`uuid`) OPTIONS {indexProvider: 'range-1.0'}",
 	}
 	for _, q := range queries {
 		_, err := exec.executeSchemaCommand(ctx, q)
@@ -940,6 +962,18 @@ func TestCreateIndex_Neo4jCompatibilitySyntax(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestCreateRangeIndex_RejectsRelationshipPattern(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.executeSchemaCommand(ctx, "CREATE RANGE INDEX rel_rng FOR ()-[r:RELATES_TO]-() ON (r.uuid)")
+	if err == nil {
+		t.Fatal("expected relationship CREATE RANGE INDEX syntax to fail")
 	}
 }
 

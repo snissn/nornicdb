@@ -3,45 +3,163 @@ package cypher
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
-var (
-	constraintContractNamedNodePattern           = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s*\{(.*)\}\s*$`)
-	constraintContractUnnamedNodePattern         = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s*\{(.*)\}\s*$`)
-	constraintContractNamedRelationshipPattern   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s*\{(.*)\}\s*$`)
-	constraintContractUnnamedRelationshipPattern = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s*\{(.*)\}\s*$`)
+type parsedCreateConstraintContractDDL struct {
+	name        string
+	entityType  storage.ConstraintEntityType
+	variable    string
+	labelOrType string
+	body        string
+}
 
-	blockPropertyUniquePattern  = regexp.MustCompile(`(?is)^\s*` + ddlVariableToken + `\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+UNIQUE\s*$`)
-	blockPropertyNotNullPattern = regexp.MustCompile(`(?is)^\s*` + ddlVariableToken + `\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+NOT\s+NULL\s*$`)
-	blockPropertyTypePattern    = regexp.MustCompile(`(?is)^\s*` + ddlVariableToken + `\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)\s*$`)
-	blockNodeKeyPattern         = regexp.MustCompile(`(?is)^\s*\(([^)]+)\)\s+IS\s+NODE\s+KEY\s*$`)
-	blockRelationshipKeyPattern = regexp.MustCompile(`(?is)^\s*\(([^)]+)\)\s+IS\s+RELATIONSHIP\s+KEY\s*$`)
-	blockTemporalPattern        = regexp.MustCompile(`(?is)^\s*\(([^)]+)\)\s+IS\s+TEMPORAL(?:\s+NO\s+OVERLAP)?\s*$`)
-)
+func parseConstraintContractForClause(forClause string) (entityType storage.ConstraintEntityType, variable string, labelOrType string, ok bool) {
+	forClause = strings.TrimSpace(forClause)
+	if forClause == "" {
+		return "", "", "", false
+	}
+
+	if strings.Contains(forClause, "[") {
+		bracketStart := strings.Index(forClause, "[")
+		if bracketStart < 0 {
+			return "", "", "", false
+		}
+		inside, rest, ok := extractBracketSection(forClause[bracketStart:])
+		if !ok {
+			return "", "", "", false
+		}
+		prefix := strings.TrimSpace(forClause[:bracketStart])
+		suffix := strings.TrimSpace(rest)
+		if !strings.Contains(prefix, "(") || !strings.Contains(suffix, "(") {
+			return "", "", "", false
+		}
+		colon := strings.Index(inside, ":")
+		if colon < 0 {
+			return "", "", "", false
+		}
+		variable = normalizeIdentifierToken(strings.TrimSpace(inside[:colon]))
+		labelOrType = normalizeIdentifierToken(strings.TrimSpace(inside[colon+1:]))
+		if labelOrType == "" {
+			return "", "", "", false
+		}
+		return storage.ConstraintEntityRelationship, variable, labelOrType, true
+	}
+
+	inside, rest, ok := extractParenSection(forClause)
+	if !ok || strings.TrimSpace(rest) != "" {
+		return "", "", "", false
+	}
+	colon := strings.Index(inside, ":")
+	if colon < 0 {
+		return "", "", "", false
+	}
+	variable = normalizeIdentifierToken(strings.TrimSpace(inside[:colon]))
+	labelOrType = normalizeIdentifierToken(strings.TrimSpace(inside[colon+1:]))
+	if labelOrType == "" {
+		return "", "", "", false
+	}
+	return storage.ConstraintEntityNode, variable, labelOrType, true
+}
+
+func parseCurlySection(s string) (inside string, rest string, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || s[0] != '{' {
+		return "", s, false
+	}
+	depth := 0
+	quote := byte(0)
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' {
+			quote = ch
+			continue
+		}
+		if ch == '{' {
+			depth++
+			continue
+		}
+		if ch == '}' {
+			depth--
+			if depth == 0 {
+				return s[1:i], strings.TrimSpace(s[i+1:]), true
+			}
+		}
+	}
+	return "", s, false
+}
+
+func (e *StorageExecutor) parseCreateConstraintContractDDL(cypher string) (parsedCreateConstraintContractDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedCreateConstraintContractDDL{}, fmt.Errorf("empty statement")
+	}
+	prefixPos := keywordIndexFrom(q, "CREATE CONSTRAINT", 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedCreateConstraintContractDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, "CREATE CONSTRAINT")
+	if !ok {
+		return parsedCreateConstraintContractDDL{}, fmt.Errorf("invalid prefix")
+	}
+	forPos := keywordIndexFrom(q, "FOR", prefixEnd, defaultKeywordScanOpts())
+	if forPos < 0 {
+		return parsedCreateConstraintContractDDL{}, fmt.Errorf("missing FOR")
+	}
+	forEnd, ok := keywordSpanAt(q, forPos, "FOR")
+	if !ok {
+		return parsedCreateConstraintContractDDL{}, fmt.Errorf("invalid FOR")
+	}
+	reqPos := keywordIndexFrom(q, "REQUIRE", forEnd, defaultKeywordScanOpts())
+	if reqPos < 0 {
+		return parsedCreateConstraintContractDDL{}, fmt.Errorf("missing REQUIRE")
+	}
+	reqEnd, ok := keywordSpanAt(q, reqPos, "REQUIRE")
+	if !ok {
+		return parsedCreateConstraintContractDDL{}, fmt.Errorf("invalid REQUIRE")
+	}
+
+	name, err := parseOptionalDDLName(q[prefixEnd:forPos])
+	if err != nil {
+		return parsedCreateConstraintContractDDL{}, err
+	}
+
+	entityType, variable, labelOrType, ok := parseConstraintContractForClause(q[forEnd:reqPos])
+	if !ok {
+		return parsedCreateConstraintContractDDL{}, fmt.Errorf("invalid FOR pattern")
+	}
+
+	body, tail, ok := parseCurlySection(q[reqEnd:])
+	if !ok || tail != "" {
+		return parsedCreateConstraintContractDDL{}, fmt.Errorf("invalid REQUIRE block")
+	}
+
+	if name == "" {
+		name = fmt.Sprintf("constraint_%s_contract", strings.ToLower(labelOrType))
+	}
+	return parsedCreateConstraintContractDDL{
+		name:        name,
+		entityType:  entityType,
+		variable:    variable,
+		labelOrType: labelOrType,
+		body:        body,
+	}, nil
+}
 
 func (e *StorageExecutor) executeCreateConstraintContract(ctx context.Context, cypher string, ifNotExists bool) (*ExecuteResult, bool, error) {
-	trimmed := strings.TrimSpace(cypher)
-
-	if matches := constraintContractNamedNodePattern.FindStringSubmatch(trimmed); matches != nil {
-		return e.createConstraintContractForTarget(ctx, cypher, normalizeIdentifierToken(matches[1]), storage.ConstraintEntityNode, normalizeIdentifierToken(matches[2]), normalizeIdentifierToken(matches[3]), matches[4], ifNotExists)
+	parsed, err := e.parseCreateConstraintContractDDL(cypher)
+	if err != nil {
+		return nil, false, nil
 	}
-	if matches := constraintContractUnnamedNodePattern.FindStringSubmatch(trimmed); matches != nil {
-		name := fmt.Sprintf("constraint_%s_contract", strings.ToLower(normalizeIdentifierToken(matches[2])))
-		return e.createConstraintContractForTarget(ctx, cypher, name, storage.ConstraintEntityNode, normalizeIdentifierToken(matches[1]), normalizeIdentifierToken(matches[2]), matches[3], ifNotExists)
-	}
-	if matches := constraintContractNamedRelationshipPattern.FindStringSubmatch(trimmed); matches != nil {
-		return e.createConstraintContractForTarget(ctx, cypher, normalizeIdentifierToken(matches[1]), storage.ConstraintEntityRelationship, normalizeIdentifierToken(matches[2]), normalizeIdentifierToken(matches[3]), matches[4], ifNotExists)
-	}
-	if matches := constraintContractUnnamedRelationshipPattern.FindStringSubmatch(trimmed); matches != nil {
-		name := fmt.Sprintf("constraint_%s_contract", strings.ToLower(normalizeIdentifierToken(matches[2])))
-		return e.createConstraintContractForTarget(ctx, cypher, name, storage.ConstraintEntityRelationship, normalizeIdentifierToken(matches[1]), normalizeIdentifierToken(matches[2]), matches[3], ifNotExists)
-	}
-
-	return nil, false, nil
+	return e.createConstraintContractForTarget(ctx, cypher, parsed.name, parsed.entityType, parsed.variable, parsed.labelOrType, parsed.body, ifNotExists)
 }
 
 func (e *StorageExecutor) createConstraintContractForTarget(ctx context.Context, definition, name string, entityType storage.ConstraintEntityType, variable, labelOrType, body string, ifNotExists bool) (*ExecuteResult, bool, error) {
@@ -202,35 +320,34 @@ func (e *StorageExecutor) parseConstraintContractEntry(rawEntry, variable string
 }
 
 func (e *StorageExecutor) parseConstraintContractPrimitive(entryText, variable string, entityType storage.ConstraintEntityType, labelOrType, entryName string) (*storage.Constraint, storage.ConstraintContractEntry, bool, error) {
-	if matches := blockPropertyUniquePattern.FindStringSubmatch(entryText); matches != nil {
-		property := normalizeIdentifierToken(matches[1])
-		constraint := &storage.Constraint{Name: entryName, Type: storage.ConstraintUnique, EntityType: entityType, Label: labelOrType, Properties: []string{property}}
-		kind := storage.ConstraintContractKindPrimitiveNode
-		if entityType == storage.ConstraintEntityRelationship {
-			kind = storage.ConstraintContractKindPrimitiveRelationship
+	if kind, property, ok := parseConstraintPredicate(entryText); ok {
+		if kind == "unique" {
+			constraint := &storage.Constraint{Name: entryName, Type: storage.ConstraintUnique, EntityType: entityType, Label: labelOrType, Properties: []string{property}}
+			primitiveKind := storage.ConstraintContractKindPrimitiveNode
+			if entityType == storage.ConstraintEntityRelationship {
+				primitiveKind = storage.ConstraintContractKindPrimitiveRelationship
+			}
+			return constraint, storage.ConstraintContractEntry{Kind: primitiveKind, PrimitiveType: string(storage.ConstraintUnique), Property: property, Properties: []string{property}, Expression: entryText}, true, nil
 		}
-		return constraint, storage.ConstraintContractEntry{Kind: kind, PrimitiveType: string(storage.ConstraintUnique), Property: property, Properties: []string{property}, Expression: entryText}, true, nil
-	}
-	if matches := blockPropertyNotNullPattern.FindStringSubmatch(entryText); matches != nil {
-		property := normalizeIdentifierToken(matches[1])
-		constraint := &storage.Constraint{Name: entryName, Type: storage.ConstraintExists, EntityType: entityType, Label: labelOrType, Properties: []string{property}}
-		kind := storage.ConstraintContractKindPrimitiveNode
-		if entityType == storage.ConstraintEntityRelationship {
-			kind = storage.ConstraintContractKindPrimitiveRelationship
+		if kind == "exists" {
+			constraint := &storage.Constraint{Name: entryName, Type: storage.ConstraintExists, EntityType: entityType, Label: labelOrType, Properties: []string{property}}
+			primitiveKind := storage.ConstraintContractKindPrimitiveNode
+			if entityType == storage.ConstraintEntityRelationship {
+				primitiveKind = storage.ConstraintContractKindPrimitiveRelationship
+			}
+			return constraint, storage.ConstraintContractEntry{Kind: primitiveKind, PrimitiveType: string(storage.ConstraintExists), Property: property, Properties: []string{property}, Expression: entryText}, true, nil
 		}
-		return constraint, storage.ConstraintContractEntry{Kind: kind, PrimitiveType: string(storage.ConstraintExists), Property: property, Properties: []string{property}, Expression: entryText}, true, nil
 	}
+
 	if entityType == storage.ConstraintEntityNode {
-		if matches := blockNodeKeyPattern.FindStringSubmatch(entryText); matches != nil {
-			properties := e.parseConstraintProperties(matches[1])
+		if properties, ok := e.parseNodeKeyPropertyList(entryText); ok {
 			if len(properties) == 0 {
 				return nil, storage.ConstraintContractEntry{}, true, fmt.Errorf("NODE KEY constraint requires properties")
 			}
 			constraint := &storage.Constraint{Name: entryName, Type: storage.ConstraintNodeKey, EntityType: entityType, Label: labelOrType, Properties: properties}
 			return constraint, storage.ConstraintContractEntry{Kind: storage.ConstraintContractKindPrimitiveNode, PrimitiveType: string(storage.ConstraintNodeKey), Properties: properties, Expression: entryText}, true, nil
 		}
-		if matches := blockTemporalPattern.FindStringSubmatch(entryText); matches != nil {
-			properties := e.parseConstraintProperties(matches[1])
+		if properties, ok := e.parseTemporalConstraintPredicate(entryText); ok {
 			if len(properties) != 3 {
 				return nil, storage.ConstraintContractEntry{}, true, fmt.Errorf("TEMPORAL constraint requires 3 properties (key, valid_from, valid_to)")
 			}
@@ -238,14 +355,22 @@ func (e *StorageExecutor) parseConstraintContractPrimitive(entryText, variable s
 			return constraint, storage.ConstraintContractEntry{Kind: storage.ConstraintContractKindPrimitiveNode, PrimitiveType: string(storage.ConstraintTemporal), Properties: properties, Expression: entryText}, true, nil
 		}
 	}
+
 	if entityType == storage.ConstraintEntityRelationship {
-		if matches := blockRelationshipKeyPattern.FindStringSubmatch(entryText); matches != nil {
-			properties := e.parseConstraintProperties(matches[1])
-			if len(properties) == 0 {
-				return nil, storage.ConstraintContractEntry{}, true, fmt.Errorf("RELATIONSHIP KEY constraint requires properties")
+		inside, rest, ok := extractParenSection(strings.TrimSpace(entryText))
+		if ok {
+			rest = strings.TrimSpace(rest)
+			if idx := keywordIndexFrom(rest, "IS RELATIONSHIP KEY", 0, defaultKeywordScanOpts()); idx == 0 {
+				end, spanOK := keywordSpanAt(rest, 0, "IS RELATIONSHIP KEY")
+				if spanOK && strings.TrimSpace(rest[end:]) == "" {
+					properties := e.parseConstraintProperties(inside)
+					if len(properties) == 0 {
+						return nil, storage.ConstraintContractEntry{}, true, fmt.Errorf("RELATIONSHIP KEY constraint requires properties")
+					}
+					constraint := &storage.Constraint{Name: entryName, Type: storage.ConstraintRelationshipKey, EntityType: entityType, Label: labelOrType, Properties: properties}
+					return constraint, storage.ConstraintContractEntry{Kind: storage.ConstraintContractKindPrimitiveRelationship, PrimitiveType: string(storage.ConstraintRelationshipKey), Properties: properties, Expression: entryText}, true, nil
+				}
 			}
-			constraint := &storage.Constraint{Name: entryName, Type: storage.ConstraintRelationshipKey, EntityType: entityType, Label: labelOrType, Properties: properties}
-			return constraint, storage.ConstraintContractEntry{Kind: storage.ConstraintContractKindPrimitiveRelationship, PrimitiveType: string(storage.ConstraintRelationshipKey), Properties: properties, Expression: entryText}, true, nil
 		}
 	}
 
@@ -253,12 +378,11 @@ func (e *StorageExecutor) parseConstraintContractPrimitive(entryText, variable s
 }
 
 func (e *StorageExecutor) parseConstraintContractPropertyType(entryText, variable string, entityType storage.ConstraintEntityType, labelOrType, entryName string) (*storage.PropertyTypeConstraint, storage.ConstraintContractEntry, bool, error) {
-	matches := blockPropertyTypePattern.FindStringSubmatch(entryText)
-	if matches == nil {
+	property, typeName, ok := parseConstraintTypePredicate(entryText)
+	if !ok {
 		return nil, storage.ConstraintContractEntry{}, false, nil
 	}
-	property := normalizeIdentifierToken(matches[1])
-	expectedType, err := parsePropertyType(matches[2])
+	expectedType, err := parsePropertyType(typeName)
 	if err != nil {
 		return nil, storage.ConstraintContractEntry{}, true, err
 	}

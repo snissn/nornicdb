@@ -11,22 +11,11 @@ package cypher
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
 	nerrors "github.com/orneryd/nornicdb/pkg/errors"
 	"github.com/orneryd/nornicdb/pkg/storage"
-)
-
-var (
-	identifierCompatPattern  = `(?:` + "`" + `[^` + "`" + `]+` + "`" + `|[A-Za-z_][A-Za-z0-9_]*)`
-	createIndexLegacyPattern = regexp.MustCompile(
-		`(?is)^\s*CREATE\s+INDEX(?:\s+(` + identifierCompatPattern + `))?(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+:(` + identifierCompatPattern + `)\s*\(([^)]+)\)(?:\s+OPTIONS\s+\{.*\})?\s*$`)
-	createIndexForCompatPattern = regexp.MustCompile(
-		`(?is)^\s*CREATE\s+INDEX(?:\s+(` + identifierCompatPattern + `))?(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + identifierCompatPattern + `)\s*:\s*(` + identifierCompatPattern + `)\s*\)\s+ON\s+(.+?)(?:\s+OPTIONS\s+\{.*\})?\s*$`)
-	fulltextIndexCompatPattern = regexp.MustCompile(
-		`(?is)^\s*CREATE\s+FULLTEXT\s+INDEX\s+(` + identifierCompatPattern + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(?\s*(` + identifierCompatPattern + `)\s*:\s*(` + identifierCompatPattern + `)\s*\)?\s+ON(?:\s+EACH)?\s+(.+?)(?:\s+OPTIONS\s+\{.*\})?\s*$`)
 )
 
 // isCompositeRoot returns true if the storage engine is a composite database root.
@@ -154,20 +143,20 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		return result, err
 	}
 
-	// NODE KEY constraints (Neo4j 5.x)
-	if matches := constraintNamedForRequireNodeKey.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		label := normalizeIdentifierToken(matches[3])
-		properties := e.parseConstraintProperties(matches[4])
-		if len(properties) == 0 {
+	if parsed, err := e.parseCreateConstraintNodeKeyDDL(cypher); err == nil {
+		if len(parsed.properties) == 0 {
 			return nil, fmt.Errorf("NODE KEY constraint requires properties")
+		}
+		constraintName := parsed.name
+		if constraintName == "" {
+			constraintName = fmt.Sprintf("constraint_%s_%s_node_key", strings.ToLower(parsed.label), strings.ToLower(strings.Join(parsed.properties, "_")))
 		}
 
 		constraint := storage.Constraint{
 			Name:       constraintName,
 			Type:       storage.ConstraintNodeKey,
-			Label:      label,
-			Properties: properties,
+			Label:      parsed.label,
+			Properties: parsed.properties,
 		}
 
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
@@ -179,70 +168,44 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
-	if matches := constraintUnnamedForRequireNodeKey.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		properties := e.parseConstraintProperties(matches[3])
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("NODE KEY constraint requires properties")
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_node_key", strings.ToLower(label), strings.ToLower(strings.Join(properties, "_")))
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintNodeKey,
-			Label:      label,
-			Properties: properties,
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintOnAssertNodeKey.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		properties := e.parseConstraintProperties(matches[3])
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("NODE KEY constraint requires properties")
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_node_key", strings.ToLower(label), strings.ToLower(strings.Join(properties, "_")))
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintNodeKey,
-			Label:      label,
-			Properties: properties,
+	if parsed, err := e.parseCreateConstraintTemporalDDL(cypher); err == nil {
+		if parsed.isRelationship {
+			if len(parsed.properties) < 3 {
+				return nil, fmt.Errorf("TEMPORAL constraint requires at least 3 properties (key..., valid_from, valid_to)")
+			}
+			constraintName := parsed.name
+			if constraintName == "" {
+				constraintName = fmt.Sprintf("constraint_%s_%s_temporal", strings.ToLower(parsed.label), strings.ToLower(strings.Join(parsed.properties, "_")))
+			}
+			constraint := storage.Constraint{
+				Name:       constraintName,
+				Type:       storage.ConstraintTemporal,
+				EntityType: storage.ConstraintEntityRelationship,
+				Label:      parsed.label,
+				Properties: parsed.properties,
+			}
+			if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+				return nil, err
+			}
+			if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+				return nil, err
+			}
+			return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 		}
 
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Temporal no-overlap constraints (NornicDB extension)
-	if matches := constraintNamedForRequireTemporal.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		label := normalizeIdentifierToken(matches[3])
-		properties := e.parseConstraintProperties(matches[4])
-		if len(properties) != 3 {
+		if len(parsed.properties) != 3 {
 			return nil, fmt.Errorf("TEMPORAL constraint requires 3 properties (key, valid_from, valid_to)")
 		}
-
+		constraintName := parsed.name
+		if constraintName == "" {
+			constraintName = fmt.Sprintf("constraint_%s_%s_temporal", strings.ToLower(parsed.label), strings.ToLower(strings.Join(parsed.properties, "_")))
+		}
 		constraint := storage.Constraint{
 			Name:       constraintName,
 			Type:       storage.ConstraintTemporal,
-			Label:      label,
-			Properties: properties,
+			Label:      parsed.label,
+			Properties: parsed.properties,
 		}
-
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
@@ -252,51 +215,28 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
-	if matches := constraintUnnamedForRequireTemporal.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		properties := e.parseConstraintProperties(matches[3])
-		if len(properties) != 3 {
-			return nil, fmt.Errorf("TEMPORAL constraint requires 3 properties (key, valid_from, valid_to)")
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_temporal", strings.ToLower(label), strings.ToLower(strings.Join(properties, "_")))
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintTemporal,
-			Label:      label,
-			Properties: properties,
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Node domain/enum constraints (NornicDB extension)
-	if matches := constraintNodeNamedForRequireDomain.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		label := normalizeIdentifierToken(matches[3])
-		property := normalizeIdentifierToken(matches[5])
-		allowedValues, err := parseDomainValueList(matches[6])
+	if parsed, err := e.parseCreateConstraintDomainDDL(cypher); err == nil {
+		allowedValues, err := parseDomainValueList(parsed.allowedRaw)
 		if err != nil {
 			return nil, fmt.Errorf("invalid domain value list: %w", err)
 		}
 		if len(allowedValues) == 0 {
 			return nil, fmt.Errorf("DOMAIN constraint requires at least one allowed value")
 		}
-
+		constraintName := parsed.name
+		if constraintName == "" {
+			constraintName = fmt.Sprintf("constraint_%s_%s_domain", strings.ToLower(parsed.label), strings.ToLower(parsed.property))
+		}
 		constraint := storage.Constraint{
 			Name:          constraintName,
 			Type:          storage.ConstraintDomain,
-			Label:         label,
-			Properties:    []string{property},
+			Label:         parsed.label,
+			Properties:    []string{parsed.property},
 			AllowedValues: allowedValues,
 		}
-
+		if parsed.isRelationship {
+			constraint.EntityType = storage.ConstraintEntityRelationship
+		}
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
@@ -306,286 +246,132 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
-	if matches := constraintNodeUnnamedForRequireDomain.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		allowedValues, err := parseDomainValueList(matches[5])
-		if err != nil {
-			return nil, fmt.Errorf("invalid domain value list: %w", err)
-		}
-		if len(allowedValues) == 0 {
-			return nil, fmt.Errorf("DOMAIN constraint requires at least one allowed value")
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_domain", strings.ToLower(label), strings.ToLower(property))
+	if parsed, err := e.parseCreateConstraintSimplePropertyDDL(cypher); err == nil {
+		if parsed.kind == "unique" {
+			if parsed.isRelationship {
+				constraintName := parsed.name
+				if constraintName == "" {
+					constraintName = fmt.Sprintf("constraint_%s_%s_unique", strings.ToLower(parsed.label), strings.ToLower(parsed.property))
+				}
+				constraint := storage.Constraint{
+					Name:       constraintName,
+					Type:       storage.ConstraintUnique,
+					EntityType: storage.ConstraintEntityRelationship,
+					Label:      parsed.label,
+					Properties: []string{parsed.property},
+				}
+				if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+					return nil, err
+				}
+				if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+					return nil, err
+				}
+				return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+			}
 
-		constraint := storage.Constraint{
-			Name:          constraintName,
-			Type:          storage.ConstraintDomain,
-			Label:         label,
-			Properties:    []string{property},
-			AllowedValues: allowedValues,
+			constraintName := parsed.name
+			if constraintName == "" {
+				constraintName = fmt.Sprintf("constraint_%s_%s", strings.ToLower(parsed.label), strings.ToLower(parsed.property))
+			}
+			constraint := storage.Constraint{
+				Name:       constraintName,
+				Type:       storage.ConstraintUnique,
+				Label:      parsed.label,
+				Properties: []string{parsed.property},
+			}
+			if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+				return nil, err
+			}
+			schema := e.storage.GetSchema()
+			if err := schema.AddUniqueConstraint(constraintName, parsed.label, parsed.property, ifNotExists); err != nil {
+				return nil, err
+			}
+			if err := storage.RefreshUniqueConstraintValuesForEngine(e.storage, schema); err != nil {
+				return nil, err
+			}
+			return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 		}
 
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
+		if parsed.kind == "exists" {
+			constraintName := parsed.name
+			if constraintName == "" {
+				suffix := "exists"
+				if parsed.isRelationship {
+					constraintName = fmt.Sprintf("constraint_%s_%s_%s", strings.ToLower(parsed.label), strings.ToLower(parsed.property), suffix)
+				} else {
+					constraintName = fmt.Sprintf("constraint_%s_%s_%s", strings.ToLower(parsed.label), strings.ToLower(parsed.property), suffix)
+				}
+			}
+			constraint := storage.Constraint{
+				Name:       constraintName,
+				Type:       storage.ConstraintExists,
+				Label:      parsed.label,
+				Properties: []string{parsed.property},
+			}
+			if parsed.isRelationship {
+				constraint.EntityType = storage.ConstraintEntityRelationship
+			}
+			if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+				return nil, err
+			}
+			if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+				return nil, err
+			}
+			return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
-	// EXISTS / NOT NULL constraints
-	if matches := constraintNamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		label := normalizeIdentifierToken(matches[3])
-		property := normalizeIdentifierToken(matches[5])
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintExists,
-			Label:      label,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintUnnamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(label), strings.ToLower(property))
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintExists,
-			Label:      label,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintOnAssertExists.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(label), strings.ToLower(property))
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintExists,
-			Label:      label,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintOnAssertNotNull.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(label), strings.ToLower(property))
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintExists,
-			Label:      label,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Property type constraints
-	if matches := constraintNamedForRequireType.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		label := normalizeIdentifierToken(matches[3])
-		property := normalizeIdentifierToken(matches[5])
-		expectedType, err := parsePropertyType(matches[6])
-		if err != nil {
-			return nil, err
+	if parsed, err := e.parseCreateConstraintTypeDDL(cypher); err == nil {
+		constraintName := parsed.name
+		if constraintName == "" {
+			constraintName = fmt.Sprintf("constraint_%s_%s_type", strings.ToLower(parsed.label), strings.ToLower(parsed.property))
 		}
 		ptc := storage.PropertyTypeConstraint{
 			Name:         constraintName,
-			Label:        label,
-			Property:     property,
-			ExpectedType: expectedType,
+			Label:        parsed.label,
+			Property:     parsed.property,
+			ExpectedType: parsed.expectedType,
+		}
+		opts := storage.PropertyTypeConstraintOptions{IfNotExists: ifNotExists}
+		if parsed.isRelationship {
+			ptc.EntityType = storage.ConstraintEntityRelationship
+			opts.EntityType = storage.ConstraintEntityRelationship
 		}
 		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, label, property, expectedType, storage.PropertyTypeConstraintOptions{IfNotExists: ifNotExists}); err != nil {
+		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, parsed.label, parsed.property, parsed.expectedType, opts); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	} else if startsWithKeywordFold(strings.TrimSpace(cypher), "CREATE CONSTRAINT") &&
+		(strings.Contains(strings.ToUpper(cypher), " IS ::") || strings.Contains(strings.ToUpper(cypher), " IS TYPED")) &&
+		strings.Contains(strings.ToUpper(err.Error()), "UNSUPPORTED PROPERTY TYPE") {
+		return nil, err
 	}
 
-	if matches := constraintUnnamedForRequireType.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		expectedType, err := parsePropertyType(matches[5])
-		if err != nil {
-			return nil, err
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_type", strings.ToLower(label), strings.ToLower(property))
-		ptc := storage.PropertyTypeConstraint{
-			Name:         constraintName,
-			Label:        label,
-			Property:     property,
-			ExpectedType: expectedType,
-		}
-		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, label, property, expectedType, storage.PropertyTypeConstraintOptions{IfNotExists: ifNotExists}); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintOnAssertType.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		expectedType, err := parsePropertyType(matches[5])
-		if err != nil {
-			return nil, err
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_type", strings.ToLower(label), strings.ToLower(property))
-		ptc := storage.PropertyTypeConstraint{
-			Name:         constraintName,
-			Label:        label,
-			Property:     property,
-			ExpectedType: expectedType,
-		}
-		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, label, property, expectedType, storage.PropertyTypeConstraintOptions{IfNotExists: ifNotExists}); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Pattern 1 (Neo4j 5.x): CREATE CONSTRAINT name IF NOT EXISTS FOR (n:Label) REQUIRE n.property IS UNIQUE
-	// Uses pre-compiled pattern from regex_patterns.go
-	if matches := constraintNamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		label := normalizeIdentifierToken(matches[3])
-		property := normalizeIdentifierToken(matches[5])
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintUnique,
-			Label:      label,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		schema := e.storage.GetSchema()
-		if err := schema.AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
-			return nil, err
-		}
-		if err := storage.RefreshUniqueConstraintValuesForEngine(e.storage, schema); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Pattern 2 (Neo4j 5.x without name): CREATE CONSTRAINT IF NOT EXISTS FOR (n:Label) REQUIRE n.property IS UNIQUE
-	// Uses pre-compiled pattern from regex_patterns.go
-	if matches := constraintUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		constraintName := fmt.Sprintf("constraint_%s_%s", strings.ToLower(label), strings.ToLower(property))
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintUnique,
-			Label:      label,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		schema := e.storage.GetSchema()
-		if err := schema.AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
-			return nil, err
-		}
-		if err := storage.RefreshUniqueConstraintValuesForEngine(e.storage, schema); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Pattern 3 (Neo4j 4.x): CREATE CONSTRAINT IF NOT EXISTS ON (n:Label) ASSERT n.property IS UNIQUE
-	// Uses pre-compiled pattern from regex_patterns.go
-	if matches := constraintOnAssert.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		constraintName := fmt.Sprintf("constraint_%s_%s", strings.ToLower(label), strings.ToLower(property))
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintUnique,
-			Label:      label,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		schema := e.storage.GetSchema()
-		if err := schema.AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
-			return nil, err
-		}
-		if err := storage.RefreshUniqueConstraintValuesForEngine(e.storage, schema); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
+	// Single-property UNIQUE/EXISTS branches are handled by parseCreateConstraintSimplePropertyDDL.
 
 	// =========================================================================
 	// Relationship constraint patterns
 	// =========================================================================
 
-	// Cardinality constraints — outgoing (NornicDB extension)
-	if matches := constraintCardinalityOutNamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		maxCount, err := strconv.Atoi(matches[4])
-		if err != nil || maxCount < 1 {
-			return nil, fmt.Errorf("MAX COUNT must be a positive integer, got %q", matches[4])
+	if parsed, err := e.parseCreateConstraintCardinalityDDL(cypher); err == nil {
+		constraintName := parsed.name
+		if constraintName == "" {
+			directionSuffix := "outgoing"
+			if parsed.direction == "INCOMING" {
+				directionSuffix = "incoming"
+			}
+			constraintName = fmt.Sprintf("constraint_%s_max_%s_%d", strings.ToLower(parsed.relType), directionSuffix, parsed.maxCount)
 		}
 		constraint := storage.Constraint{
 			Name:       constraintName,
 			Type:       storage.ConstraintCardinality,
 			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			MaxCount:   maxCount,
-			Direction:  "OUTGOING",
+			Label:      parsed.relType,
+			MaxCount:   parsed.maxCount,
+			Direction:  parsed.direction,
 		}
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
@@ -594,93 +380,25 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-	if matches := constraintCardinalityOutUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		maxCount, err := strconv.Atoi(matches[3])
-		if err != nil || maxCount < 1 {
-			return nil, fmt.Errorf("MAX COUNT must be a positive integer, got %q", matches[3])
-		}
-		constraintName := fmt.Sprintf("constraint_%s_max_outgoing_%d", strings.ToLower(relType), maxCount)
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintCardinality,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			MaxCount:   maxCount,
-			Direction:  "OUTGOING",
-		}
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	} else if startsWithKeywordFold(strings.TrimSpace(cypher), "CREATE CONSTRAINT") &&
+		strings.Contains(strings.ToUpper(cypher), "REQUIRE MAX COUNT") &&
+		strings.Contains(err.Error(), "MAX COUNT must be a positive integer") {
+		return nil, err
 	}
 
-	// Cardinality constraints — incoming (NornicDB extension)
-	if matches := constraintCardinalityInNamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		maxCount, err := strconv.Atoi(matches[4])
-		if err != nil || maxCount < 1 {
-			return nil, fmt.Errorf("MAX COUNT must be a positive integer, got %q", matches[4])
+	if parsed, err := e.parseCreateConstraintPolicyDDL(cypher); err == nil {
+		constraintName := parsed.name
+		if constraintName == "" {
+			constraintName = fmt.Sprintf("constraint_%s_%s_%s_%s", strings.ToLower(parsed.sourceLabel), strings.ToLower(parsed.relType), strings.ToLower(parsed.targetLabel), strings.ToLower(parsed.policyMode))
 		}
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintCardinality,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			MaxCount:   maxCount,
-			Direction:  "INCOMING",
-		}
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-	if matches := constraintCardinalityInUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		maxCount, err := strconv.Atoi(matches[3])
-		if err != nil || maxCount < 1 {
-			return nil, fmt.Errorf("MAX COUNT must be a positive integer, got %q", matches[3])
-		}
-		constraintName := fmt.Sprintf("constraint_%s_max_incoming_%d", strings.ToLower(relType), maxCount)
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintCardinality,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			MaxCount:   maxCount,
-			Direction:  "INCOMING",
-		}
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Relationship endpoint policy constraints (NornicDB extension)
-	if matches := constraintPolicyAllowedNamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		sourceLabel := normalizeIdentifierToken(matches[2])
-		relType := normalizeIdentifierToken(matches[4])
-		targetLabel := normalizeIdentifierToken(matches[5])
 		constraint := storage.Constraint{
 			Name:        constraintName,
 			Type:        storage.ConstraintPolicy,
 			EntityType:  storage.ConstraintEntityRelationship,
-			Label:       relType,
-			SourceLabel: sourceLabel,
-			TargetLabel: targetLabel,
-			PolicyMode:  "ALLOWED",
+			Label:       parsed.relType,
+			SourceLabel: parsed.sourceLabel,
+			TargetLabel: parsed.targetLabel,
+			PolicyMode:  parsed.policyMode,
 		}
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
@@ -689,297 +407,38 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-	if matches := constraintPolicyAllowedUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		sourceLabel := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		targetLabel := normalizeIdentifierToken(matches[4])
-		constraintName := fmt.Sprintf("constraint_%s_%s_%s_allowed", strings.ToLower(sourceLabel), strings.ToLower(relType), strings.ToLower(targetLabel))
-		constraint := storage.Constraint{
-			Name:        constraintName,
-			Type:        storage.ConstraintPolicy,
-			EntityType:  storage.ConstraintEntityRelationship,
-			Label:       relType,
-			SourceLabel: sourceLabel,
-			TargetLabel: targetLabel,
-			PolicyMode:  "ALLOWED",
-		}
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-	if matches := constraintPolicyDisallowedNamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		sourceLabel := normalizeIdentifierToken(matches[2])
-		relType := normalizeIdentifierToken(matches[4])
-		targetLabel := normalizeIdentifierToken(matches[5])
-		constraint := storage.Constraint{
-			Name:        constraintName,
-			Type:        storage.ConstraintPolicy,
-			EntityType:  storage.ConstraintEntityRelationship,
-			Label:       relType,
-			SourceLabel: sourceLabel,
-			TargetLabel: targetLabel,
-			PolicyMode:  "DISALLOWED",
-		}
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-	if matches := constraintPolicyDisallowedUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		sourceLabel := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		targetLabel := normalizeIdentifierToken(matches[4])
-		constraintName := fmt.Sprintf("constraint_%s_%s_%s_disallowed", strings.ToLower(sourceLabel), strings.ToLower(relType), strings.ToLower(targetLabel))
-		constraint := storage.Constraint{
-			Name:        constraintName,
-			Type:        storage.ConstraintPolicy,
-			EntityType:  storage.ConstraintEntityRelationship,
-			Label:       relType,
-			SourceLabel: sourceLabel,
-			TargetLabel: targetLabel,
-			PolicyMode:  "DISALLOWED",
-		}
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	} else if startsWithKeywordFold(strings.TrimSpace(cypher), "CREATE CONSTRAINT") &&
+		(strings.Contains(strings.ToUpper(cypher), "REQUIRE ALLOWED") || strings.Contains(strings.ToUpper(cypher), "REQUIRE DISALLOWED")) {
+		return nil, err
 	}
 
-	// Relationship domain/enum constraints (NornicDB extension)
-	if matches := constraintRelNamedForRequireDomain.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		property := normalizeIdentifierToken(matches[5])
-		allowedValues, err := parseDomainValueList(matches[6])
-		if err != nil {
-			return nil, fmt.Errorf("invalid domain value list: %w", err)
-		}
-		if len(allowedValues) == 0 {
-			return nil, fmt.Errorf("DOMAIN constraint requires at least one allowed value")
-		}
+	// Relationship temporal/domain branches are handled by parseCreateConstraintTemporalDDL and parseCreateConstraintDomainDDL.
 
-		constraint := storage.Constraint{
-			Name:          constraintName,
-			Type:          storage.ConstraintDomain,
-			EntityType:    storage.ConstraintEntityRelationship,
-			Label:         relType,
-			Properties:    []string{property},
-			AllowedValues: allowedValues,
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintRelUnnamedForRequireDomain.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		allowedValues, err := parseDomainValueList(matches[5])
-		if err != nil {
-			return nil, fmt.Errorf("invalid domain value list: %w", err)
-		}
-		if len(allowedValues) == 0 {
-			return nil, fmt.Errorf("DOMAIN constraint requires at least one allowed value")
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_domain", strings.ToLower(relType), strings.ToLower(property))
-
-		constraint := storage.Constraint{
-			Name:          constraintName,
-			Type:          storage.ConstraintDomain,
-			EntityType:    storage.ConstraintEntityRelationship,
-			Label:         relType,
-			Properties:    []string{property},
-			AllowedValues: allowedValues,
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Relationship temporal no-overlap constraints (NornicDB extension)
-	if matches := constraintRelNamedForRequireTemporal.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		properties := e.parseConstraintProperties(matches[4])
-		if len(properties) < 3 {
-			return nil, fmt.Errorf("TEMPORAL constraint requires at least 3 properties (key..., valid_from, valid_to)")
-		}
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintTemporal,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: properties,
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintRelUnnamedForRequireTemporal.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		properties := e.parseConstraintProperties(matches[3])
-		if len(properties) < 3 {
-			return nil, fmt.Errorf("TEMPORAL constraint requires at least 3 properties (key..., valid_from, valid_to)")
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_temporal", strings.ToLower(relType), strings.ToLower(strings.Join(properties, "_")))
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintTemporal,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: properties,
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Relationship KEY constraints (composite properties) — must be checked before composite UNIQUE
-	if matches := constraintRelNamedForRequireRelKey.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		properties := e.parseConstraintProperties(matches[4])
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("RELATIONSHIP KEY constraint requires properties")
-		}
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintRelationshipKey,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: properties,
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintRelUnnamedForRequireRelKey.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		properties := e.parseConstraintProperties(matches[3])
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("RELATIONSHIP KEY constraint requires properties")
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_rel_key", strings.ToLower(relType), strings.ToLower(strings.Join(properties, "_")))
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintRelationshipKey,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: properties,
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Relationship single-property KEY
-	if matches := constraintRelNamedForRequireSingleRelKey.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		property := normalizeIdentifierToken(matches[5])
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintRelationshipKey,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintRelUnnamedForRequireSingleRelKey.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		constraintName := fmt.Sprintf("constraint_%s_%s_rel_key", strings.ToLower(relType), strings.ToLower(property))
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintRelationshipKey,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Relationship composite UNIQUE constraints — must be checked before single-property UNIQUE
-	if matches := constraintRelNamedForRequireCompositeUnique.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		properties := e.parseConstraintProperties(matches[4])
-		if len(properties) == 0 {
+	if parsed, err := e.parseCreateConstraintRelationshipKeyOrCompositeUniqueDDL(cypher); err == nil {
+		if len(parsed.properties) == 0 {
+			if parsed.kind == "rel_key" {
+				return nil, fmt.Errorf("RELATIONSHIP KEY constraint requires properties")
+			}
 			return nil, fmt.Errorf("UNIQUE constraint requires properties")
 		}
 
 		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintUnique,
 			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: properties,
+			Label:      parsed.label,
+			Properties: parsed.properties,
+		}
+		if parsed.kind == "rel_key" {
+			constraint.Type = storage.ConstraintRelationshipKey
+			constraint.Name = parsed.name
+			if constraint.Name == "" {
+				constraint.Name = fmt.Sprintf("constraint_%s_%s_rel_key", strings.ToLower(parsed.label), strings.ToLower(strings.Join(parsed.properties, "_")))
+			}
+		} else {
+			constraint.Type = storage.ConstraintUnique
+			constraint.Name = parsed.name
+			if constraint.Name == "" {
+				constraint.Name = fmt.Sprintf("constraint_%s_%s_unique", strings.ToLower(parsed.label), strings.ToLower(strings.Join(parsed.properties, "_")))
+			}
 		}
 
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
@@ -991,169 +450,9 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
-	if matches := constraintRelUnnamedForRequireCompositeUnique.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		properties := e.parseConstraintProperties(matches[3])
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("UNIQUE constraint requires properties")
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_unique", strings.ToLower(relType), strings.ToLower(strings.Join(properties, "_")))
+	// Relationship single-property UNIQUE/EXISTS branches are handled by parseCreateConstraintSimplePropertyDDL.
 
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintUnique,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: properties,
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Relationship single-property UNIQUE
-	if matches := constraintRelNamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		property := normalizeIdentifierToken(matches[5])
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintUnique,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintRelUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		constraintName := fmt.Sprintf("constraint_%s_%s_unique", strings.ToLower(relType), strings.ToLower(property))
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintUnique,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Relationship EXISTS / NOT NULL
-	if matches := constraintRelNamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		property := normalizeIdentifierToken(matches[5])
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintExists,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintRelUnnamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(relType), strings.ToLower(property))
-
-		constraint := storage.Constraint{
-			Name:       constraintName,
-			Type:       storage.ConstraintExists,
-			EntityType: storage.ConstraintEntityRelationship,
-			Label:      relType,
-			Properties: []string{property},
-		}
-
-		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Relationship property type constraints
-	if matches := constraintRelNamedForRequireType.FindStringSubmatch(cypher); matches != nil {
-		constraintName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		property := normalizeIdentifierToken(matches[5])
-		expectedType, err := parsePropertyType(matches[6])
-		if err != nil {
-			return nil, err
-		}
-		ptc := storage.PropertyTypeConstraint{
-			Name:         constraintName,
-			EntityType:   storage.ConstraintEntityRelationship,
-			Label:        relType,
-			Property:     property,
-			ExpectedType: expectedType,
-		}
-		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, relType, property, expectedType, storage.PropertyTypeConstraintOptions{EntityType: storage.ConstraintEntityRelationship, IfNotExists: ifNotExists}); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := constraintRelUnnamedForRequireType.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		property := normalizeIdentifierToken(matches[4])
-		expectedType, err := parsePropertyType(matches[5])
-		if err != nil {
-			return nil, err
-		}
-		constraintName := fmt.Sprintf("constraint_%s_%s_type", strings.ToLower(relType), strings.ToLower(property))
-		ptc := storage.PropertyTypeConstraint{
-			Name:         constraintName,
-			EntityType:   storage.ConstraintEntityRelationship,
-			Label:        relType,
-			Property:     property,
-			ExpectedType: expectedType,
-		}
-		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
-			return nil, err
-		}
-		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, relType, property, expectedType, storage.PropertyTypeConstraintOptions{EntityType: storage.ConstraintEntityRelationship, IfNotExists: ifNotExists}); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
+	// Relationship property type branches are handled by parseCreateConstraintTypeDDL.
 
 	return nil, fmt.Errorf("invalid CREATE CONSTRAINT syntax")
 }
@@ -1297,82 +596,31 @@ func (e *StorageExecutor) executeDropConstraint(ctx context.Context, cypher stri
 //
 // Supports both single-property and composite (multi-property) indexes.
 func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	// Pattern: CREATE INDEX name IF NOT EXISTS FOR (n:Label) ON (n.property[, n.property2, ...])
-	// Uses pre-compiled patterns from regex_patterns.go
-	if matches := indexRelNamedFor.FindStringSubmatch(cypher); matches != nil {
-		indexName := normalizeIdentifierToken(matches[1])
-		relType := normalizeIdentifierToken(matches[3])
-		propertiesStr := matches[4]
-		properties := e.parseQualifiedIndexProperties(propertiesStr)
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("no properties specified for index")
+	if parsed, err := e.parseCreateIndexDDL(cypher, "CREATE INDEX"); err == nil {
+		indexName := parsed.indexName
+		if indexName == "" {
+			propsJoined := strings.Join(parsed.properties, "_")
+			entity := parsed.label
+			if parsed.isRelationship {
+				entity = parsed.relationshipType
+			}
+			indexName = fmt.Sprintf("index_%s_%s", strings.ToLower(entity), strings.ToLower(propsJoined))
 		}
-		// Relationship property indexes are accepted for Neo4j compatibility.
-		// They are registered in schema metadata and currently do not require
-		// node backfill.
-		if err := e.storage.GetSchema().AddPropertyIndex(indexName, relType, properties); err != nil {
+
+		if parsed.isRelationship {
+			// Relationship property indexes are accepted for Neo4j compatibility.
+			// They are registered in schema metadata and currently do not require
+			// node backfill.
+			if err := e.storage.GetSchema().AddPropertyIndex(indexName, parsed.relationshipType, parsed.properties); err != nil {
+				return nil, err
+			}
+			return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+		}
+
+		if err := e.storage.GetSchema().AddPropertyIndex(indexName, parsed.label, parsed.properties); err != nil {
 			return nil, err
 		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := indexRelUnnamedFor.FindStringSubmatch(cypher); matches != nil {
-		relType := normalizeIdentifierToken(matches[2])
-		propertiesStr := matches[3]
-		properties := e.parseQualifiedIndexProperties(propertiesStr)
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("no properties specified for index")
-		}
-		propsJoined := strings.Join(properties, "_")
-		indexName := fmt.Sprintf("index_%s_%s", strings.ToLower(relType), strings.ToLower(propsJoined))
-		if err := e.storage.GetSchema().AddPropertyIndex(indexName, relType, properties); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	if matches := indexNamedFor.FindStringSubmatch(cypher); matches != nil {
-		indexName := normalizeIdentifierToken(matches[1])
-		label := normalizeIdentifierToken(matches[3])
-		propertiesStr := matches[4] // e.g., "n.prop1, n.prop2"
-
-		// Parse properties (single or multiple)
-		properties := e.parseQualifiedIndexProperties(propertiesStr)
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("no properties specified for index")
-		}
-
-		// Add index to schema (supports composite indexes)
-		if err := e.storage.GetSchema().AddPropertyIndex(indexName, label, properties); err != nil {
-			return nil, err
-		}
-		if err := e.backfillPropertyIndex(label, properties); err != nil {
-			return nil, err
-		}
-
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Try without index name
-	if matches := indexUnnamedFor.FindStringSubmatch(cypher); matches != nil {
-		label := normalizeIdentifierToken(matches[2])
-		propertiesStr := matches[3] // e.g., "n.prop1, n.prop2"
-
-		// Parse properties
-		properties := e.parseQualifiedIndexProperties(propertiesStr)
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("no properties specified for index")
-		}
-
-		// Generate index name based on label and properties
-		propsJoined := strings.Join(properties, "_")
-		indexName := fmt.Sprintf("index_%s_%s", strings.ToLower(label), strings.ToLower(propsJoined))
-
-		// Add index
-		if err := e.storage.GetSchema().AddPropertyIndex(indexName, label, properties); err != nil {
-			return nil, err
-		}
-		if err := e.backfillPropertyIndex(label, properties); err != nil {
+		if err := e.backfillPropertyIndex(parsed.label, parsed.properties); err != nil {
 			return nil, err
 		}
 
@@ -1380,46 +628,16 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 	}
 
 	// Neo4j legacy syntax: CREATE INDEX [name] ON :Label(prop[, prop2])
-	if matches := createIndexLegacyPattern.FindStringSubmatch(strings.TrimSpace(cypher)); matches != nil {
-		indexName := normalizeIdentifierToken(matches[1])
-		label := normalizeIdentifierToken(matches[2])
-		properties := e.parseIndexProperties(matches[3])
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("no properties specified for index")
-		}
+	if parsed, err := e.parseCreateIndexLegacyDDL(cypher); err == nil {
+		indexName := parsed.indexName
 		if indexName == "" {
-			propsJoined := strings.Join(properties, "_")
-			indexName = fmt.Sprintf("index_%s_%s", strings.ToLower(label), strings.ToLower(propsJoined))
+			propsJoined := strings.Join(parsed.properties, "_")
+			indexName = fmt.Sprintf("index_%s_%s", strings.ToLower(parsed.label), strings.ToLower(propsJoined))
 		}
-		if err := e.storage.GetSchema().AddPropertyIndex(indexName, label, properties); err != nil {
+		if err := e.storage.GetSchema().AddPropertyIndex(indexName, parsed.label, parsed.properties); err != nil {
 			return nil, err
 		}
-		if err := e.backfillPropertyIndex(label, properties); err != nil {
-			return nil, err
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	// Neo4j 5 compat variant: CREATE INDEX [name] FOR (n:Label) ON n.prop
-	if matches := createIndexForCompatPattern.FindStringSubmatch(strings.TrimSpace(cypher)); matches != nil {
-		indexName := normalizeIdentifierToken(matches[1])
-		label := normalizeIdentifierToken(matches[3])
-		onPart := strings.TrimSpace(matches[4])
-		if strings.HasPrefix(onPart, "(") && strings.HasSuffix(onPart, ")") {
-			onPart = strings.TrimSpace(onPart[1 : len(onPart)-1])
-		}
-		properties := e.parseQualifiedIndexProperties(onPart)
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("no properties specified for index")
-		}
-		if indexName == "" {
-			propsJoined := strings.Join(properties, "_")
-			indexName = fmt.Sprintf("index_%s_%s", strings.ToLower(label), strings.ToLower(propsJoined))
-		}
-		if err := e.storage.GetSchema().AddPropertyIndex(indexName, label, properties); err != nil {
-			return nil, err
-		}
-		if err := e.backfillPropertyIndex(label, properties); err != nil {
+		if err := e.backfillPropertyIndex(parsed.label, parsed.properties); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -1436,50 +654,1497 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 //
 // Range indexes optimize queries with range predicates (>, <, >=, <=, BETWEEN).
 func (e *StorageExecutor) executeCreateRangeIndex(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	// Reuse generic CREATE INDEX regexes by normalizing RANGE syntax.
-	normalized := strings.Replace(strings.ToUpper(cypher), "CREATE RANGE INDEX", "CREATE INDEX", 1)
-
-	// Pattern: CREATE RANGE INDEX name IF NOT EXISTS FOR (n:Label) ON (n.property)
-	// Reuse the standard index pattern - same structure
-	if matches := indexNamedFor.FindStringSubmatch(normalized); matches != nil {
-		indexName := matches[1]
-		label := matches[3]
-		propertiesStr := matches[4]
-
-		// Range index only supports single property
-		properties := e.parseQualifiedIndexProperties(propertiesStr)
-		if len(properties) != 1 {
-			return nil, fmt.Errorf("RANGE INDEX only supports single property, got %d", len(properties))
-		}
-
-		err := e.storage.GetSchema().AddRangeIndex(indexName, label, properties[0])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create range index: %w", err)
-		}
-
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	parsed, err := e.parseCreateIndexDDL(cypher, "CREATE RANGE INDEX")
+	if err != nil {
+		return nil, fmt.Errorf("invalid CREATE RANGE INDEX syntax")
+	}
+	if parsed.isRelationship {
+		return nil, fmt.Errorf("invalid CREATE RANGE INDEX syntax")
 	}
 
-	// Unnamed range index
-	if matches := indexUnnamedFor.FindStringSubmatch(normalized); matches != nil {
-		label := matches[2]
-		propertiesStr := matches[3]
-
-		properties := e.parseQualifiedIndexProperties(propertiesStr)
-		if len(properties) != 1 {
-			return nil, fmt.Errorf("RANGE INDEX only supports single property, got %d", len(properties))
-		}
-
-		indexName := fmt.Sprintf("range_idx_%s_%s", strings.ToLower(label), properties[0])
-		err := e.storage.GetSchema().AddRangeIndex(indexName, label, properties[0])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create range index: %w", err)
-		}
-
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	if len(parsed.properties) != 1 {
+		return nil, fmt.Errorf("RANGE INDEX only supports single property, got %d", len(parsed.properties))
 	}
 
-	return nil, fmt.Errorf("invalid CREATE RANGE INDEX syntax")
+	indexName := parsed.indexName
+	if indexName == "" {
+		indexName = fmt.Sprintf("range_idx_%s_%s", strings.ToLower(parsed.label), parsed.properties[0])
+	}
+
+	if err := e.storage.GetSchema().AddRangeIndex(indexName, parsed.label, parsed.properties[0]); err != nil {
+		return nil, fmt.Errorf("failed to create range index: %w", err)
+	}
+
+	return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+}
+
+type parsedCreateIndexDDL struct {
+	indexName        string
+	label            string
+	relationshipType string
+	properties       []string
+	isRelationship   bool
+	optionsClause    string
+}
+
+func keywordSpanAt(s string, pos int, keyword string) (int, bool) {
+	ks, ke := trimKeywordWSBounds(keyword)
+	return keywordMatchAt(s, pos, keyword, ks, ke)
+}
+
+func parseOptionalDDLName(segment string) (string, error) {
+	segment = strings.TrimSpace(segment)
+	if segment == "" {
+		return "", nil
+	}
+
+	ifPos := keywordIndexFrom(segment, "IF NOT EXISTS", 0, defaultKeywordScanOpts())
+	if ifPos < 0 {
+		if !isValidDDLIdentifierSegment(segment) {
+			return "", fmt.Errorf("invalid identifier segment")
+		}
+		name := normalizeIdentifierToken(segment)
+		if name == "" {
+			return "", fmt.Errorf("invalid identifier segment")
+		}
+		return name, nil
+	}
+
+	ifEnd, ok := keywordSpanAt(segment, ifPos, "IF NOT EXISTS")
+	if !ok || strings.TrimSpace(segment[ifEnd:]) != "" {
+		return "", fmt.Errorf("invalid IF NOT EXISTS clause")
+	}
+
+	namePart := strings.TrimSpace(segment[:ifPos])
+	if namePart == "" {
+		return "", nil
+	}
+	if !isValidDDLIdentifierSegment(namePart) {
+		return "", fmt.Errorf("invalid identifier segment")
+	}
+	name := normalizeIdentifierToken(namePart)
+	if name == "" {
+		return "", fmt.Errorf("invalid identifier segment")
+	}
+	return name, nil
+}
+
+func isValidDDLIdentifierSegment(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if strings.HasPrefix(s, "`") {
+		if !strings.HasSuffix(s, "`") {
+			return false
+		}
+		return normalizeIdentifierToken(s) != ""
+	}
+	return len(strings.Fields(s)) == 1
+}
+
+func extractIndexPropertiesSegment(onClause string) (string, string, error) {
+	onClause = strings.TrimSpace(onClause)
+	if onClause == "" {
+		return "", "", fmt.Errorf("empty ON clause")
+	}
+
+	if strings.HasPrefix(onClause, "(") {
+		inside, rest, ok := extractParenSection(onClause)
+		if !ok {
+			return "", "", fmt.Errorf("invalid ON clause")
+		}
+		return strings.TrimSpace(inside), strings.TrimSpace(rest), nil
+	}
+
+	optionsPos := keywordIndexFrom(onClause, "OPTIONS", 0, defaultKeywordScanOpts())
+	if optionsPos < 0 {
+		return strings.TrimSpace(onClause), "", nil
+	}
+	return strings.TrimSpace(onClause[:optionsPos]), strings.TrimSpace(onClause[optionsPos:]), nil
+}
+
+func parseCreateIndexForPattern(forClause string) (label string, relationshipType string, isRelationship bool, err error) {
+	forClause = strings.TrimSpace(forClause)
+	if forClause == "" {
+		return "", "", false, fmt.Errorf("empty FOR clause")
+	}
+
+	if strings.Contains(forClause, "[") {
+		bracketStart := strings.Index(forClause, "[")
+		if bracketStart < 0 {
+			return "", "", false, fmt.Errorf("invalid relationship FOR clause")
+		}
+		inside, rest, ok := extractBracketSection(forClause[bracketStart:])
+		if !ok {
+			return "", "", false, fmt.Errorf("invalid relationship FOR clause")
+		}
+
+		prefix := strings.TrimSpace(forClause[:bracketStart])
+		suffix := strings.TrimSpace(rest)
+		if !strings.Contains(prefix, "(") || !strings.Contains(suffix, "(") {
+			return "", "", false, fmt.Errorf("invalid relationship FOR clause")
+		}
+
+		colon := strings.Index(inside, ":")
+		if colon < 0 {
+			return "", "", false, fmt.Errorf("invalid relationship FOR clause")
+		}
+		relRaw := strings.TrimSpace(inside[colon+1:])
+		if relRaw == "" {
+			return "", "", false, fmt.Errorf("invalid relationship FOR clause")
+		}
+		relType := normalizeIdentifierToken(relRaw)
+		if relType == "" {
+			return "", "", false, fmt.Errorf("invalid relationship FOR clause")
+		}
+		return "", relType, true, nil
+	}
+
+	inside, rest, ok := extractParenSection(forClause)
+	if !ok || strings.TrimSpace(rest) != "" {
+		return "", "", false, fmt.Errorf("invalid node FOR clause")
+	}
+
+	colon := strings.Index(inside, ":")
+	if colon < 0 {
+		return "", "", false, fmt.Errorf("invalid node FOR clause")
+	}
+	labelRaw := strings.TrimSpace(inside[colon+1:])
+	label = normalizeIdentifierToken(labelRaw)
+	if label == "" {
+		return "", "", false, fmt.Errorf("invalid node FOR clause")
+	}
+	return label, "", false, nil
+}
+
+func (e *StorageExecutor) parseCreateIndexDDL(cypher string, prefixKeyword string) (parsedCreateIndexDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedCreateIndexDDL{}, fmt.Errorf("empty statement")
+	}
+
+	prefixPos := keywordIndexFrom(q, prefixKeyword, 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, prefixKeyword)
+	if !ok {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid prefix")
+	}
+
+	forPos := keywordIndexFrom(q, "FOR", prefixEnd, defaultKeywordScanOpts())
+	if forPos < 0 {
+		return parsedCreateIndexDDL{}, fmt.Errorf("missing FOR")
+	}
+	forEnd, ok := keywordSpanAt(q, forPos, "FOR")
+	if !ok {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid FOR")
+	}
+
+	onPos := keywordIndexFrom(q, "ON", forEnd, defaultKeywordScanOpts())
+	if onPos < 0 {
+		return parsedCreateIndexDDL{}, fmt.Errorf("missing ON")
+	}
+	onEnd, ok := keywordSpanAt(q, onPos, "ON")
+	if !ok {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid ON")
+	}
+
+	name, err := parseOptionalDDLName(q[prefixEnd:forPos])
+	if err != nil {
+		return parsedCreateIndexDDL{}, err
+	}
+
+	label, relType, isRelationship, err := parseCreateIndexForPattern(q[forEnd:onPos])
+	if err != nil {
+		return parsedCreateIndexDDL{}, err
+	}
+
+	propsSegment, tail, err := extractIndexPropertiesSegment(q[onEnd:])
+	if err != nil {
+		return parsedCreateIndexDDL{}, err
+	}
+	if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid trailing syntax")
+	}
+
+	properties := e.parseQualifiedIndexProperties(propsSegment)
+	if len(properties) == 0 {
+		return parsedCreateIndexDDL{}, fmt.Errorf("no properties specified for index")
+	}
+
+	return parsedCreateIndexDDL{
+		indexName:        name,
+		label:            label,
+		relationshipType: relType,
+		properties:       properties,
+		isRelationship:   isRelationship,
+		optionsClause:    tail,
+	}, nil
+}
+
+func (e *StorageExecutor) parseCreateIndexLegacyDDL(cypher string) (parsedCreateIndexDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedCreateIndexDDL{}, fmt.Errorf("empty statement")
+	}
+
+	prefixPos := keywordIndexFrom(q, "CREATE INDEX", 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, "CREATE INDEX")
+	if !ok {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid prefix")
+	}
+
+	onPos := keywordIndexFrom(q, "ON", prefixEnd, defaultKeywordScanOpts())
+	if onPos < 0 {
+		return parsedCreateIndexDDL{}, fmt.Errorf("missing ON")
+	}
+	onEnd, ok := keywordSpanAt(q, onPos, "ON")
+	if !ok {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid ON")
+	}
+
+	name, err := parseOptionalDDLName(q[prefixEnd:onPos])
+	if err != nil {
+		return parsedCreateIndexDDL{}, err
+	}
+
+	onClause := strings.TrimSpace(q[onEnd:])
+	if !strings.HasPrefix(onClause, ":") {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid legacy ON clause")
+	}
+	onClause = strings.TrimSpace(onClause[1:])
+
+	openParen := strings.Index(onClause, "(")
+	if openParen < 0 {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid legacy ON clause")
+	}
+	label := normalizeIdentifierToken(strings.TrimSpace(onClause[:openParen]))
+	if label == "" {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid legacy ON clause")
+	}
+
+	inside, tail, ok := extractParenSection(onClause[openParen:])
+	if !ok {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid legacy ON clause")
+	}
+	tail = strings.TrimSpace(tail)
+	if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+		return parsedCreateIndexDDL{}, fmt.Errorf("invalid trailing syntax")
+	}
+
+	properties := e.parseIndexProperties(inside)
+	if len(properties) == 0 {
+		return parsedCreateIndexDDL{}, fmt.Errorf("no properties specified for index")
+	}
+
+	return parsedCreateIndexDDL{
+		indexName:      name,
+		label:          label,
+		properties:     properties,
+		isRelationship: false,
+		optionsClause:  tail,
+	}, nil
+}
+
+func isVectorKeyBoundaryChar(b byte) bool {
+	if b >= 'a' && b <= 'z' {
+		return false
+	}
+	if b >= 'A' && b <= 'Z' {
+		return false
+	}
+	if b >= '0' && b <= '9' {
+		return false
+	}
+	return b != '_' && b != '.'
+}
+
+func extractVectorOptionValue(optionsClause, key string) (string, bool) {
+	if optionsClause == "" || key == "" {
+		return "", false
+	}
+
+	sanitized := strings.ReplaceAll(optionsClause, "`", "")
+	sanitized = strings.ReplaceAll(sanitized, "\"", "")
+	sanitized = strings.ReplaceAll(sanitized, "'", "")
+	lower := strings.ToLower(sanitized)
+	keyLower := strings.ToLower(key)
+
+	start := 0
+	for start < len(lower) {
+		rel := strings.Index(lower[start:], keyLower)
+		if rel < 0 {
+			return "", false
+		}
+		idx := start + rel
+		leftOK := idx == 0 || isVectorKeyBoundaryChar(sanitized[idx-1])
+		rightIdx := idx + len(keyLower)
+		rightOK := rightIdx >= len(sanitized) || isVectorKeyBoundaryChar(sanitized[rightIdx])
+		if !leftOK || !rightOK {
+			start = idx + len(keyLower)
+			continue
+		}
+
+		i := rightIdx
+		for i < len(sanitized) && (sanitized[i] == ' ' || sanitized[i] == '\t' || sanitized[i] == ':') {
+			i++
+		}
+		if i >= len(sanitized) {
+			return "", false
+		}
+
+		if sanitized[i] == '\'' || sanitized[i] == '"' {
+			quote := sanitized[i]
+			i++
+			j := i
+			for j < len(sanitized) && sanitized[j] != quote {
+				j++
+			}
+			if j >= len(sanitized) {
+				return "", false
+			}
+			return strings.TrimSpace(sanitized[i:j]), true
+		}
+
+		j := i
+		for j < len(sanitized) {
+			c := sanitized[j]
+			if c == ',' || c == '}' || c == ')' || c == '\n' || c == '\r' {
+				break
+			}
+			j++
+		}
+		return strings.TrimSpace(sanitized[i:j]), true
+	}
+
+	return "", false
+}
+
+func parseVectorOptions(optionsClause string, defaultDimensions int, defaultSimilarity string) (int, string) {
+	dimensions := defaultDimensions
+	similarity := defaultSimilarity
+
+	if raw, ok := extractVectorOptionValue(optionsClause, "vector.dimensions"); ok {
+		if dim, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+			dimensions = dim
+		}
+	}
+
+	if raw, ok := extractVectorOptionValue(optionsClause, "vector.similarity_function"); ok {
+		raw = strings.TrimSpace(raw)
+		if raw != "" {
+			similarity = raw
+		}
+	}
+
+	return dimensions, similarity
+}
+
+type parsedCreateFulltextIndexDDL struct {
+	indexName         string
+	label             string
+	relationshipTypes []string
+	properties        []string
+	isRelationship    bool
+}
+
+func parseCreateFulltextForPattern(forClause string) (label string, relationshipTypes []string, isRelationship bool, err error) {
+	label, relTypeRaw, isRelationship, err := parseCreateIndexForPattern(forClause)
+	if err != nil {
+		// Neo4j compatibility: allow non-parenthesized node pattern `n:Label`.
+		if !strings.Contains(forClause, "[") {
+			parts := strings.SplitN(strings.TrimSpace(forClause), ":", 2)
+			if len(parts) == 2 {
+				compatLabel := normalizeIdentifierToken(strings.TrimSpace(parts[1]))
+				if compatLabel != "" {
+					return compatLabel, nil, false, nil
+				}
+			}
+		}
+		return "", nil, false, err
+	}
+	if !isRelationship {
+		return label, nil, false, nil
+	}
+	relTypes, err := parseFulltextRelationshipTypes(relTypeRaw)
+	if err != nil {
+		return "", nil, false, err
+	}
+	return "", relTypes, true, nil
+}
+
+func extractFulltextPropertiesSegment(onClause string) (string, string, error) {
+	onClause = strings.TrimSpace(onClause)
+	if onClause == "" {
+		return "", "", fmt.Errorf("empty ON clause")
+	}
+
+	if startsWithKeywordFold(onClause, "EACH") {
+		eachEnd, ok := keywordSpanAt(onClause, 0, "EACH")
+		if !ok {
+			return "", "", fmt.Errorf("invalid EACH clause")
+		}
+		onClause = strings.TrimSpace(onClause[eachEnd:])
+	}
+
+	if onClause == "" {
+		return "", "", fmt.Errorf("empty ON clause")
+	}
+
+	if strings.HasPrefix(onClause, "[") {
+		inside, rest, ok := extractBracketSection(onClause)
+		if !ok {
+			return "", "", fmt.Errorf("invalid ON EACH clause")
+		}
+		return strings.TrimSpace(inside), strings.TrimSpace(rest), nil
+	}
+
+	if strings.HasPrefix(onClause, "(") {
+		inside, rest, ok := extractParenSection(onClause)
+		if !ok {
+			return "", "", fmt.Errorf("invalid ON clause")
+		}
+		return strings.TrimSpace(inside), strings.TrimSpace(rest), nil
+	}
+
+	optionsPos := keywordIndexFrom(onClause, "OPTIONS", 0, defaultKeywordScanOpts())
+	if optionsPos < 0 {
+		return strings.TrimSpace(onClause), "", nil
+	}
+	return strings.TrimSpace(onClause[:optionsPos]), strings.TrimSpace(onClause[optionsPos:]), nil
+}
+
+func (e *StorageExecutor) parseCreateFulltextIndexDDL(cypher string) (parsedCreateFulltextIndexDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedCreateFulltextIndexDDL{}, fmt.Errorf("empty statement")
+	}
+
+	prefixPos := keywordIndexFrom(q, "CREATE FULLTEXT INDEX", 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedCreateFulltextIndexDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, "CREATE FULLTEXT INDEX")
+	if !ok {
+		return parsedCreateFulltextIndexDDL{}, fmt.Errorf("invalid prefix")
+	}
+
+	forPos := keywordIndexFrom(q, "FOR", prefixEnd, defaultKeywordScanOpts())
+	if forPos < 0 {
+		return parsedCreateFulltextIndexDDL{}, fmt.Errorf("missing FOR")
+	}
+	forEnd, ok := keywordSpanAt(q, forPos, "FOR")
+	if !ok {
+		return parsedCreateFulltextIndexDDL{}, fmt.Errorf("invalid FOR")
+	}
+
+	onPos := keywordIndexFrom(q, "ON", forEnd, defaultKeywordScanOpts())
+	if onPos < 0 {
+		return parsedCreateFulltextIndexDDL{}, fmt.Errorf("missing ON")
+	}
+	onEnd, ok := keywordSpanAt(q, onPos, "ON")
+	if !ok {
+		return parsedCreateFulltextIndexDDL{}, fmt.Errorf("invalid ON")
+	}
+
+	name, err := parseOptionalDDLName(q[prefixEnd:forPos])
+	if err != nil {
+		return parsedCreateFulltextIndexDDL{}, err
+	}
+	if name == "" {
+		return parsedCreateFulltextIndexDDL{}, fmt.Errorf("missing index name")
+	}
+
+	label, relationshipTypes, isRelationship, err := parseCreateFulltextForPattern(q[forEnd:onPos])
+	if err != nil {
+		return parsedCreateFulltextIndexDDL{}, err
+	}
+
+	propsSegment, tail, err := extractFulltextPropertiesSegment(q[onEnd:])
+	if err != nil {
+		return parsedCreateFulltextIndexDDL{}, err
+	}
+	if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+		return parsedCreateFulltextIndexDDL{}, fmt.Errorf("invalid trailing syntax")
+	}
+
+	properties := e.parseQualifiedIndexProperties(propsSegment)
+	if len(properties) == 0 {
+		return parsedCreateFulltextIndexDDL{}, fmt.Errorf("no properties found in fulltext index definition")
+	}
+
+	return parsedCreateFulltextIndexDDL{
+		indexName:         name,
+		label:             label,
+		relationshipTypes: relationshipTypes,
+		properties:        properties,
+		isRelationship:    isRelationship,
+	}, nil
+}
+
+type parsedSimplePropertyConstraintDDL struct {
+	name           string
+	label          string
+	property       string
+	isRelationship bool
+	kind           string // unique | exists
+}
+
+type parsedTypeConstraintDDL struct {
+	name           string
+	label          string
+	property       string
+	expectedType   storage.PropertyType
+	isRelationship bool
+}
+
+type parsedNodeKeyConstraintDDL struct {
+	name       string
+	label      string
+	properties []string
+}
+
+type parsedRelationshipKeyOrCompositeUniqueDDL struct {
+	name       string
+	label      string
+	properties []string
+	kind       string // rel_key | unique
+}
+
+type parsedConstraintForRequireDDL struct {
+	name           string
+	label          string
+	isRelationship bool
+	requireExpr    string
+}
+
+type parsedTemporalConstraintDDL struct {
+	name           string
+	label          string
+	isRelationship bool
+	properties     []string
+}
+
+type parsedDomainConstraintDDL struct {
+	name           string
+	label          string
+	isRelationship bool
+	property       string
+	allowedRaw     string
+}
+
+type parsedCardinalityConstraintDDL struct {
+	name      string
+	relType   string
+	direction string // OUTGOING | INCOMING
+	maxCount  int
+}
+
+type parsedPolicyConstraintDDL struct {
+	name        string
+	sourceLabel string
+	relType     string
+	targetLabel string
+	policyMode  string // ALLOWED | DISALLOWED
+}
+
+func splitDDLOptionsTail(s string) (expr string, optionsTail string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", ""
+	}
+	if idx := keywordIndexFrom(s, "OPTIONS", 0, defaultKeywordScanOpts()); idx >= 0 {
+		return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx:])
+	}
+	return s, ""
+}
+
+func parseConstraintQualifiedProperty(expr string) (string, string, bool) {
+	expr = strings.TrimSpace(expr)
+	if strings.ContainsAny(expr, ",()") {
+		return "", "", false
+	}
+	dot := strings.LastIndex(expr, ".")
+	if dot <= 0 || dot >= len(expr)-1 {
+		return "", "", false
+	}
+	left := strings.TrimSpace(expr[:dot])
+	right := normalizeIdentifierToken(expr[dot+1:])
+	if left == "" || right == "" {
+		return "", "", false
+	}
+	return left, right, true
+}
+
+func parseConstraintPredicate(predicateRaw string) (kind string, property string, ok bool) {
+	predicateRaw = strings.TrimSpace(predicateRaw)
+	if predicateRaw == "" {
+		return "", "", false
+	}
+
+	upper := strings.ToUpper(predicateRaw)
+	if strings.HasPrefix(upper, "EXISTS") {
+		rest := strings.TrimSpace(predicateRaw[len("EXISTS"):])
+		inside, trailing, ok := extractParenSection(rest)
+		if !ok || strings.TrimSpace(trailing) != "" {
+			return "", "", false
+		}
+		if _, prop, ok := parseConstraintQualifiedProperty(inside); ok {
+			return "exists", prop, true
+		}
+		return "", "", false
+	}
+
+	if idx := keywordIndexFrom(predicateRaw, "IS UNIQUE", 0, defaultKeywordScanOpts()); idx >= 0 {
+		end, ok := keywordSpanAt(predicateRaw, idx, "IS UNIQUE")
+		if ok && strings.TrimSpace(predicateRaw[end:]) == "" {
+			if _, prop, ok := parseConstraintQualifiedProperty(predicateRaw[:idx]); ok {
+				return "unique", prop, true
+			}
+		}
+	}
+
+	if idx := keywordIndexFrom(predicateRaw, "IS NOT NULL", 0, defaultKeywordScanOpts()); idx >= 0 {
+		end, ok := keywordSpanAt(predicateRaw, idx, "IS NOT NULL")
+		if ok && strings.TrimSpace(predicateRaw[end:]) == "" {
+			if _, prop, ok := parseConstraintQualifiedProperty(predicateRaw[:idx]); ok {
+				return "exists", prop, true
+			}
+		}
+	}
+
+	return "", "", false
+}
+
+func parseConstraintTypePredicate(predicateRaw string) (property string, typeName string, ok bool) {
+	predicateRaw = strings.TrimSpace(predicateRaw)
+	if predicateRaw == "" {
+		return "", "", false
+	}
+
+	idx := keywordIndexFrom(predicateRaw, "IS", 0, defaultKeywordScanOpts())
+	if idx < 0 {
+		return "", "", false
+	}
+	isEnd, ok := keywordSpanAt(predicateRaw, idx, "IS")
+	if !ok {
+		return "", "", false
+	}
+
+	_, prop, ok := parseConstraintQualifiedProperty(predicateRaw[:idx])
+	if !ok {
+		return "", "", false
+	}
+
+	rhs := strings.TrimSpace(predicateRaw[isEnd:])
+	rhsUpper := strings.ToUpper(rhs)
+	if strings.HasPrefix(rhsUpper, "::") {
+		typeName = strings.TrimSpace(rhs[2:])
+	} else if strings.HasPrefix(rhsUpper, "TYPED") {
+		typeName = strings.TrimSpace(rhs[len("TYPED"):])
+	} else {
+		return "", "", false
+	}
+	if typeName == "" {
+		return "", "", false
+	}
+	return prop, typeName, true
+}
+
+func (e *StorageExecutor) parseNodeKeyPropertyList(expr string) ([]string, bool) {
+	expr = strings.TrimSpace(expr)
+	inside, rest, ok := extractParenSection(expr)
+	if !ok {
+		return nil, false
+	}
+	rest = strings.TrimSpace(rest)
+	idx := keywordIndexFrom(rest, "IS NODE KEY", 0, defaultKeywordScanOpts())
+	if idx != 0 {
+		return nil, false
+	}
+	end, ok := keywordSpanAt(rest, 0, "IS NODE KEY")
+	if !ok || strings.TrimSpace(rest[end:]) != "" {
+		return nil, false
+	}
+	props := e.parseConstraintProperties(inside)
+	return props, true
+}
+
+func (e *StorageExecutor) parseCreateConstraintNodeKeyDDL(cypher string) (parsedNodeKeyConstraintDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedNodeKeyConstraintDDL{}, fmt.Errorf("empty statement")
+	}
+
+	prefixPos := keywordIndexFrom(q, "CREATE CONSTRAINT", 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedNodeKeyConstraintDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, "CREATE CONSTRAINT")
+	if !ok {
+		return parsedNodeKeyConstraintDDL{}, fmt.Errorf("invalid prefix")
+	}
+
+	forPos := keywordIndexFrom(q, "FOR", prefixEnd, defaultKeywordScanOpts())
+	onPos := keywordIndexFrom(q, "ON", prefixEnd, defaultKeywordScanOpts())
+
+	if forPos >= 0 && (onPos < 0 || forPos < onPos) {
+		forEnd, ok := keywordSpanAt(q, forPos, "FOR")
+		if !ok {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("invalid FOR")
+		}
+		reqPos := keywordIndexFrom(q, "REQUIRE", forEnd, defaultKeywordScanOpts())
+		if reqPos < 0 {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("missing REQUIRE")
+		}
+		reqEnd, ok := keywordSpanAt(q, reqPos, "REQUIRE")
+		if !ok {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("invalid REQUIRE")
+		}
+
+		name, err := parseOptionalDDLName(q[prefixEnd:forPos])
+		if err != nil {
+			return parsedNodeKeyConstraintDDL{}, err
+		}
+
+		label, _, isRelationship, err := parseCreateIndexForPattern(q[forEnd:reqPos])
+		if err != nil || isRelationship {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("invalid NODE KEY pattern")
+		}
+
+		predicateExpr, tail := splitDDLOptionsTail(q[reqEnd:])
+		if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("invalid trailing syntax")
+		}
+		props, ok := e.parseNodeKeyPropertyList(predicateExpr)
+		if !ok {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("unsupported NODE KEY predicate")
+		}
+		return parsedNodeKeyConstraintDDL{name: name, label: label, properties: props}, nil
+	}
+
+	if onPos >= 0 {
+		onEnd, ok := keywordSpanAt(q, onPos, "ON")
+		if !ok {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("invalid ON")
+		}
+		assertPos := keywordIndexFrom(q, "ASSERT", onEnd, defaultKeywordScanOpts())
+		if assertPos < 0 {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("missing ASSERT")
+		}
+		assertEnd, ok := keywordSpanAt(q, assertPos, "ASSERT")
+		if !ok {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("invalid ASSERT")
+		}
+
+		_, err := parseOptionalDDLName(q[prefixEnd:onPos])
+		if err != nil {
+			return parsedNodeKeyConstraintDDL{}, err
+		}
+		label, _, isRelationship, err := parseCreateIndexForPattern(q[onEnd:assertPos])
+		if err != nil || isRelationship {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("invalid ASSERT pattern")
+		}
+
+		predicateExpr, tail := splitDDLOptionsTail(q[assertEnd:])
+		if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("invalid trailing syntax")
+		}
+		props, ok := e.parseNodeKeyPropertyList(predicateExpr)
+		if !ok {
+			return parsedNodeKeyConstraintDDL{}, fmt.Errorf("unsupported NODE KEY predicate")
+		}
+		return parsedNodeKeyConstraintDDL{name: "", label: label, properties: props}, nil
+	}
+
+	return parsedNodeKeyConstraintDDL{}, fmt.Errorf("unsupported CREATE CONSTRAINT shape")
+}
+
+func (e *StorageExecutor) parseRelationshipKeyOrCompositeUniquePredicate(predicateExpr string) (string, []string, bool) {
+	predicateExpr = strings.TrimSpace(predicateExpr)
+	if predicateExpr == "" {
+		return "", nil, false
+	}
+
+	if inside, rest, ok := extractParenSection(predicateExpr); ok {
+		rest = strings.TrimSpace(rest)
+		if idx := keywordIndexFrom(rest, "IS RELATIONSHIP KEY", 0, defaultKeywordScanOpts()); idx == 0 {
+			end, ok := keywordSpanAt(rest, 0, "IS RELATIONSHIP KEY")
+			if ok && strings.TrimSpace(rest[end:]) == "" {
+				return "rel_key", e.parseConstraintProperties(inside), true
+			}
+		}
+		if idx := keywordIndexFrom(rest, "IS UNIQUE", 0, defaultKeywordScanOpts()); idx == 0 {
+			end, ok := keywordSpanAt(rest, 0, "IS UNIQUE")
+			if ok && strings.TrimSpace(rest[end:]) == "" {
+				return "unique", e.parseConstraintProperties(inside), true
+			}
+		}
+	}
+
+	if idx := keywordIndexFrom(predicateExpr, "IS RELATIONSHIP KEY", 0, defaultKeywordScanOpts()); idx >= 0 {
+		end, ok := keywordSpanAt(predicateExpr, idx, "IS RELATIONSHIP KEY")
+		if ok && strings.TrimSpace(predicateExpr[end:]) == "" {
+			_, prop, ok := parseConstraintQualifiedProperty(predicateExpr[:idx])
+			if ok {
+				return "rel_key", []string{prop}, true
+			}
+		}
+	}
+
+	return "", nil, false
+}
+
+func (e *StorageExecutor) parseCreateConstraintForRequireDDL(cypher string) (parsedConstraintForRequireDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedConstraintForRequireDDL{}, fmt.Errorf("empty statement")
+	}
+	prefixPos := keywordIndexFrom(q, "CREATE CONSTRAINT", 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedConstraintForRequireDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, "CREATE CONSTRAINT")
+	if !ok {
+		return parsedConstraintForRequireDDL{}, fmt.Errorf("invalid prefix")
+	}
+
+	forPos := keywordIndexFrom(q, "FOR", prefixEnd, defaultKeywordScanOpts())
+	if forPos < 0 {
+		return parsedConstraintForRequireDDL{}, fmt.Errorf("missing FOR")
+	}
+	forEnd, ok := keywordSpanAt(q, forPos, "FOR")
+	if !ok {
+		return parsedConstraintForRequireDDL{}, fmt.Errorf("invalid FOR")
+	}
+	reqPos := keywordIndexFrom(q, "REQUIRE", forEnd, defaultKeywordScanOpts())
+	if reqPos < 0 {
+		return parsedConstraintForRequireDDL{}, fmt.Errorf("missing REQUIRE")
+	}
+	reqEnd, ok := keywordSpanAt(q, reqPos, "REQUIRE")
+	if !ok {
+		return parsedConstraintForRequireDDL{}, fmt.Errorf("invalid REQUIRE")
+	}
+
+	name, err := parseOptionalDDLName(q[prefixEnd:forPos])
+	if err != nil {
+		return parsedConstraintForRequireDDL{}, err
+	}
+	label, relType, isRelationship, err := parseCreateIndexForPattern(q[forEnd:reqPos])
+	if err != nil {
+		return parsedConstraintForRequireDDL{}, err
+	}
+	requireExpr, tail := splitDDLOptionsTail(q[reqEnd:])
+	if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+		return parsedConstraintForRequireDDL{}, fmt.Errorf("invalid trailing syntax")
+	}
+	out := parsedConstraintForRequireDDL{name: name, isRelationship: isRelationship, requireExpr: requireExpr}
+	if isRelationship {
+		out.label = relType
+	} else {
+		out.label = label
+	}
+	return out, nil
+}
+
+func (e *StorageExecutor) parseTemporalConstraintPredicate(requireExpr string) ([]string, bool) {
+	requireExpr = strings.TrimSpace(requireExpr)
+	inside, rest, ok := extractParenSection(requireExpr)
+	if !ok {
+		return nil, false
+	}
+	rest = strings.TrimSpace(rest)
+	if idx := keywordIndexFrom(rest, "IS TEMPORAL", 0, defaultKeywordScanOpts()); idx != 0 {
+		return nil, false
+	}
+	end, ok := keywordSpanAt(rest, 0, "IS TEMPORAL")
+	if !ok {
+		return nil, false
+	}
+	tail := strings.TrimSpace(rest[end:])
+	if tail != "" {
+		if idx := keywordIndexFrom(tail, "NO OVERLAP", 0, defaultKeywordScanOpts()); idx != 0 {
+			return nil, false
+		}
+		end2, ok := keywordSpanAt(tail, 0, "NO OVERLAP")
+		if !ok || strings.TrimSpace(tail[end2:]) != "" {
+			return nil, false
+		}
+	}
+	return e.parseConstraintProperties(inside), true
+}
+
+func (e *StorageExecutor) parseCreateConstraintTemporalDDL(cypher string) (parsedTemporalConstraintDDL, error) {
+	parsed, err := e.parseCreateConstraintForRequireDDL(cypher)
+	if err != nil {
+		return parsedTemporalConstraintDDL{}, err
+	}
+	props, ok := e.parseTemporalConstraintPredicate(parsed.requireExpr)
+	if !ok {
+		return parsedTemporalConstraintDDL{}, fmt.Errorf("unsupported temporal predicate")
+	}
+	return parsedTemporalConstraintDDL{name: parsed.name, label: parsed.label, isRelationship: parsed.isRelationship, properties: props}, nil
+}
+
+func parseDomainConstraintPredicate(requireExpr string) (property string, allowedRaw string, ok bool) {
+	requireExpr = strings.TrimSpace(requireExpr)
+	if requireExpr == "" {
+		return "", "", false
+	}
+	inPos := keywordIndexFrom(requireExpr, "IN", 0, defaultKeywordScanOpts())
+	if inPos < 0 {
+		return "", "", false
+	}
+	inEnd, ok := keywordSpanAt(requireExpr, inPos, "IN")
+	if !ok {
+		return "", "", false
+	}
+	_, prop, ok := parseConstraintQualifiedProperty(requireExpr[:inPos])
+	if !ok {
+		return "", "", false
+	}
+	rhs := strings.TrimSpace(requireExpr[inEnd:])
+	inside, rest, ok := extractBracketSection(rhs)
+	if !ok || strings.TrimSpace(rest) != "" {
+		return "", "", false
+	}
+	return prop, inside, true
+}
+
+func (e *StorageExecutor) parseCreateConstraintDomainDDL(cypher string) (parsedDomainConstraintDDL, error) {
+	parsed, err := e.parseCreateConstraintForRequireDDL(cypher)
+	if err != nil {
+		return parsedDomainConstraintDDL{}, err
+	}
+	property, allowedRaw, ok := parseDomainConstraintPredicate(parsed.requireExpr)
+	if !ok {
+		return parsedDomainConstraintDDL{}, fmt.Errorf("unsupported domain predicate")
+	}
+	return parsedDomainConstraintDDL{name: parsed.name, label: parsed.label, isRelationship: parsed.isRelationship, property: property, allowedRaw: allowedRaw}, nil
+}
+
+func parseRelationshipForDirection(forClause string) (relType string, direction string, ok bool) {
+	forClause = strings.TrimSpace(forClause)
+	if forClause == "" {
+		return "", "", false
+	}
+	bracketStart := strings.Index(forClause, "[")
+	if bracketStart < 0 {
+		return "", "", false
+	}
+	inside, rest, ok := extractBracketSection(forClause[bracketStart:])
+	if !ok {
+		return "", "", false
+	}
+	prefix := strings.TrimSpace(forClause[:bracketStart])
+	suffix := strings.TrimSpace(rest)
+
+	colon := strings.Index(inside, ":")
+	if colon < 0 {
+		return "", "", false
+	}
+	relType = normalizeIdentifierToken(strings.TrimSpace(inside[colon+1:]))
+	if relType == "" {
+		return "", "", false
+	}
+
+	if strings.Contains(suffix, "->") {
+		direction = "OUTGOING"
+	} else if strings.Contains(prefix, "<-") {
+		direction = "INCOMING"
+	} else {
+		return "", "", false
+	}
+	return relType, direction, true
+}
+
+func parseCardinalityRequireExpr(requireExpr string) (int, bool) {
+	requireExpr = strings.TrimSpace(requireExpr)
+	idx := keywordIndexFrom(requireExpr, "MAX COUNT", 0, defaultKeywordScanOpts())
+	if idx != 0 {
+		return 0, false
+	}
+	end, ok := keywordSpanAt(requireExpr, 0, "MAX COUNT")
+	if !ok {
+		return 0, false
+	}
+	raw := strings.TrimSpace(requireExpr[end:])
+	if raw == "" {
+		return 0, false
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 1 {
+		return 0, false
+	}
+	return v, true
+}
+
+func (e *StorageExecutor) parseCreateConstraintCardinalityDDL(cypher string) (parsedCardinalityConstraintDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedCardinalityConstraintDDL{}, fmt.Errorf("empty statement")
+	}
+	prefixPos := keywordIndexFrom(q, "CREATE CONSTRAINT", 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedCardinalityConstraintDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, "CREATE CONSTRAINT")
+	if !ok {
+		return parsedCardinalityConstraintDDL{}, fmt.Errorf("invalid prefix")
+	}
+	forPos := keywordIndexFrom(q, "FOR", prefixEnd, defaultKeywordScanOpts())
+	if forPos < 0 {
+		return parsedCardinalityConstraintDDL{}, fmt.Errorf("missing FOR")
+	}
+	forEnd, ok := keywordSpanAt(q, forPos, "FOR")
+	if !ok {
+		return parsedCardinalityConstraintDDL{}, fmt.Errorf("invalid FOR")
+	}
+	reqPos := keywordIndexFrom(q, "REQUIRE", forEnd, defaultKeywordScanOpts())
+	if reqPos < 0 {
+		return parsedCardinalityConstraintDDL{}, fmt.Errorf("missing REQUIRE")
+	}
+	reqEnd, ok := keywordSpanAt(q, reqPos, "REQUIRE")
+	if !ok {
+		return parsedCardinalityConstraintDDL{}, fmt.Errorf("invalid REQUIRE")
+	}
+
+	name, err := parseOptionalDDLName(q[prefixEnd:forPos])
+	if err != nil {
+		return parsedCardinalityConstraintDDL{}, err
+	}
+	relType, direction, ok := parseRelationshipForDirection(q[forEnd:reqPos])
+	if !ok {
+		return parsedCardinalityConstraintDDL{}, fmt.Errorf("invalid cardinality FOR pattern")
+	}
+	requireExpr, tail := splitDDLOptionsTail(q[reqEnd:])
+	if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+		return parsedCardinalityConstraintDDL{}, fmt.Errorf("invalid trailing syntax")
+	}
+	maxCount, ok := parseCardinalityRequireExpr(requireExpr)
+	if !ok {
+		if startsWithKeywordFold(strings.TrimSpace(requireExpr), "MAX COUNT") {
+			end, spanOK := keywordSpanAt(strings.TrimSpace(requireExpr), 0, "MAX COUNT")
+			if spanOK {
+				raw := strings.TrimSpace(strings.TrimSpace(requireExpr)[end:])
+				if raw != "" {
+					digitsOnly := true
+					for _, r := range raw {
+						if r < '0' || r > '9' {
+							digitsOnly = false
+							break
+						}
+					}
+					if digitsOnly {
+						v, convErr := strconv.Atoi(raw)
+						if convErr != nil || v < 1 {
+							return parsedCardinalityConstraintDDL{}, fmt.Errorf("MAX COUNT must be a positive integer, got %q", raw)
+						}
+					}
+				}
+			}
+		}
+		return parsedCardinalityConstraintDDL{}, fmt.Errorf("invalid cardinality require clause")
+	}
+
+	return parsedCardinalityConstraintDDL{name: name, relType: relType, direction: direction, maxCount: maxCount}, nil
+}
+
+func parseNodeLabelOnlyPattern(inner string) (string, bool) {
+	inner = strings.TrimSpace(inner)
+	if inner == "" {
+		return "", false
+	}
+	if !strings.HasPrefix(inner, ":") {
+		return "", false
+	}
+	label := normalizeIdentifierToken(strings.TrimSpace(inner[1:]))
+	if label == "" {
+		return "", false
+	}
+	return label, true
+}
+
+func parsePolicyForClause(forClause string) (sourceLabel string, relType string, targetLabel string, ok bool) {
+	forClause = strings.TrimSpace(forClause)
+	if !strings.HasPrefix(forClause, "(") {
+		return "", "", "", false
+	}
+	leftInside, leftRest, ok := extractParenSection(forClause)
+	if !ok {
+		return "", "", "", false
+	}
+	sourceLabel, ok = parseNodeLabelOnlyPattern(leftInside)
+	if !ok {
+		return "", "", "", false
+	}
+
+	leftRest = strings.TrimSpace(leftRest)
+	if !strings.HasPrefix(leftRest, "-") {
+		return "", "", "", false
+	}
+	bracketStart := strings.Index(leftRest, "[")
+	if bracketStart < 0 {
+		return "", "", "", false
+	}
+	relInside, relRest, ok := extractBracketSection(leftRest[bracketStart:])
+	if !ok {
+		return "", "", "", false
+	}
+	colon := strings.Index(relInside, ":")
+	if colon < 0 {
+		return "", "", "", false
+	}
+	relType = normalizeIdentifierToken(strings.TrimSpace(relInside[colon+1:]))
+	if relType == "" {
+		return "", "", "", false
+	}
+
+	relRest = strings.TrimSpace(relRest)
+	if !strings.HasPrefix(relRest, "->") {
+		return "", "", "", false
+	}
+	relRest = strings.TrimSpace(relRest[2:])
+	if !strings.HasPrefix(relRest, "(") {
+		return "", "", "", false
+	}
+	rightInside, trailing, ok := extractParenSection(relRest)
+	if !ok || strings.TrimSpace(trailing) != "" {
+		return "", "", "", false
+	}
+	targetLabel, ok = parseNodeLabelOnlyPattern(rightInside)
+	if !ok {
+		return "", "", "", false
+	}
+	return sourceLabel, relType, targetLabel, true
+}
+
+func parsePolicyModeRequireExpr(requireExpr string) (string, bool) {
+	requireExpr = strings.TrimSpace(requireExpr)
+	if startsWithKeywordFold(requireExpr, "ALLOWED") {
+		end, ok := keywordSpanAt(requireExpr, 0, "ALLOWED")
+		if ok && strings.TrimSpace(requireExpr[end:]) == "" {
+			return "ALLOWED", true
+		}
+	}
+	if startsWithKeywordFold(requireExpr, "DISALLOWED") {
+		end, ok := keywordSpanAt(requireExpr, 0, "DISALLOWED")
+		if ok && strings.TrimSpace(requireExpr[end:]) == "" {
+			return "DISALLOWED", true
+		}
+	}
+	return "", false
+}
+
+func (e *StorageExecutor) parseCreateConstraintPolicyDDL(cypher string) (parsedPolicyConstraintDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedPolicyConstraintDDL{}, fmt.Errorf("empty statement")
+	}
+	prefixPos := keywordIndexFrom(q, "CREATE CONSTRAINT", 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedPolicyConstraintDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, "CREATE CONSTRAINT")
+	if !ok {
+		return parsedPolicyConstraintDDL{}, fmt.Errorf("invalid prefix")
+	}
+	forPos := keywordIndexFrom(q, "FOR", prefixEnd, defaultKeywordScanOpts())
+	if forPos < 0 {
+		return parsedPolicyConstraintDDL{}, fmt.Errorf("missing FOR")
+	}
+	forEnd, ok := keywordSpanAt(q, forPos, "FOR")
+	if !ok {
+		return parsedPolicyConstraintDDL{}, fmt.Errorf("invalid FOR")
+	}
+	reqPos := keywordIndexFrom(q, "REQUIRE", forEnd, defaultKeywordScanOpts())
+	if reqPos < 0 {
+		return parsedPolicyConstraintDDL{}, fmt.Errorf("missing REQUIRE")
+	}
+	reqEnd, ok := keywordSpanAt(q, reqPos, "REQUIRE")
+	if !ok {
+		return parsedPolicyConstraintDDL{}, fmt.Errorf("invalid REQUIRE")
+	}
+
+	name, err := parseOptionalDDLName(q[prefixEnd:forPos])
+	if err != nil {
+		return parsedPolicyConstraintDDL{}, err
+	}
+	source, relType, target, ok := parsePolicyForClause(q[forEnd:reqPos])
+	if !ok {
+		return parsedPolicyConstraintDDL{}, fmt.Errorf("invalid policy FOR pattern")
+	}
+	requireExpr, tail := splitDDLOptionsTail(q[reqEnd:])
+	if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+		return parsedPolicyConstraintDDL{}, fmt.Errorf("invalid trailing syntax")
+	}
+	mode, ok := parsePolicyModeRequireExpr(requireExpr)
+	if !ok {
+		return parsedPolicyConstraintDDL{}, fmt.Errorf("invalid policy require clause")
+	}
+
+	return parsedPolicyConstraintDDL{name: name, sourceLabel: source, relType: relType, targetLabel: target, policyMode: mode}, nil
+}
+
+func (e *StorageExecutor) parseCreateConstraintRelationshipKeyOrCompositeUniqueDDL(cypher string) (parsedRelationshipKeyOrCompositeUniqueDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, fmt.Errorf("empty statement")
+	}
+	prefixPos := keywordIndexFrom(q, "CREATE CONSTRAINT", 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, "CREATE CONSTRAINT")
+	if !ok {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, fmt.Errorf("invalid prefix")
+	}
+
+	forPos := keywordIndexFrom(q, "FOR", prefixEnd, defaultKeywordScanOpts())
+	if forPos < 0 {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, fmt.Errorf("missing FOR")
+	}
+	forEnd, ok := keywordSpanAt(q, forPos, "FOR")
+	if !ok {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, fmt.Errorf("invalid FOR")
+	}
+	reqPos := keywordIndexFrom(q, "REQUIRE", forEnd, defaultKeywordScanOpts())
+	if reqPos < 0 {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, fmt.Errorf("missing REQUIRE")
+	}
+	reqEnd, ok := keywordSpanAt(q, reqPos, "REQUIRE")
+	if !ok {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, fmt.Errorf("invalid REQUIRE")
+	}
+
+	name, err := parseOptionalDDLName(q[prefixEnd:forPos])
+	if err != nil {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, err
+	}
+
+	_, relType, isRelationship, err := parseCreateIndexForPattern(q[forEnd:reqPos])
+	if err != nil || !isRelationship {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, fmt.Errorf("invalid relationship FOR pattern")
+	}
+
+	predicateExpr, tail := splitDDLOptionsTail(q[reqEnd:])
+	if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, fmt.Errorf("invalid trailing syntax")
+	}
+	kind, props, ok := e.parseRelationshipKeyOrCompositeUniquePredicate(predicateExpr)
+	if !ok {
+		return parsedRelationshipKeyOrCompositeUniqueDDL{}, fmt.Errorf("unsupported relationship key/unique predicate")
+	}
+
+	return parsedRelationshipKeyOrCompositeUniqueDDL{name: name, label: relType, properties: props, kind: kind}, nil
+}
+
+func (e *StorageExecutor) parseCreateConstraintTypeDDL(cypher string) (parsedTypeConstraintDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedTypeConstraintDDL{}, fmt.Errorf("empty statement")
+	}
+
+	prefixPos := keywordIndexFrom(q, "CREATE CONSTRAINT", 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedTypeConstraintDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, "CREATE CONSTRAINT")
+	if !ok {
+		return parsedTypeConstraintDDL{}, fmt.Errorf("invalid prefix")
+	}
+
+	forPos := keywordIndexFrom(q, "FOR", prefixEnd, defaultKeywordScanOpts())
+	onPos := keywordIndexFrom(q, "ON", prefixEnd, defaultKeywordScanOpts())
+
+	if forPos >= 0 && (onPos < 0 || forPos < onPos) {
+		forEnd, ok := keywordSpanAt(q, forPos, "FOR")
+		if !ok {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("invalid FOR")
+		}
+		reqPos := keywordIndexFrom(q, "REQUIRE", forEnd, defaultKeywordScanOpts())
+		if reqPos < 0 {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("missing REQUIRE")
+		}
+		reqEnd, ok := keywordSpanAt(q, reqPos, "REQUIRE")
+		if !ok {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("invalid REQUIRE")
+		}
+
+		name, err := parseOptionalDDLName(q[prefixEnd:forPos])
+		if err != nil {
+			return parsedTypeConstraintDDL{}, err
+		}
+
+		label, relType, isRelationship, err := parseCreateIndexForPattern(q[forEnd:reqPos])
+		if err != nil {
+			return parsedTypeConstraintDDL{}, err
+		}
+
+		predicateExpr, tail := splitDDLOptionsTail(q[reqEnd:])
+		if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("invalid trailing syntax")
+		}
+		property, typeName, ok := parseConstraintTypePredicate(predicateExpr)
+		if !ok {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("unsupported type predicate")
+		}
+		expectedType, err := parsePropertyType(typeName)
+		if err != nil {
+			return parsedTypeConstraintDDL{}, err
+		}
+
+		out := parsedTypeConstraintDDL{name: name, property: property, expectedType: expectedType, isRelationship: isRelationship}
+		if isRelationship {
+			out.label = relType
+		} else {
+			out.label = label
+		}
+		return out, nil
+	}
+
+	if onPos >= 0 {
+		onEnd, ok := keywordSpanAt(q, onPos, "ON")
+		if !ok {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("invalid ON")
+		}
+		assertPos := keywordIndexFrom(q, "ASSERT", onEnd, defaultKeywordScanOpts())
+		if assertPos < 0 {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("missing ASSERT")
+		}
+		assertEnd, ok := keywordSpanAt(q, assertPos, "ASSERT")
+		if !ok {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("invalid ASSERT")
+		}
+
+		name, err := parseOptionalDDLName(q[prefixEnd:onPos])
+		if err != nil {
+			return parsedTypeConstraintDDL{}, err
+		}
+		label, _, isRelationship, err := parseCreateIndexForPattern(q[onEnd:assertPos])
+		if err != nil || isRelationship {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("invalid ASSERT pattern")
+		}
+
+		predicateExpr, tail := splitDDLOptionsTail(q[assertEnd:])
+		if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("invalid trailing syntax")
+		}
+		property, typeName, ok := parseConstraintTypePredicate(predicateExpr)
+		if !ok {
+			return parsedTypeConstraintDDL{}, fmt.Errorf("unsupported type predicate")
+		}
+		expectedType, err := parsePropertyType(typeName)
+		if err != nil {
+			return parsedTypeConstraintDDL{}, err
+		}
+		return parsedTypeConstraintDDL{name: name, label: label, property: property, expectedType: expectedType}, nil
+	}
+
+	return parsedTypeConstraintDDL{}, fmt.Errorf("unsupported CREATE CONSTRAINT shape")
+}
+
+func (e *StorageExecutor) parseCreateConstraintSimplePropertyDDL(cypher string) (parsedSimplePropertyConstraintDDL, error) {
+	q := strings.TrimSpace(cypher)
+	if q == "" {
+		return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("empty statement")
+	}
+
+	prefixPos := keywordIndexFrom(q, "CREATE CONSTRAINT", 0, defaultKeywordScanOpts())
+	if prefixPos != 0 {
+		return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("invalid prefix")
+	}
+	prefixEnd, ok := keywordSpanAt(q, 0, "CREATE CONSTRAINT")
+	if !ok {
+		return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("invalid prefix")
+	}
+
+	forPos := keywordIndexFrom(q, "FOR", prefixEnd, defaultKeywordScanOpts())
+	onPos := keywordIndexFrom(q, "ON", prefixEnd, defaultKeywordScanOpts())
+
+	if forPos >= 0 && (onPos < 0 || forPos < onPos) {
+		forEnd, ok := keywordSpanAt(q, forPos, "FOR")
+		if !ok {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("invalid FOR")
+		}
+		reqPos := keywordIndexFrom(q, "REQUIRE", forEnd, defaultKeywordScanOpts())
+		if reqPos < 0 {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("missing REQUIRE")
+		}
+		reqEnd, ok := keywordSpanAt(q, reqPos, "REQUIRE")
+		if !ok {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("invalid REQUIRE")
+		}
+
+		name, err := parseOptionalDDLName(q[prefixEnd:forPos])
+		if err != nil {
+			return parsedSimplePropertyConstraintDDL{}, err
+		}
+
+		label, relType, isRelationship, err := parseCreateIndexForPattern(q[forEnd:reqPos])
+		if err != nil {
+			return parsedSimplePropertyConstraintDDL{}, err
+		}
+
+		predicateExpr, tail := splitDDLOptionsTail(q[reqEnd:])
+		if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("invalid trailing syntax")
+		}
+		kind, property, ok := parseConstraintPredicate(predicateExpr)
+		if !ok {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("unsupported constraint predicate")
+		}
+
+		out := parsedSimplePropertyConstraintDDL{name: name, property: property, kind: kind, isRelationship: isRelationship}
+		if isRelationship {
+			out.label = relType
+		} else {
+			out.label = label
+		}
+		return out, nil
+	}
+
+	if onPos >= 0 {
+		onEnd, ok := keywordSpanAt(q, onPos, "ON")
+		if !ok {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("invalid ON")
+		}
+		assertPos := keywordIndexFrom(q, "ASSERT", onEnd, defaultKeywordScanOpts())
+		if assertPos < 0 {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("missing ASSERT")
+		}
+		assertEnd, ok := keywordSpanAt(q, assertPos, "ASSERT")
+		if !ok {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("invalid ASSERT")
+		}
+
+		name, err := parseOptionalDDLName(q[prefixEnd:onPos])
+		if err != nil {
+			return parsedSimplePropertyConstraintDDL{}, err
+		}
+
+		label, _, isRelationship, err := parseCreateIndexForPattern(q[onEnd:assertPos])
+		if err != nil || isRelationship {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("invalid ASSERT pattern")
+		}
+
+		predicateExpr, tail := splitDDLOptionsTail(q[assertEnd:])
+		if tail != "" && !startsWithKeywordFold(tail, "OPTIONS") {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("invalid trailing syntax")
+		}
+		kind, property, ok := parseConstraintPredicate(predicateExpr)
+		if !ok {
+			return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("unsupported constraint predicate")
+		}
+		return parsedSimplePropertyConstraintDDL{name: name, label: label, property: property, kind: kind, isRelationship: false}, nil
+	}
+
+	return parsedSimplePropertyConstraintDDL{}, fmt.Errorf("unsupported CREATE CONSTRAINT shape")
 }
 
 // parseIndexProperties parses property list from index ON clause.
@@ -1608,64 +2273,19 @@ func (e *StorageExecutor) executeCreateFulltextIndex(ctx context.Context, cypher
 		return nil, fmt.Errorf("schema manager not available")
 	}
 
-	// Relationship form first: the regex is more specific (requires the
-	// `()-[...]-()` shape), so a node-form query won't accidentally
-	// match it.
-	if matches := fulltextRelIndexPattern.FindStringSubmatch(cypher); matches != nil {
-		indexName := normalizeIdentifierToken(matches[1])
-		relTypes, err := parseFulltextRelationshipTypes(matches[3])
-		if err != nil {
-			return nil, err
-		}
-		propertiesStr := matches[4]
-		properties := e.parseQualifiedIndexProperties(propertiesStr)
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("no properties found in fulltext index definition")
-		}
-		if err := schema.AddFulltextRelationshipIndex(indexName, relTypes, properties); err != nil {
+	parsed, err := e.parseCreateFulltextIndexDDL(cypher)
+	if err != nil {
+		return nil, err
+	}
+
+	if parsed.isRelationship {
+		if err := schema.AddFulltextRelationshipIndex(parsed.indexName, parsed.relationshipTypes, parsed.properties); err != nil {
 			return nil, fmt.Errorf("failed to add fulltext relationship index: %w", err)
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
-	// Pattern: CREATE FULLTEXT INDEX name IF NOT EXISTS FOR (n:Label) ON EACH [n.prop1, n.prop2]
-	// Uses pre-compiled pattern from regex_patterns.go
-	matches := fulltextIndexPattern.FindStringSubmatch(cypher)
-
-	if matches == nil {
-		compat := fulltextIndexCompatPattern.FindStringSubmatch(strings.TrimSpace(cypher))
-		if compat == nil {
-			return nil, fmt.Errorf("invalid CREATE FULLTEXT INDEX syntax: %s", cypher)
-		}
-
-		indexName := normalizeIdentifierToken(compat[1])
-		label := normalizeIdentifierToken(compat[3])
-		propsRaw := strings.TrimSpace(compat[4])
-		if strings.HasPrefix(propsRaw, "[") && strings.HasSuffix(propsRaw, "]") {
-			propsRaw = strings.TrimSpace(propsRaw[1 : len(propsRaw)-1])
-		}
-		properties := e.parseQualifiedIndexProperties(propsRaw)
-		if len(properties) == 0 {
-			return nil, fmt.Errorf("no properties found in fulltext index definition")
-		}
-		if err := schema.AddFulltextIndex(indexName, []string{label}, properties); err != nil {
-			return nil, fmt.Errorf("failed to add fulltext index: %w", err)
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	}
-
-	indexName := normalizeIdentifierToken(matches[1])
-	label := normalizeIdentifierToken(matches[3])
-	propertiesStr := matches[4]
-
-	// Parse properties: "n.prop1, n.prop2" -> ["prop1", "prop2"]
-	properties := e.parseQualifiedIndexProperties(propertiesStr)
-
-	if len(properties) == 0 {
-		return nil, fmt.Errorf("no properties found in fulltext index definition")
-	}
-
-	if err := schema.AddFulltextIndex(indexName, []string{label}, properties); err != nil {
+	if err := schema.AddFulltextIndex(parsed.indexName, []string{parsed.label}, parsed.properties); err != nil {
 		return nil, fmt.Errorf("failed to add fulltext index: %w", err)
 	}
 
@@ -1809,35 +2429,23 @@ func normalizeIdentifierToken(v string) string {
 //	FOR (n:Label) ON (n.property)
 //	OPTIONS {indexConfig: {`vector.dimensions`: 1024, `vector.similarity_function`: 'cosine'}}
 func (e *StorageExecutor) executeCreateVectorIndex(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	// Pattern: CREATE VECTOR INDEX name IF NOT EXISTS FOR (n:Label) ON (n.property)
-	// Uses pre-compiled patterns from regex_patterns.go
-	matches := vectorIndexPattern.FindStringSubmatch(cypher)
-
-	if matches == nil {
+	parsed, err := e.parseCreateIndexDDL(cypher, "CREATE VECTOR INDEX")
+	if err != nil {
+		return nil, fmt.Errorf("invalid CREATE VECTOR INDEX syntax")
+	}
+	if parsed.isRelationship || parsed.label == "" || len(parsed.properties) != 1 || parsed.indexName == "" {
 		return nil, fmt.Errorf("invalid CREATE VECTOR INDEX syntax")
 	}
 
-	indexName := normalizeIdentifierToken(matches[1])
-	label := normalizeIdentifierToken(matches[3])
-	property := normalizeIdentifierToken(matches[5])
+	indexName := parsed.indexName
+	label := parsed.label
+	property := parsed.properties[0]
 
 	// Parse OPTIONS if present - use configured default dimensions
 	dimensions := e.GetDefaultEmbeddingDimensions()
 	similarityFunc := "cosine" // Default
 
-	if strings.Contains(cypher, "OPTIONS") {
-		// Extract dimensions using pre-compiled pattern
-		if dimMatches := vectorDimensionsPattern.FindStringSubmatch(cypher); dimMatches != nil {
-			if dim, err := strconv.Atoi(dimMatches[1]); err == nil {
-				dimensions = dim
-			}
-		}
-
-		// Extract similarity function using pre-compiled pattern
-		if simMatches := vectorSimilarityPattern.FindStringSubmatch(cypher); simMatches != nil {
-			similarityFunc = simMatches[1]
-		}
-	}
+	dimensions, similarityFunc = parseVectorOptions(parsed.optionsClause, dimensions, similarityFunc)
 
 	// Add vector index. The schema entry is recorded regardless of the
 	// vector master switch so SHOW INDEXES still reflects operator intent
