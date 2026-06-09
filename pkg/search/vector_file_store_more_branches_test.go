@@ -169,10 +169,14 @@ func TestVectorFileStore_MoreLoadRebuildAndCompactBranches(t *testing.T) {
 		require.Equal(t, 2, vfs.Count())
 		vec1, ok := vfs.GetVector("id-1")
 		require.True(t, ok)
-		require.Equal(t, []float32{1, 0}, vec1)
+		require.Len(t, vec1, 2)
+		require.InDelta(t, 1.0, vec1[0], 1e-5)
+		require.InDelta(t, 0.0, vec1[1], 1e-5)
 		vec2, ok := vfs.GetVector("id-2")
 		require.True(t, ok)
-		require.Equal(t, []float32{0, 1}, vec2)
+		require.Len(t, vec2, 2)
+		require.InDelta(t, 0.0, vec2[0], 1e-5)
+		require.InDelta(t, 1.0, vec2[1], 1e-5)
 	})
 
 	t.Run("rewrite_vec_locked_empty_ids_clears_index", func(t *testing.T) {

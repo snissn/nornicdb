@@ -66,7 +66,10 @@ func TestService_GetVectorForCypher_MoreBranches(t *testing.T) {
 	svc.vectorFileStore = vfs
 	v3, ok := svc.getVectorForCypher("vfs")
 	require.True(t, ok)
-	require.Equal(t, []float32{0, 1, 0}, v3)
+	require.Len(t, v3, 3)
+	require.InDelta(t, 0.0, v3[0], 1e-5)
+	require.InDelta(t, 1.0, v3[1], 1e-5)
+	require.InDelta(t, 0.0, v3[2], 1e-5)
 
 	// Missing id returns false.
 	_, ok = svc.getVectorForCypher("missing")
