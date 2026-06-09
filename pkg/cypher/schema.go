@@ -1299,6 +1299,38 @@ func (e *StorageExecutor) executeDropConstraint(ctx context.Context, cypher stri
 func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	// Pattern: CREATE INDEX name IF NOT EXISTS FOR (n:Label) ON (n.property[, n.property2, ...])
 	// Uses pre-compiled patterns from regex_patterns.go
+	if matches := indexRelNamedFor.FindStringSubmatch(cypher); matches != nil {
+		indexName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		propertiesStr := matches[4]
+		properties := e.parseQualifiedIndexProperties(propertiesStr)
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("no properties specified for index")
+		}
+		// Relationship property indexes are accepted for Neo4j compatibility.
+		// They are registered in schema metadata and currently do not require
+		// node backfill.
+		if err := e.storage.GetSchema().AddPropertyIndex(indexName, relType, properties); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := indexRelUnnamedFor.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		propertiesStr := matches[3]
+		properties := e.parseQualifiedIndexProperties(propertiesStr)
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("no properties specified for index")
+		}
+		propsJoined := strings.Join(properties, "_")
+		indexName := fmt.Sprintf("index_%s_%s", strings.ToLower(relType), strings.ToLower(propsJoined))
+		if err := e.storage.GetSchema().AddPropertyIndex(indexName, relType, properties); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
 	if matches := indexNamedFor.FindStringSubmatch(cypher); matches != nil {
 		indexName := normalizeIdentifierToken(matches[1])
 		label := normalizeIdentifierToken(matches[3])

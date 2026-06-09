@@ -884,18 +884,15 @@ func TestCreateIndex_BranchCoverage(t *testing.T) {
 		t.Fatal("expected invalid CREATE INDEX syntax error")
 	}
 
-	rejected := []string{
+	relationshipIndexes := []string{
 		"CREATE INDEX fact_namespace_idx IF NOT EXISTS FOR ()-[f:FACT]-() ON (f.namespace)",
 		"CREATE INDEX fact_predicate_idx IF NOT EXISTS FOR ()-[f:FACT]-() ON (f.predicate)",
 		"CREATE INDEX fact_namespace_predicate_idx IF NOT EXISTS FOR ()-[f:FACT]-() ON (f.namespace, f.predicate)",
 	}
-	for _, q := range rejected {
+	for _, q := range relationshipIndexes {
 		_, err = exec.executeCreateIndex(ctx, q)
-		if err == nil {
-			t.Fatalf("expected invalid CREATE INDEX syntax error for %s", q)
-		}
-		if !strings.Contains(err.Error(), "invalid CREATE INDEX syntax") {
-			t.Fatalf("expected invalid CREATE INDEX syntax for %s; got %v", q, err)
+		if err != nil {
+			t.Fatalf("expected relationship CREATE INDEX syntax to succeed for %s; got %v", q, err)
 		}
 	}
 }
@@ -913,6 +910,8 @@ func TestCreateIndex_Neo4jCompatibilitySyntax(t *testing.T) {
 		"CREATE INDEX test_idx ON :TestNode(entity_id)",
 		"CREATE RANGE INDEX FOR (n:TestNode) ON (n.entity_id)",
 		"CREATE INDEX IF NOT EXISTS FOR (n:Test) ON n.entity_id",
+		"CREATE INDEX rel_uuid IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.uuid)",
+		"CREATE INDEX FOR ()<-[r:RELATES_TO]-() ON (r.uuid, r.group_id)",
 	}
 	for _, q := range queries {
 		_, err := exec.executeSchemaCommand(ctx, q)

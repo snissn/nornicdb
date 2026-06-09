@@ -116,6 +116,12 @@ var (
 	// Index patterns - CREATE INDEX [name] [IF NOT EXISTS] FOR (var:Label) ON (var.prop)
 	indexNamedFor   = regexp.MustCompile(`(?is)^\s*CREATE\s+INDEX\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ON\s+\(([^)]+)\)` + ddlOptionsTail + `\s*$`)
 	indexUnnamedFor = regexp.MustCompile(`(?is)^\s*CREATE\s+INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ON\s+\(([^)]+)\)` + ddlOptionsTail + `\s*$`)
+	// Relationship property index patterns:
+	//   CREATE INDEX name [IF NOT EXISTS] FOR ()-[r:TYPE]-() ON (r.prop[, r.prop2])
+	// Also accepts directed arrow variants like Neo4j:
+	//   FOR ()-[r:TYPE]->() / FOR ()<-[r:TYPE]-()
+	indexRelNamedFor   = regexp.MustCompile(`(?is)^\s*CREATE\s+INDEX\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*<?-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*>?\s*\(\s*\)\s+ON\s+\(([^)]+)\)` + ddlOptionsTail + `\s*$`)
+	indexRelUnnamedFor = regexp.MustCompile(`(?is)^\s*CREATE\s+INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*<?-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*>?\s*\(\s*\)\s+ON\s+\(([^)]+)\)` + ddlOptionsTail + `\s*$`)
 
 	// Fulltext index pattern - CREATE FULLTEXT INDEX name FOR (var:Label) ON EACH [props]
 	fulltextIndexPattern = regexp.MustCompile(`(?is)^\s*CREATE\s+FULLTEXT\s+INDEX\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ON\s+EACH\s+\[([^\]]+)\]` + ddlOptionsTail + `\s*$`)
