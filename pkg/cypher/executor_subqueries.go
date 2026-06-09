@@ -295,6 +295,31 @@ func (e *StorageExecutor) substituteBoundVariablesInCall(callPart string, nodeCo
 		}
 	}
 
+	// Procedures that accept a bound node variable as the first argument need
+	// the variable rewritten to a concrete node identifier before executeCall.
+	// Example:
+	//   CALL db.create.setNodeVectorProperty(n, 'emb', [..])
+	// -> CALL db.create.setNodeVectorProperty('node-id', 'emb', [..])
+	upper := strings.ToUpper(result)
+	procIdx := strings.Index(upper, "DB.CREATE.SETNODEVECTORPROPERTY")
+	if procIdx >= 0 {
+		openParen := strings.Index(result[procIdx:], "(")
+		if openParen >= 0 {
+			openParen += procIdx
+			closeParen := findMatchingCallParen(result, openParen)
+			if closeParen > openParen {
+				args := splitProcedureTopLevelComma(result[openParen+1 : closeParen])
+				if len(args) > 0 {
+					firstArg := strings.TrimSpace(args[0])
+					if node, ok := nodeContext[firstArg]; ok && node != nil {
+						args[0] = fmt.Sprintf("'%s'", node.ID)
+						result = result[:openParen+1] + strings.Join(args, ", ") + result[closeParen:]
+					}
+				}
+			}
+		}
+	}
+
 	return result
 }
 

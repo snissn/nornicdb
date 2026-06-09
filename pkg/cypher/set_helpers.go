@@ -70,6 +70,11 @@ import (
 //	// node.Properties["name"] = "Alice"
 //	// node.Properties["age"] = int64(30)
 func (e *StorageExecutor) applySetToNode(ctx context.Context, node *storage.Node, varName string, setClause string) {
+	// MERGE/CREATE pipelines can emit chained SET keywords:
+	// SET n:Label SET n = $map
+	// Normalize to comma-separated assignments before parsing.
+	setClause = collapseChainedSetClauses(setClause)
+
 	// Split SET clause into individual assignments, respecting parentheses and quotes
 	assignments := e.splitSetAssignments(setClause)
 

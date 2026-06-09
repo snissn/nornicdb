@@ -734,6 +734,20 @@ func isComparableConstraintValue(value interface{}) bool {
 	return reflect.TypeOf(value).Comparable()
 }
 
+func propertyIndexValueKey(value interface{}) (interface{}, bool) {
+	if numeric, ok := numericConstraintValue(value); ok {
+		return numeric, true
+	}
+	if value == nil {
+		return nil, false
+	}
+	t := reflect.TypeOf(value)
+	if t == nil || !t.Comparable() {
+		return nil, false
+	}
+	return value, true
+}
+
 // uniqueConstraintLockKey identifies one (label, property, value) triple for
 // the purpose of acquiring a commit-time mutex stripe. Two transactions whose
 // pending nodes touch the same (label, property, value) serialize at commit;
@@ -1841,10 +1855,17 @@ func (sm *SchemaManager) PropertyIndexInsert(label, property string, nodeID Node
 		idx.values = make(map[interface{}][]NodeID)
 	}
 
-	if _, exists := idx.values[value]; !exists {
+	valueKey, ok := propertyIndexValueKey(value)
+	if !ok {
+		// Ignore non-comparable values (maps/slices). These cannot be stored in
+		// Go map keys and must not crash index maintenance paths.
+		return nil
+	}
+
+	if _, exists := idx.values[valueKey]; !exists {
 		idx.keysDirty = true
 	}
-	idx.values[value] = append(idx.values[value], nodeID)
+	idx.values[valueKey] = append(idx.values[valueKey], nodeID)
 	return nil
 }
 
@@ -1861,7 +1882,12 @@ func (sm *SchemaManager) PropertyIndexDelete(label, property string, nodeID Node
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	if ids, ok := idx.values[value]; ok {
+	valueKey, ok := propertyIndexValueKey(value)
+	if !ok {
+		return nil
+	}
+
+	if ids, ok := idx.values[valueKey]; ok {
 		newIDs := make([]NodeID, 0, len(ids)-1)
 		for _, id := range ids {
 			if id != nodeID {
@@ -1869,9 +1895,9 @@ func (sm *SchemaManager) PropertyIndexDelete(label, property string, nodeID Node
 			}
 		}
 		if len(newIDs) > 0 {
-			idx.values[value] = newIDs
+			idx.values[valueKey] = newIDs
 		} else {
-			delete(idx.values, value)
+			delete(idx.values, valueKey)
 			idx.keysDirty = true
 		}
 	}
@@ -1918,7 +1944,12 @@ func (sm *SchemaManager) PropertyIndexLookup(label, property string, value inter
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	if ids, ok := idx.values[value]; ok {
+	valueKey, ok := propertyIndexValueKey(value)
+	if !ok {
+		return nil
+	}
+
+	if ids, ok := idx.values[valueKey]; ok {
 		// Return a copy to avoid mutation
 		result := make([]NodeID, len(ids))
 		copy(result, ids)

@@ -2012,6 +2012,7 @@ func (e *StorageExecutor) applySetToRelationshipWithContext(ctx context.Context,
 	fullRelContext[varName] = edge
 
 	propertiesSet := 0
+	setClause = collapseChainedSetClauses(setClause)
 	assignments := e.splitSetAssignments(setClause)
 	for _, assignment := range assignments {
 		assignment = strings.TrimSpace(assignment)
@@ -2111,6 +2112,8 @@ func (e *StorageExecutor) applySetToNodeWithContext(ctx context.Context, node *s
 		fullContext[k] = v
 	}
 	fullContext[varName] = node
+
+	setClause = collapseChainedSetClauses(setClause)
 
 	// Split SET clause into individual assignments
 	assignments := e.splitSetAssignments(setClause)

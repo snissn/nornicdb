@@ -138,6 +138,28 @@ func TestPropertyIndex_NumericValues(t *testing.T) {
 	}
 }
 
+func TestPropertyIndex_NonComparableValuesAreIgnored(t *testing.T) {
+	sm := NewSchemaManager()
+	err := sm.AddPropertyIndex("idx_doc_payload", "Doc", []string{"payload"})
+	if err != nil {
+		t.Fatalf("AddPropertyIndex failed: %v", err)
+	}
+
+	nonComparable := map[string]interface{}{"nested": "value"}
+	if err := sm.PropertyIndexInsert("Doc", "payload", "doc-1", nonComparable); err != nil {
+		t.Fatalf("PropertyIndexInsert should ignore non-comparable map values, got err: %v", err)
+	}
+
+	results := sm.PropertyIndexLookup("Doc", "payload", nonComparable)
+	if results != nil && len(results) != 0 {
+		t.Fatalf("expected no indexed rows for non-comparable value, got: %v", results)
+	}
+
+	if err := sm.PropertyIndexDelete("Doc", "payload", "doc-1", nonComparable); err != nil {
+		t.Fatalf("PropertyIndexDelete should ignore non-comparable map values, got err: %v", err)
+	}
+}
+
 func TestPropertyIndex_SortedKeyCacheInvalidation(t *testing.T) {
 	sm := NewSchemaManager()
 	err := sm.AddPropertyIndex("idx_src", "MongoDocument", []string{"sourceId"})
