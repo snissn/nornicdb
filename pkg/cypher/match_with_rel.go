@@ -771,6 +771,10 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 			if node, ok := val.(*storage.Node); ok {
 				return node.Properties[propName]
 			}
+			// Handle *storage.Edge (direct relationship reference)
+			if rel, ok := val.(*storage.Edge); ok {
+				return rel.Properties[propName]
+			}
 			// Handle map[string]interface{} (node converted to map)
 			if nodeMap, ok := val.(map[string]interface{}); ok {
 				// Check properties sub-map first
@@ -842,6 +846,9 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 				if node, ok := val.(*storage.Node); ok && node != nil {
 					return string(node.ID)
 				}
+				if rel, ok := val.(*storage.Edge); ok && rel != nil {
+					return string(rel.ID)
+				}
 				if nodeMap, ok := val.(map[string]interface{}); ok {
 					if id, ok := nodeMap["id"]; ok {
 						return id
@@ -851,6 +858,103 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 					}
 				}
 			}
+		}
+
+		if matchFuncStartAndSuffix(expr, "type") {
+			inner := strings.TrimSpace(extractFuncArgs(expr, "type"))
+			if val, ok := values[inner]; ok {
+				if rel, ok := val.(*storage.Edge); ok && rel != nil {
+					return rel.Type
+				}
+				if relMap, ok := val.(map[string]interface{}); ok {
+					if relType, ok := relMap["type"]; ok {
+						return relType
+					}
+				}
+			}
+			return nil
+		}
+
+		if matchFuncStartAndSuffix(expr, "properties") {
+			inner := strings.TrimSpace(extractFuncArgs(expr, "properties"))
+			if val, ok := values[inner]; ok {
+				if node, ok := val.(*storage.Node); ok && node != nil {
+					out := make(map[string]interface{}, len(node.Properties))
+					for k, v := range node.Properties {
+						out[k] = v
+					}
+					return out
+				}
+				if rel, ok := val.(*storage.Edge); ok && rel != nil {
+					out := make(map[string]interface{}, len(rel.Properties))
+					for k, v := range rel.Properties {
+						out[k] = v
+					}
+					return out
+				}
+				if m, ok := val.(map[string]interface{}); ok {
+					if props, ok := m["properties"].(map[string]interface{}); ok {
+						out := make(map[string]interface{}, len(props))
+						for k, v := range props {
+							out[k] = v
+						}
+						return out
+					}
+					out := make(map[string]interface{}, len(m))
+					for k, v := range m {
+						if strings.HasPrefix(k, "_") {
+							continue
+						}
+						out[k] = v
+					}
+					return out
+				}
+			}
+			return nil
+		}
+
+		if matchFuncStartAndSuffix(expr, "keys") {
+			inner := strings.TrimSpace(extractFuncArgs(expr, "keys"))
+			var keys []string
+			if val, ok := values[inner]; ok {
+				switch v := val.(type) {
+				case *storage.Node:
+					if v != nil {
+						keys = make([]string, 0, len(v.Properties))
+						for k := range v.Properties {
+							keys = append(keys, k)
+						}
+					}
+				case *storage.Edge:
+					if v != nil {
+						keys = make([]string, 0, len(v.Properties))
+						for k := range v.Properties {
+							keys = append(keys, k)
+						}
+					}
+				case map[string]interface{}:
+					if props, ok := v["properties"].(map[string]interface{}); ok {
+						keys = make([]string, 0, len(props))
+						for k := range props {
+							keys = append(keys, k)
+						}
+					} else {
+						keys = make([]string, 0, len(v))
+						for k := range v {
+							if strings.HasPrefix(k, "_") {
+								continue
+							}
+							keys = append(keys, k)
+						}
+					}
+				}
+			}
+			sort.Strings(keys)
+			result := make([]interface{}, len(keys))
+			for i, k := range keys {
+				result[i] = k
+			}
+			return result
 		}
 
 		// For labels(connected), we need to extract the node and get labels
@@ -977,6 +1081,26 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 					result[i] = nil
 				}
 				return result
+			}
+		}
+	}
+
+	// Final fallback: try evaluating with bound node/relationship variables.
+	// This covers function forms like properties(e) or type(e) after WITH projection.
+	nodes := make(map[string]*storage.Node)
+	rels := make(map[string]*storage.Edge)
+	for name, val := range values {
+		if n, ok := val.(*storage.Node); ok && n != nil {
+			nodes[name] = n
+		}
+		if r, ok := val.(*storage.Edge); ok && r != nil {
+			rels[name] = r
+		}
+	}
+	if len(nodes) > 0 || len(rels) > 0 {
+		if evaluated := e.evaluateExpressionWithContext(context.Background(), expr, nodes, rels); evaluated != nil {
+			if s, ok := evaluated.(string); !ok || s != expr {
+				return evaluated
 			}
 		}
 	}

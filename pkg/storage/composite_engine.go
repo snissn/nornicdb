@@ -1055,7 +1055,15 @@ func (c *CompositeEngine) GetSchema() *SchemaManager {
 						}
 					case "RANGE":
 						if label, ok := idxMap["label"].(string); ok {
-							if property, ok := idxMap["property"].(string); ok {
+							// Support both legacy scalar "property" and newer
+							// plural "properties" shapes from GetIndexes().
+							if properties, ok := idxMap["properties"].([]string); ok && len(properties) > 0 {
+								entityType := ConstraintEntityNode
+								if etRaw, ok := idxMap["entityType"].(string); ok && strings.EqualFold(etRaw, string(ConstraintEntityRelationship)) {
+									entityType = ConstraintEntityRelationship
+								}
+								_ = mergedSchema.AddRangeIndexForEntity(idxName, label, properties, entityType)
+							} else if property, ok := idxMap["property"].(string); ok {
 								_ = mergedSchema.AddRangeIndex(idxName, label, property)
 							}
 						}

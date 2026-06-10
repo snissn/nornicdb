@@ -666,3 +666,63 @@ func TestBug9_UnwindRelationshipVectorProcedure_NArityMatrix_NoSilentDropsOrErro
 		})
 	}
 }
+
+func TestBug10_RelationshipVariableSurvivesWithProjection(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+		CREATE (a:T {uuid:'a'})-[e:REL {uuid:'rel-1', name:'X', fact:'f'}]->(b:T {uuid:'b'})
+	`, nil)
+	require.NoError(t, err)
+
+	propAfterWith, err := exec.Execute(ctx, `
+		MATCH (n:T)-[e:REL]->(m:T)
+		WITH e
+		RETURN e.name AS a
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, propAfterWith.Rows, 1)
+	require.Len(t, propAfterWith.Rows[0], 1)
+	require.Equal(t, "X", propAfterWith.Rows[0][0], "relationship property access after WITH should evaluate against bound relationship var")
+
+	propAfterWithDistinct, err := exec.Execute(ctx, `
+		MATCH (n:T)-[e:REL]->(m:T)
+		WITH DISTINCT e
+		RETURN e.name AS a
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, propAfterWithDistinct.Rows, 1)
+	require.Len(t, propAfterWithDistinct.Rows[0], 1)
+	require.Equal(t, "X", propAfterWithDistinct.Rows[0][0], "DISTINCT should preserve relationship var binding")
+
+	propertiesAfterWith, err := exec.Execute(ctx, `
+		MATCH (n:T)-[e:REL]->(m:T)
+		WITH e
+		RETURN properties(e) AS a
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, propertiesAfterWith.Rows, 1)
+	require.Len(t, propertiesAfterWith.Rows[0], 1)
+	props, ok := propertiesAfterWith.Rows[0][0].(map[string]interface{})
+	require.True(t, ok, "properties(e) after WITH should return map, got %T", propertiesAfterWith.Rows[0][0])
+	require.Equal(t, "X", props["name"])
+	require.Equal(t, "f", props["fact"])
+	require.Equal(t, "rel-1", props["uuid"])
+
+	keysAfterWith, err := exec.Execute(ctx, `
+		MATCH (n:T)-[e:REL]->(m:T)
+		WITH e
+		RETURN keys(e) AS a
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, keysAfterWith.Rows, 1)
+	require.Len(t, keysAfterWith.Rows[0], 1)
+	keys, ok := keysAfterWith.Rows[0][0].([]interface{})
+	require.True(t, ok, "keys(e) after WITH should return key list, got %T", keysAfterWith.Rows[0][0])
+	assert.Contains(t, keys, "name")
+	assert.Contains(t, keys, "fact")
+	assert.Contains(t, keys, "uuid")
+}

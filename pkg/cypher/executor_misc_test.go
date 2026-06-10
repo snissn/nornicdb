@@ -2826,7 +2826,7 @@ func TestEvaluateExpressionFromValues_Branches(t *testing.T) {
 	require.Equal(t, "eng", exec.evaluateExpressionFromValues("m.title", values))
 	require.Equal(t, int64(2), exec.evaluateExpressionFromValues("length(path)", values))
 	require.Equal(t, int64(3), exec.evaluateExpressionFromValues("size(xs)", values))
-	require.Equal(t, int64(6), exec.evaluateExpressionFromValues("size('abcd')", values))
+	require.Equal(t, int64(4), exec.evaluateExpressionFromValues("size('abcd')", values))
 
 	labels := exec.evaluateExpressionFromValues("labels(n)", values)
 	require.NotNil(t, labels)

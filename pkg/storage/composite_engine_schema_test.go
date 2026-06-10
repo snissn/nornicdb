@@ -53,14 +53,18 @@ func TestCompositeEngine_GetSchema_MergesIndexes(t *testing.T) {
 
 	// Verify all indexes are merged
 	indexes := mergedSchema.GetIndexes()
-	require.GreaterOrEqual(t, len(indexes), 5) // At least 5 indexes
+	require.Len(t, indexes, 7, "composite merge should contain the exact union of constituent index names")
 
 	// Check for specific indexes
 	indexMap := make(map[string]bool)
+	typeMap := make(map[string]string)
 	for _, idx := range indexes {
 		if idxMap, ok := idx.(map[string]interface{}); ok {
 			if name, ok := idxMap["name"].(string); ok {
 				indexMap[name] = true
+				if idxType, ok := idxMap["type"].(string); ok {
+					typeMap[name] = idxType
+				}
 			}
 		}
 	}
@@ -73,6 +77,13 @@ func TestCompositeEngine_GetSchema_MergesIndexes(t *testing.T) {
 	assert.True(t, indexMap["idx_person_age"], "idx_person_age should be merged")
 	assert.True(t, indexMap["idx_company_name"], "idx_company_name should be merged")
 	assert.True(t, indexMap["idx_company_location"], "idx_company_location should be merged")
+	assert.Equal(t, "PROPERTY", typeMap["idx_person_name"])
+	assert.Equal(t, "COMPOSITE", typeMap["idx_person_location"])
+	assert.Equal(t, "FULLTEXT", typeMap["idx_person_fulltext"])
+	assert.Equal(t, "VECTOR", typeMap["idx_person_embedding"])
+	assert.Equal(t, "RANGE", typeMap["idx_person_age"])
+	assert.Equal(t, "PROPERTY", typeMap["idx_company_name"])
+	assert.Equal(t, "COMPOSITE", typeMap["idx_company_location"])
 }
 
 func TestCompositeEngine_GetSchema_DeduplicatesIndexes(t *testing.T) {
