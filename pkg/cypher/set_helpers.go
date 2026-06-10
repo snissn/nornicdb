@@ -458,9 +458,9 @@ func (e *StorageExecutor) evaluateSetExpression(expr string) interface{} {
 		return time.Now().UnixMilli()
 	}
 
-	// datetime() - returns ISO date string
+	// datetime() - returns typed datetime
 	if lowerExpr == "datetime()" {
-		return time.Now().Format(time.RFC3339)
+		return time.Now().UTC()
 	}
 
 	// randomUUID() or randomuuid()

@@ -1253,6 +1253,16 @@ func (sm *SchemaManager) AddVectorIndex(name, label, property string, dimensions
 
 // AddRangeIndex adds a range index for a single property.
 func (sm *SchemaManager) AddRangeIndex(name, label, property string) error {
+	return sm.AddRangeIndexForEntity(name, label, []string{property}, ConstraintEntityNode)
+}
+
+// AddRangeIndexForEntity adds a range index for NODE or RELATIONSHIP entities.
+// For standalone CREATE INDEX forms, properties may contain one or more fields.
+func (sm *SchemaManager) AddRangeIndexForEntity(name, label string, properties []string, entityType ConstraintEntityType) error {
+	if len(properties) == 0 {
+		return fmt.Errorf("range index requires at least one property")
+	}
+
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -1260,12 +1270,15 @@ func (sm *SchemaManager) AddRangeIndex(name, label, property string) error {
 		return nil // Already exists
 	}
 
+	propCopy := append([]string(nil), properties...)
 	sm.rangeIndexes[name] = &RangeIndex{
-		Name:      name,
-		Label:     label,
-		Property:  property,
-		entries:   make([]rangeEntry, 0),
-		nodeValue: make(map[NodeID]float64), // NodeID -> value
+		Name:       name,
+		Label:      label,
+		Property:   properties[0],
+		Properties: propCopy,
+		EntityType: entityType,
+		entries:    make([]rangeEntry, 0),
+		nodeValue:  make(map[NodeID]float64), // NodeID -> value
 	}
 
 	if sm.persist != nil {

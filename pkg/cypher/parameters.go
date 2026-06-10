@@ -53,6 +53,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // getParamKeys returns the keys from a parameter map as a slice.
@@ -323,6 +324,10 @@ func resolveContextPathRef(ctx context.Context, expr string) (interface{}, bool)
 func isCompositeParamValue(v interface{}) bool {
 	switch v.(type) {
 	case []string, []int, []int64, []float32, []float64:
+		return true
+	case time.Time, *time.Time:
+		// Keep temporal params as typed values so property parsing can bind them
+		// directly from context instead of stringifying via fmt.Sprintf("%v").
 		return true
 	default:
 		return false

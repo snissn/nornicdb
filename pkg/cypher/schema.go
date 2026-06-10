@@ -608,10 +608,14 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 		}
 
 		if parsed.isRelationship {
-			// Relationship property indexes are accepted for Neo4j compatibility.
-			// They are registered in schema metadata and currently do not require
-			// node backfill.
-			if err := e.storage.GetSchema().AddPropertyIndex(indexName, parsed.relationshipType, parsed.properties); err != nil {
+			// Relationship property indexes are persisted as relationship-scoped
+			// range metadata (Neo4j-compatible SHOW INDEXES shape).
+			if err := e.storage.GetSchema().AddRangeIndexForEntity(
+				indexName,
+				parsed.relationshipType,
+				parsed.properties,
+				storage.ConstraintEntityRelationship,
+			); err != nil {
 				return nil, err
 			}
 			return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil

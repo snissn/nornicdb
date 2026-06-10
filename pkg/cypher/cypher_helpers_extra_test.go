@@ -1680,7 +1680,7 @@ func TestCypherHelpers_EvaluateSetExpressionAndArraySuffix(t *testing.T) {
 	assert.Equal(t, []interface{}{}, exec.evaluateSetExpression("[]"))
 	assert.Equal(t, []interface{}{int64(1), "a", true}, exec.evaluateSetExpression("[1, 'a', true]"))
 	assert.IsType(t, int64(0), exec.evaluateSetExpression("timestamp()"))
-	assert.IsType(t, "", exec.evaluateSetExpression("datetime()"))
+	assert.IsType(t, time.Time{}, exec.evaluateSetExpression("datetime()"))
 	assert.IsType(t, "", exec.evaluateSetExpression("randomUUID()"))
 
 	collected := []interface{}{int64(1), int64(2), int64(3), int64(4)}

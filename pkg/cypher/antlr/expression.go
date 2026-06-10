@@ -1251,8 +1251,8 @@ func (e *ExpressionEvaluator) evaluateBuiltInFunction(name string, args []interf
 		return time.Now().Format("2006-01-02")
 
 	case "datetime":
-		// datetime() - returns current datetime as string
-		return time.Now().Format(time.RFC3339)
+		// datetime() - returns current datetime as typed value
+		return time.Now().UTC()
 
 	case "exists":
 		// exists(property) - returns true if property exists and is not null

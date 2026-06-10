@@ -51,10 +51,12 @@ func TestDatetimeFunction(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Query failed: %v", err)
 		}
-		got := result.Rows[0][0].(string)
-		// Should be in RFC3339 format
-		if _, err := time.Parse(time.RFC3339, got); err != nil {
-			t.Errorf("Invalid datetime format: %s", got)
+		got, ok := result.Rows[0][0].(time.Time)
+		if !ok {
+			t.Fatalf("Expected time.Time, got %T", result.Rows[0][0])
+		}
+		if got.IsZero() {
+			t.Fatalf("Expected non-zero datetime")
 		}
 	})
 
@@ -63,9 +65,12 @@ func TestDatetimeFunction(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Query failed: %v", err)
 		}
-		got := result.Rows[0][0].(string)
-		if !strings.HasPrefix(got, "2025-11-27T10:30:00") {
-			t.Errorf("Expected datetime to start with 2025-11-27T10:30:00, got %s", got)
+		got, ok := result.Rows[0][0].(time.Time)
+		if !ok {
+			t.Fatalf("Expected time.Time, got %T", result.Rows[0][0])
+		}
+		if got.UTC().Format(time.RFC3339) != "2025-11-27T10:30:00Z" {
+			t.Errorf("Expected 2025-11-27T10:30:00Z, got %s", got.UTC().Format(time.RFC3339))
 		}
 	})
 }

@@ -1167,15 +1167,18 @@ skipArrayIndexing:
 		return time.Now().UnixMilli()
 	}
 
-	// datetime() - current datetime as ISO 8601 string or parse from argument
+	// datetime() - current datetime as typed time.Time or parse from argument
 	if isFunctionCall(expr, "datetime") {
 		inner := strings.TrimSpace(expr[9 : len(expr)-1])
 		if inner == "" {
-			// No argument - return current datetime
-			return time.Now().Format(time.RFC3339)
+			// No argument - return current datetime (typed, not string)
+			return time.Now().UTC()
+		}
+		val := e.evaluateExpressionWithContext(ctx, inner, nodes, rels)
+		if dt, ok := val.(time.Time); ok {
+			return dt
 		}
 		// Try to parse argument as ISO 8601 string
-		val := e.evaluateExpressionWithContext(ctx, inner, nodes, rels)
 		if str, ok := val.(string); ok {
 			str = strings.Trim(str, "'\"")
 			// Try parsing various formats
@@ -1186,7 +1189,7 @@ skipArrayIndexing:
 				"2006-01-02",
 			} {
 				if t, err := time.Parse(layout, str); err == nil {
-					return t.Format(time.RFC3339)
+					return t
 				}
 			}
 		}

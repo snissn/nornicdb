@@ -797,7 +797,7 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 		if isFunctionCall(expr, "datetime") {
 			inner := strings.TrimSpace(expr[9 : len(expr)-1])
 			if inner == "" {
-				return time.Now().Format(time.RFC3339)
+				return time.Now().UTC()
 			}
 			val := e.evaluateExpressionFromValues(inner, values)
 			if literal, ok := val.(string); ok && literal == strings.TrimSpace(inner) {
@@ -808,6 +808,9 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 			if val == nil {
 				return nil
 			}
+			if dt, ok := val.(time.Time); ok {
+				return dt
+			}
 			if str, ok := val.(string); ok {
 				str = strings.Trim(str, "'\"")
 				for _, layout := range []string{
@@ -817,7 +820,7 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 					"2006-01-02",
 				} {
 					if t, err := time.Parse(layout, str); err == nil {
-						return t.Format(time.RFC3339)
+						return t
 					}
 				}
 			}

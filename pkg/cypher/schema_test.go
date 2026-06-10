@@ -1057,6 +1057,85 @@ func TestCreateIndex_RebuildsUsableEntriesAfterRestart(t *testing.T) {
 	require.Len(t, post, 1, "property index entries should remain usable after restart")
 }
 
+func TestCreateRelationshipIndex_PersistsAcrossRestart_E2E(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	base1, err := storage.NewBadgerEngine(dir)
+	require.NoError(t, err)
+	store1 := storage.NewNamespacedEngine(base1, "test")
+	exec1 := NewStorageExecutor(store1)
+
+	_, err = exec1.Execute(ctx, "CREATE (:Entity {uuid: 'a'})", nil)
+	require.NoError(t, err)
+	_, err = exec1.Execute(ctx, "CREATE (:Entity {uuid: 'b'})", nil)
+	require.NoError(t, err)
+	_, err = exec1.Execute(ctx, "MATCH (a:Entity {uuid:'a'}), (b:Entity {uuid:'b'}) CREATE (a)-[:RELATES_TO {uuid:'r1'}]->(b)", nil)
+	require.NoError(t, err)
+
+	const ddl = "CREATE INDEX rel_uuid_idx IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON (e.uuid)"
+	_, err = exec1.Execute(ctx, ddl, nil)
+	require.NoError(t, err)
+
+	findIndexRow := func(result *ExecuteResult, name string) map[string]interface{} {
+		for _, row := range result.Rows {
+			if len(row) != len(result.Columns) {
+				continue
+			}
+			rowMap := make(map[string]interface{}, len(result.Columns))
+			for i, col := range result.Columns {
+				rowMap[col] = row[i]
+			}
+			if n, _ := rowMap["name"].(string); n == name {
+				return rowMap
+			}
+		}
+		return nil
+	}
+
+	listHas := func(v interface{}, want string) bool {
+		switch vals := v.(type) {
+		case []string:
+			for _, s := range vals {
+				if s == want {
+					return true
+				}
+			}
+		case []interface{}:
+			for _, s := range vals {
+				if ss, ok := s.(string); ok && ss == want {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	show1, err := exec1.Execute(ctx, "SHOW INDEXES", nil)
+	require.NoError(t, err)
+	row1 := findIndexRow(show1, "rel_uuid_idx")
+	require.NotNil(t, row1, "expected rel_uuid_idx in SHOW INDEXES before restart")
+	require.Equal(t, "RELATIONSHIP", row1["entityType"])
+	require.True(t, listHas(row1["labelsOrTypes"], "RELATES_TO"), "expected RELATES_TO in labelsOrTypes, got %#v", row1["labelsOrTypes"])
+	require.True(t, listHas(row1["properties"], "uuid"), "expected uuid in properties, got %#v", row1["properties"])
+
+	require.NoError(t, base1.Close())
+
+	base2, err := storage.NewBadgerEngine(dir)
+	require.NoError(t, err)
+	defer base2.Close()
+	store2 := storage.NewNamespacedEngine(base2, "test")
+	exec2 := NewStorageExecutor(store2)
+
+	show2, err := exec2.Execute(ctx, "SHOW INDEXES", nil)
+	require.NoError(t, err)
+	row2 := findIndexRow(show2, "rel_uuid_idx")
+	require.NotNil(t, row2, "expected rel_uuid_idx in SHOW INDEXES after restart")
+	require.Equal(t, "RELATIONSHIP", row2["entityType"])
+	require.True(t, listHas(row2["labelsOrTypes"], "RELATES_TO"), "expected RELATES_TO in labelsOrTypes after restart, got %#v", row2["labelsOrTypes"])
+	require.True(t, listHas(row2["properties"], "uuid"), "expected uuid in properties after restart, got %#v", row2["properties"])
+}
+
 func TestCreateFulltextIndex_CompatSyntaxWithoutParenthesizedPattern(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
