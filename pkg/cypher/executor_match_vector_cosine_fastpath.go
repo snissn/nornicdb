@@ -89,6 +89,187 @@ func (e *StorageExecutor) tryFastPathMatchVectorCosine(ctx context.Context, cyph
 		return nil, false
 	}
 
+	nodeScores, ok := e.fetchCosineNodeScores(ctx, indexName, limit, queryExpr, orderDesc)
+	if !ok {
+		return nil, false
+	}
+
+	columns := make([]string, len(returnItems))
+	for i, item := range returnItems {
+		if item.alias != "" {
+			columns[i] = item.alias
+		} else {
+			columns[i] = item.expr
+		}
+	}
+
+	rows := make([][]interface{}, 0, len(nodeScores))
+	for _, hit := range nodeScores {
+		node := hit.node
+		score := hit.score
+		nodeCtx := map[string]*storage.Node{varName: node}
+		row := make([]interface{}, len(returnItems))
+		for i, item := range returnItems {
+			if i == cosineIdx {
+				row[i] = score
+				continue
+			}
+			row[i] = e.evaluateExpressionWithContext(ctx, item.expr, nodeCtx, nil)
+		}
+		rows = append(rows, row)
+	}
+
+	e.markCosineVectorIndexFastPathUsed()
+	return &ExecuteResult{Columns: columns, Rows: rows, Stats: &QueryStats{}}, true
+}
+
+// tryFastPathMatchWithVectorCosineProjection handles Graphiti-style projection shape:
+//
+//	MATCH (n:Label)
+//	WITH [DISTINCT] n, vector.similarity.cosine(n.<prop>, <query>) AS <scoreAlias>
+//	[WHERE <scoreAlias> <op> <number|$param>]
+//	RETURN ...
+//	ORDER BY <scoreAlias> DESC|ASC
+//	LIMIT <k>
+func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, bool) {
+	trimmed := strings.TrimSpace(cypher)
+	if !strings.HasPrefix(strings.TrimSpace(upperQuery), "MATCH") {
+		return nil, false
+	}
+	for _, kw := range []string{
+		"SKIP", "UNWIND", "OPTIONAL MATCH", "CALL",
+		"CREATE", "MERGE", "DELETE", "DETACH DELETE", "SET", "REMOVE", "UNION",
+	} {
+		if findKeywordIndex(trimmed, kw) > 0 {
+			return nil, false
+		}
+	}
+
+	withIdx := findKeywordIndex(trimmed, "WITH")
+	returnIdx := findKeywordIndex(trimmed, "RETURN")
+	orderIdx := findKeywordIndex(trimmed, "ORDER BY")
+	limitIdx := findKeywordIndex(trimmed, "LIMIT")
+	if withIdx <= 0 || returnIdx <= withIdx || orderIdx <= returnIdx || limitIdx <= orderIdx {
+		return nil, false
+	}
+	whereIdx := findKeywordIndex(trimmed, "WHERE")
+	if whereIdx > 0 && (whereIdx <= withIdx || whereIdx >= returnIdx) {
+		return nil, false
+	}
+
+	matchPart := strings.TrimSpace(trimmed[len("MATCH"):withIdx])
+	varName, labels, ok := parseSimpleMatchSingleNodePattern(matchPart)
+	if !ok || len(labels) != 1 {
+		return nil, false
+	}
+	label := labels[0]
+
+	withProjectionEnd := returnIdx
+	if whereIdx > withIdx {
+		withProjectionEnd = whereIdx
+	}
+	withProjection := strings.TrimSpace(trimmed[withIdx+len("WITH") : withProjectionEnd])
+	withProjection = trimOptionalDistinctPrefix(withProjection)
+	withItems := e.parseReturnItems(withProjection)
+	if len(withItems) < 2 {
+		return nil, false
+	}
+	if !withProjectionContainsVariable(withItems, varName) {
+		return nil, false
+	}
+
+	_, vectorProp, queryExpr, scoreRef, ok := parseCosineReturnShape(withItems, varName)
+	if !ok {
+		return nil, false
+	}
+	if scoreRef == "" {
+		return nil, false
+	}
+
+	scoreOp := ""
+	scoreCmp := float64(0)
+	if whereIdx > withIdx {
+		wherePart := strings.TrimSpace(trimmed[whereIdx+len("WHERE") : returnIdx])
+		op, cmp, ok := e.parseScoreComparisonPredicate(ctx, wherePart, scoreRef)
+		if !ok {
+			return nil, false
+		}
+		scoreOp = op
+		scoreCmp = cmp
+	}
+
+	returnPart := strings.TrimSpace(trimmed[returnIdx+len("RETURN") : orderIdx])
+	returnItems := e.parseReturnItems(returnPart)
+	if len(returnItems) == 0 {
+		return nil, false
+	}
+
+	orderPart := strings.TrimSpace(trimmed[orderIdx+len("ORDER BY") : limitIdx])
+	orderDesc, ok := parseOrderByScoreDirection(orderPart, scoreRef)
+	if !ok {
+		return nil, false
+	}
+
+	limitPart := strings.TrimSpace(trimmed[limitIdx+len("LIMIT"):])
+	limit, ok := parseFastPathLimit(ctx, limitPart)
+	if !ok || limit < 0 {
+		return nil, false
+	}
+
+	columns := make([]string, len(returnItems))
+	for i, item := range returnItems {
+		if item.alias != "" {
+			columns[i] = item.alias
+		} else {
+			columns[i] = item.expr
+		}
+	}
+	if limit == 0 {
+		e.markCosineVectorIndexFastPathUsed()
+		return &ExecuteResult{Columns: columns, Rows: [][]interface{}{}, Stats: &QueryStats{}}, true
+	}
+
+	indexName, hasIndex := findCosineVectorIndexName(e.storage.GetSchema(), label, vectorProp)
+	if !hasIndex {
+		return nil, false
+	}
+
+	nodeScores, ok := e.fetchCosineNodeScores(ctx, indexName, limit, queryExpr, orderDesc)
+	if !ok {
+		return nil, false
+	}
+
+	rows := make([][]interface{}, 0, len(nodeScores))
+	for _, hit := range nodeScores {
+		if scoreOp != "" && !compareScore(hit.score, scoreOp, scoreCmp) {
+			continue
+		}
+		nodeCtx := map[string]*storage.Node{varName: hit.node}
+		row := make([]interface{}, len(returnItems))
+		for i, item := range returnItems {
+			expr := strings.TrimSpace(item.expr)
+			if strings.EqualFold(expr, scoreRef) {
+				row[i] = hit.score
+				continue
+			}
+			row[i] = e.evaluateExpressionWithContext(ctx, item.expr, nodeCtx, nil)
+		}
+		rows = append(rows, row)
+		if len(rows) >= limit {
+			break
+		}
+	}
+
+	e.markCosineVectorIndexFastPathUsed()
+	return &ExecuteResult{Columns: columns, Rows: rows, Stats: &QueryStats{}}, true
+}
+
+type vectorNodeScore struct {
+	node  *storage.Node
+	score float64
+}
+
+func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName string, limit int, queryExpr string, orderDesc bool) ([]vectorNodeScore, bool) {
 	callQueryExpr := queryExpr
 	negateOutputScore := false
 	if !orderDesc {
@@ -108,20 +289,10 @@ func (e *StorageExecutor) tryFastPathMatchVectorCosine(ctx context.Context, cyph
 	)
 	callRes, err := e.callDbIndexVectorQueryNodes(ctx, callQuery)
 	if err != nil {
-		// Preserve existing behavior on query-shape mismatches/invalid params.
 		return nil, false
 	}
 
-	columns := make([]string, len(returnItems))
-	for i, item := range returnItems {
-		if item.alias != "" {
-			columns[i] = item.alias
-		} else {
-			columns[i] = item.expr
-		}
-	}
-
-	rows := make([][]interface{}, 0, len(callRes.Rows))
+	out := make([]vectorNodeScore, 0, len(callRes.Rows))
 	for _, hit := range callRes.Rows {
 		if len(hit) < 2 {
 			continue
@@ -130,29 +301,16 @@ func (e *StorageExecutor) tryFastPathMatchVectorCosine(ctx context.Context, cyph
 		if !ok || node == nil {
 			continue
 		}
-		score := hit[1]
+		score, ok := toFloat64(hit[1])
+		if !ok {
+			return nil, false
+		}
 		if negateOutputScore {
-			f, ok := toFloat64(score)
-			if !ok {
-				return nil, false
-			}
-			score = -f
+			score = -score
 		}
-
-		nodeCtx := map[string]*storage.Node{varName: node}
-		row := make([]interface{}, len(returnItems))
-		for i, item := range returnItems {
-			if i == cosineIdx {
-				row[i] = score
-				continue
-			}
-			row[i] = e.evaluateExpressionWithContext(ctx, item.expr, nodeCtx, nil)
-		}
-		rows = append(rows, row)
+		out = append(out, vectorNodeScore{node: node, score: score})
 	}
-
-	e.markCosineVectorIndexFastPathUsed()
-	return &ExecuteResult{Columns: columns, Rows: rows, Stats: &QueryStats{}}, true
+	return out, true
 }
 
 func parseCosineReturnShape(items []returnItem, varName string) (cosineIdx int, vectorProp string, queryExpr string, scoreRef string, ok bool) {
@@ -374,4 +532,102 @@ func formatInlineFloat32Vector(vec []float32) string {
 	}
 	b.WriteByte(']')
 	return b.String()
+}
+
+func trimOptionalDistinctPrefix(withClause string) string {
+	trimmed := strings.TrimSpace(withClause)
+	if len(trimmed) < len("DISTINCT ")+1 {
+		return trimmed
+	}
+	if strings.EqualFold(trimmed[:len("DISTINCT")], "DISTINCT") {
+		rest := strings.TrimSpace(trimmed[len("DISTINCT"):])
+		if rest != "" {
+			return rest
+		}
+	}
+	return trimmed
+}
+
+func withProjectionContainsVariable(items []returnItem, variable string) bool {
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.expr), variable) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *StorageExecutor) parseScoreComparisonPredicate(ctx context.Context, whereClause string, scoreAlias string) (string, float64, bool) {
+	clause := strings.TrimSpace(whereClause)
+	if clause == "" {
+		return "", 0, false
+	}
+	for _, kw := range []string{" AND ", " OR ", " NOT "} {
+		if topLevelKeywordIndex(clause, kw) >= 0 {
+			return "", 0, false
+		}
+	}
+
+	op := ""
+	opIdx := -1
+	for _, candidate := range []string{">=", "<=", ">", "<"} {
+		if idx := strings.Index(clause, candidate); idx > 0 {
+			op = candidate
+			opIdx = idx
+			break
+		}
+	}
+	if opIdx <= 0 {
+		return "", 0, false
+	}
+
+	left := strings.TrimSpace(clause[:opIdx])
+	right := strings.TrimSpace(clause[opIdx+len(op):])
+	if left == "" || right == "" {
+		return "", 0, false
+	}
+
+	normalizedOp := op
+	cmpExpr := ""
+	if strings.EqualFold(left, scoreAlias) {
+		cmpExpr = right
+	} else if strings.EqualFold(right, scoreAlias) {
+		cmpExpr = left
+		switch op {
+		case ">":
+			normalizedOp = "<"
+		case ">=":
+			normalizedOp = "<="
+		case "<":
+			normalizedOp = ">"
+		case "<=":
+			normalizedOp = ">="
+		default:
+			return "", 0, false
+		}
+	} else {
+		return "", 0, false
+	}
+
+	raw := e.parseValue(ctx, cmpExpr)
+	f, ok := toFloat64(raw)
+	if !ok {
+		return "", 0, false
+	}
+	return normalizedOp, f, true
+}
+
+func compareScore(score float64, op string, target float64) bool {
+	switch op {
+	case ">":
+		return score > target
+	case ">=":
+		return score >= target
+	case "<":
+		return score < target
+	case "<=":
+		return score <= target
+	default:
+		return false
+	}
 }

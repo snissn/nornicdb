@@ -1,0 +1,99 @@
+package cypher
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/require"
+)
+
+func TestE2E_VectorCosine_QueryShapes_StayOnIndexedPaths(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX chunk_emb_idx FOR (c:Chunk) ON (c.emb) OPTIONS {indexConfig: {`vector.dimensions`: 16, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	seedVec := func(i int) string {
+		vals := make([]float64, 16)
+		vals[i%16] = 1.0
+		return formatInlineFloat64Vector(vals)
+	}
+
+	for i := 0; i < 80; i++ {
+		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Chunk {uuid:'c-%d', group_id:'g', emb:%s})", i, seedVec(i)), nil)
+		require.NoError(t, err)
+	}
+
+	q := make([]float64, 16)
+	q[0] = 1.0
+	params := map[string]interface{}{"q": q, "g": "g", "lim": 5, "min": 0.1}
+
+	shapes := []struct {
+		name            string
+		query           string
+		requireFastPath bool
+	}{
+		{
+			name:            "V1 direct return cosine",
+			query:           "MATCH (c:Chunk) RETURN vector.similarity.cosine(c.emb,$q) AS s ORDER BY s DESC LIMIT 5",
+			requireFastPath: true,
+		},
+		{
+			name:            "V2 direct return cosine with where",
+			query:           "MATCH (c:Chunk) WHERE c.group_id=$g RETURN vector.similarity.cosine(c.emb,$q) AS s ORDER BY s DESC LIMIT 5",
+			requireFastPath: false,
+		},
+		{
+			name:            "V3 with projection cosine",
+			query:           "MATCH (c:Chunk) WITH c, vector.similarity.cosine(c.emb,$q) AS s RETURN c.uuid, s ORDER BY s DESC LIMIT 5",
+			requireFastPath: true,
+		},
+		{
+			name:            "V4 direct return cosine with parameterized limit",
+			query:           "MATCH (c:Chunk) RETURN vector.similarity.cosine(c.emb,$q) AS s ORDER BY s DESC LIMIT $lim",
+			requireFastPath: true,
+		},
+	}
+
+	for i, tc := range shapes {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Chunk {uuid:'invalidate-%d', group_id:'g', emb:%s})", i, seedVec(i+81)), nil)
+			require.NoError(t, err)
+
+			counting.allNodesCalls = 0
+			counting.labelCalls = 0
+			counting.streamNodesCalls = 0
+
+			res, err := exec.Execute(ctx, tc.query, params)
+			require.NoError(t, err)
+			require.NotNil(t, res)
+			require.NotEmpty(t, res.Rows)
+
+			trace := exec.LastHotPathTrace()
+			if tc.requireFastPath {
+				require.True(t, trace.CosineVectorIndexFastPath, "shape should route through cosine vector-index fast path")
+			}
+		})
+	}
+}
+
+func formatInlineFloat64Vector(vec []float64) string {
+	if len(vec) == 0 {
+		return "[]"
+	}
+	out := "["
+	for i, v := range vec {
+		if i > 0 {
+			out += ","
+		}
+		out += fmt.Sprintf("%.1f", v)
+	}
+	out += "]"
+	return out
+}

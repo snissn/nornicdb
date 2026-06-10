@@ -148,3 +148,91 @@ func TestMatchVectorCosineFastPath_AscendingOrderWithParamVector(t *testing.T) {
 	require.EqualValues(t, 0.0, res.Rows[1][1])
 	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
 }
+
+func TestMatchVectorCosineFastPath_WithProjectionShape_UsesVectorIndex(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX chunk_emb_idx FOR (c:Chunk) ON (c.emb) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	for _, q := range []string{
+		"CREATE (:Chunk {uuid:'c1', emb:[1.0,0.0,0.0], group_id:'g'})",
+		"CREATE (:Chunk {uuid:'c2', emb:[0.9,0.1,0.0], group_id:'g'})",
+		"CREATE (:Chunk {uuid:'c3', emb:[0.0,1.0,0.0], group_id:'g'})",
+	} {
+		_, err = exec.Execute(ctx, q, nil)
+		require.NoError(t, err)
+	}
+
+	query := `MATCH (c:Chunk)
+WITH c, vector.similarity.cosine(c.emb, $q) AS score
+WHERE score > $min
+RETURN c.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT $k`
+	_, err = exec.Execute(ctx, query+" /* warmup */", map[string]interface{}{
+		"q":   []float64{1.0, 0.0, 0.0},
+		"min": 0.2,
+		"k":   5,
+	})
+	require.NoError(t, err)
+	counting.allNodesCalls = 0
+	counting.labelCalls = 0
+	counting.streamNodesCalls = 0
+	res, err := exec.Execute(ctx, query, map[string]interface{}{
+		"q":   []float64{1.0, 0.0, 0.0},
+		"min": 0.2,
+		"k":   5,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 2)
+	require.Equal(t, "c1", res.Rows[0][0])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+	require.Equal(t, 0, counting.allNodesCalls)
+}
+
+func TestMatchVectorCosineFastPath_WithProjection_WriteThenSearchLoop_NoScanRegression(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX chunk_emb_idx FOR (c:Chunk) ON (c.emb) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Chunk {uuid:'seed', emb:[1.0,0.0,0.0], group_id:'g'})", nil)
+	require.NoError(t, err)
+
+	query := `MATCH (c:Chunk)
+WITH c, vector.similarity.cosine(c.emb, $q) AS score
+WHERE score > $min
+RETURN c.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT $k`
+	params := map[string]interface{}{
+		"q":   []float64{1.0, 0.0, 0.0},
+		"min": -1.0,
+		"k":   3,
+	}
+
+	_, err = exec.Execute(ctx, query+" /* warmup */", params)
+	require.NoError(t, err)
+	counting.allNodesCalls = 0
+	counting.labelCalls = 0
+	counting.streamNodesCalls = 0
+
+	for i := 0; i < 6; i++ {
+		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Chunk {uuid:'n-%d', emb:[1.0,0.0,0.0], group_id:'g'})", i), nil)
+		require.NoError(t, err)
+
+		res, err := exec.Execute(ctx, fmt.Sprintf("%s /* projection_loop_%d */", query, i), params)
+		require.NoError(t, err)
+		require.NotEmpty(t, res.Rows)
+		require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+	}
+
+	require.Equal(t, 0, counting.allNodesCalls)
+}
