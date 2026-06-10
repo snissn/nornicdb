@@ -98,16 +98,53 @@ func TestMatchVectorCosineFastPath_WriteThenSearchLoop_NoScanRegression(t *testi
 	require.Equal(t, 0, counting.streamNodesCalls, "write-then-search loop should not use stream-scan fallback")
 }
 
-func TestTryFastPathMatchVectorCosine_RejectsAscendingOrder(t *testing.T) {
+func TestTryFastPathMatchVectorCosine_HandlesAscendingOrder(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(ns)
 	ctx := context.Background()
 
-	_, handled := exec.tryFastPathMatchVectorCosine(
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX item_emb_idx FOR (n:Item) ON (n.emb) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Item {uuid:'best', emb:[1.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Item {uuid:'worst', emb:[-1.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+
+	result, handled := exec.tryFastPathMatchVectorCosine(
 		ctx,
 		"MATCH (n:Item) RETURN vector.similarity.cosine(n.emb, [1.0,0.0,0.0]) AS score ORDER BY score ASC LIMIT 5",
 		"MATCH (N:ITEM) RETURN VECTOR.SIMILARITY.COSINE(N.EMB, [1.0,0.0,0.0]) AS SCORE ORDER BY SCORE ASC LIMIT 5",
 	)
-	require.False(t, handled)
+	require.True(t, handled)
+	require.NotNil(t, result)
+	require.Len(t, result.Rows, 2)
+	require.EqualValues(t, -1.0, result.Rows[0][0])
+	require.EqualValues(t, 1.0, result.Rows[1][0])
+}
+
+func TestMatchVectorCosineFastPath_AscendingOrderWithParamVector(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX item_emb_idx FOR (n:Item) ON (n.emb) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Item {uuid:'a', emb:[1.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Item {uuid:'b', emb:[0.0,1.0,0.0]})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Item {uuid:'c', emb:[-1.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+
+	query := "MATCH (n:Item) RETURN n.uuid AS uuid, vector.similarity.cosine(n.emb, $q) AS score ORDER BY score ASC LIMIT 2"
+	res, err := exec.Execute(ctx, query, map[string]interface{}{"q": []float64{1.0, 0.0, 0.0}})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 2)
+	require.Equal(t, "c", res.Rows[0][0])
+	require.EqualValues(t, -1.0, res.Rows[0][1])
+	require.Equal(t, "b", res.Rows[1][0])
+	require.EqualValues(t, 0.0, res.Rows[1][1])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
 }

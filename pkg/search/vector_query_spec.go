@@ -118,7 +118,9 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 		overfetch = 20000
 	}
 
-	scored, err := pipeline.Search(ctx, queryEmbedding, overfetch, 0.0)
+	// Preserve full cosine range [-1, 1] so Cypher expression semantics can
+	// represent both nearest and farthest ordering correctly.
+	scored, err := pipeline.Search(ctx, queryEmbedding, overfetch, -1.0)
 	if err != nil {
 		if errors.Is(err, ErrDimensionMismatch) {
 			return nil, nil
@@ -165,7 +167,7 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 		}
 
 		// Apply Cypher precedence for selecting which vector represents this node.
-		bestScore := -1.0
+		bestScore := -2.0
 
 		if named := nodeMeta.named; named != nil {
 			if vecID, ok := named[vectorName]; ok {
@@ -175,7 +177,7 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 			}
 			// If there is no explicit Cypher property/index mapping (property key is empty),
 			// fall through to managed named embeddings (any key) before chunk fallback.
-			if bestScore < 0 && spec.Property == "" {
+			if bestScore < -1.0 && spec.Property == "" {
 				for _, vecID := range named {
 					if score, ok := s.scoreVectorIDDot(normalizedQuery, vecID); ok {
 						if score > bestScore {
@@ -186,7 +188,7 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 			}
 		}
 
-		if bestScore < 0 && spec.Property != "" {
+		if bestScore < -1.0 && spec.Property != "" {
 			if props := nodeMeta.props; props != nil {
 				if vecID, ok := props[spec.Property]; ok {
 					if score, ok := s.scoreVectorIDDot(normalizedQuery, vecID); ok {
@@ -196,7 +198,7 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 			}
 		}
 
-		if bestScore < 0 {
+		if bestScore < -1.0 {
 			for _, vecID := range nodeMeta.chunks {
 				if score, ok := s.scoreVectorIDDot(normalizedQuery, vecID); ok {
 					if score > bestScore {
@@ -206,7 +208,7 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 			}
 		}
 
-		if bestScore >= 0 {
+		if bestScore >= -1.0 {
 			out = append(out, scoredNode{id: nodeID, score: bestScore})
 		}
 	}

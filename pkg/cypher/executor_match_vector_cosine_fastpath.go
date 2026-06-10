@@ -61,7 +61,8 @@ func (e *StorageExecutor) tryFastPathMatchVectorCosine(ctx context.Context, cyph
 	}
 
 	orderPart := strings.TrimSpace(trimmed[orderIdx+len("ORDER BY") : limitIdx])
-	if !isDescendingOrderByScore(orderPart, scoreRef) {
+	orderDesc, ok := parseOrderByScoreDirection(orderPart, scoreRef)
+	if !ok {
 		return nil, false
 	}
 
@@ -88,11 +89,22 @@ func (e *StorageExecutor) tryFastPathMatchVectorCosine(ctx context.Context, cyph
 		return nil, false
 	}
 
+	callQueryExpr := queryExpr
+	negateOutputScore := false
+	if !orderDesc {
+		negatedExpr, ok := e.buildNegatedCosineQueryExpr(ctx, queryExpr)
+		if !ok {
+			return nil, false
+		}
+		callQueryExpr = negatedExpr
+		negateOutputScore = true
+	}
+
 	callQuery := fmt.Sprintf(
 		"CALL db.index.vector.queryNodes('%s', %d, %s) YIELD node, score",
 		strings.ReplaceAll(indexName, "'", "''"),
 		limit,
-		queryExpr,
+		callQueryExpr,
 	)
 	callRes, err := e.callDbIndexVectorQueryNodes(ctx, callQuery)
 	if err != nil {
@@ -119,6 +131,13 @@ func (e *StorageExecutor) tryFastPathMatchVectorCosine(ctx context.Context, cyph
 			continue
 		}
 		score := hit[1]
+		if negateOutputScore {
+			f, ok := toFloat64(score)
+			if !ok {
+				return nil, false
+			}
+			score = -f
+		}
 
 		nodeCtx := map[string]*storage.Node{varName: node}
 		row := make([]interface{}, len(returnItems))
@@ -206,22 +225,28 @@ func parseVarPropertyRef(expr string) (string, string, bool) {
 	return v, p, true
 }
 
-func isDescendingOrderByScore(orderPart string, scoreRef string) bool {
+func parseOrderByScoreDirection(orderPart string, scoreRef string) (bool, bool) {
 	terms := splitTopLevelComma(orderPart)
 	if len(terms) != 1 {
-		return false
+		return false, false
 	}
 	fields := strings.Fields(strings.TrimSpace(terms[0]))
 	if len(fields) == 0 || len(fields) > 2 {
-		return false
+		return false, false
 	}
 	if !strings.EqualFold(strings.TrimSpace(fields[0]), strings.TrimSpace(scoreRef)) {
-		return false
+		return false, false
 	}
 	if len(fields) == 1 {
-		return false
+		return true, true
 	}
-	return strings.EqualFold(fields[1], "DESC")
+	if strings.EqualFold(fields[1], "DESC") {
+		return true, true
+	}
+	if strings.EqualFold(fields[1], "ASC") {
+		return false, true
+	}
+	return false, false
 }
 
 func parseFastPathLimit(ctx context.Context, limitPart string) (int, bool) {
@@ -298,4 +323,55 @@ func findCosineVectorIndexName(schema *storage.SchemaManager, label string, prop
 	}
 	sort.Strings(matches)
 	return matches[0], true
+}
+
+func (e *StorageExecutor) buildNegatedCosineQueryExpr(ctx context.Context, queryExpr string) (string, bool) {
+	value := e.parseValue(ctx, strings.TrimSpace(queryExpr))
+	var vector []float32
+	switch v := value.(type) {
+	case []float32:
+		vector = append([]float32(nil), v...)
+	case []float64:
+		vector = make([]float32, len(v))
+		for i, val := range v {
+			vector[i] = float32(val)
+		}
+	case []interface{}:
+		vector = toFloat32Slice(v)
+	case string:
+		if strings.TrimSpace(v) == "" || e.embedder == nil {
+			return "", false
+		}
+		embedded, err := e.embedVectorQueryText(ctx, v)
+		if err != nil {
+			return "", false
+		}
+		vector = embedded
+	default:
+		vector = toFloat32Slice(value)
+	}
+	if len(vector) == 0 {
+		return "", false
+	}
+	for i := range vector {
+		vector[i] = -vector[i]
+	}
+	return formatInlineFloat32Vector(vector), true
+}
+
+func formatInlineFloat32Vector(vec []float32) string {
+	if len(vec) == 0 {
+		return "[]"
+	}
+	var b strings.Builder
+	b.Grow(len(vec) * 8)
+	b.WriteByte('[')
+	for i, v := range vec {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatFloat(float64(v), 'f', -1, 32))
+	}
+	b.WriteByte(']')
+	return b.String()
 }
