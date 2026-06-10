@@ -132,3 +132,49 @@ func TestAddConstraintContractBundle_Branches(t *testing.T) {
 	_, exists = sm.constraintContracts["c4"]
 	require.False(t, exists)
 }
+
+func TestConstraintContractExpressionComparisonParseErrors_Propagate(t *testing.T) {
+	t.Run("engine evaluator malformed literal", func(t *testing.T) {
+		eng := NewMemoryEngine()
+		node := &Node{ID: "test:n1", Labels: []string{"Person"}, Properties: map[string]any{"age": 10}}
+		_, err := evaluateNodeConstraintContractExpressionEngine(eng, node, "n.age >= [not_a_literal]")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unsupported literal")
+	})
+
+	t.Run("transaction evaluator malformed literal", func(t *testing.T) {
+		engine := newTestEngine(t)
+		tx, err := engine.BeginTransaction()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = tx.Rollback() })
+
+		node := &Node{ID: "test:n1", Labels: []string{"Person"}, Properties: map[string]any{"age": 10}}
+		ok, evalErr := tx.evaluateNodeConstraintContractExpressionLocked(node, "n.age >= [not_a_literal]")
+		require.False(t, ok)
+		require.Error(t, evalErr)
+		require.Contains(t, evalErr.Error(), "unsupported literal")
+	})
+}
+
+func TestNodeConstraintComparisonExpressions_EvaluatedInEngineAndTransaction(t *testing.T) {
+	t.Run("engine evaluator comparison", func(t *testing.T) {
+		eng := NewMemoryEngine()
+		node := &Node{ID: "test:n1", Labels: []string{"Person"}, Properties: map[string]any{"age": int64(10)}}
+
+		ok, err := evaluateNodeConstraintContractExpressionEngine(eng, node, "n.age >= 10")
+		require.NoError(t, err)
+		require.True(t, ok)
+	})
+
+	t.Run("transaction evaluator comparison", func(t *testing.T) {
+		engine := newTestEngine(t)
+		tx, err := engine.BeginTransaction()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = tx.Rollback() })
+
+		node := &Node{ID: "test:n1", Labels: []string{"Person"}, Properties: map[string]any{"age": int64(10)}}
+		ok, evalErr := tx.evaluateNodeConstraintContractExpressionLocked(node, "n.age >= 10")
+		require.NoError(t, evalErr)
+		require.True(t, ok)
+	})
+}

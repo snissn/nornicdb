@@ -66,6 +66,26 @@ func TestSchemaManagerPropertyIndexHelpers(t *testing.T) {
 	require.Nil(t, sm.PropertyIndexTopK("Missing", "rank", 1, false))
 }
 
+func TestSchemaManager_RemoveFromPropertyIndex_PartialRemovalRetainsBucket(t *testing.T) {
+	sm := NewSchemaManager()
+	require.NoError(t, sm.AddPropertyIndex("doc_rank", "Doc", []string{"rank"}))
+	require.NoError(t, sm.PropertyIndexInsert("Doc", "rank", "n1", int64(5)))
+	require.NoError(t, sm.PropertyIndexInsert("Doc", "rank", "n2", int64(5)))
+
+	require.NoError(t, sm.PropertyIndexDelete("Doc", "rank", "n1", int64(5)))
+
+	idx := sm.propertyIndexes["Doc:rank"]
+	require.NotNil(t, idx)
+	require.Equal(t, []NodeID{"n2"}, sm.PropertyIndexLookup("Doc", "rank", int64(5)))
+}
+
+func TestSchemaManager_AddRangeIndexForEntity_RejectsEmptyProperties(t *testing.T) {
+	sm := NewSchemaManager()
+	err := sm.AddRangeIndexForEntity("bad_range", "Person", nil, ConstraintEntityNode)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "range index requires at least one property")
+}
+
 func TestConstraintViolationErrorUnwrap(t *testing.T) {
 	cause := errors.New("peer committed first")
 	err := &ConstraintViolationError{

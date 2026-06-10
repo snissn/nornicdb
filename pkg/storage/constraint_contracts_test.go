@@ -813,9 +813,9 @@ func TestBadgerTransactionEvaluateConstraintContractExpressions(t *testing.T) {
 		t.Fatalf("expected node IN expression to fail without error, ok=%v err=%v", ok, err)
 	}
 
-	_, err = tx.evaluateNodeConstraintContractExpressionLocked(node, "n.status = 'active'")
-	if err == nil {
-		t.Fatal("expected unsupported node predicate error")
+	ok, err = tx.evaluateNodeConstraintContractExpressionLocked(node, "n.status = 'active'")
+	if err != nil || !ok {
+		t.Fatalf("expected node comparison expression to pass, ok=%v err=%v", ok, err)
 	}
 
 	edge := &Edge{ID: "tenant::e1", StartNode: "tenant::start", EndNode: "tenant::end", Properties: map[string]interface{}{"status": "open", "weight": 7}}

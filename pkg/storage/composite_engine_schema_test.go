@@ -288,3 +288,73 @@ func TestAnyToStringSlice_DeterministicAcrossShapes(t *testing.T) {
 		require.Nil(t, got)
 	})
 }
+
+func TestCompositeEngine_GetSchema_MergesRelationshipRangeIndexEntityType(t *testing.T) {
+	engine := NewMemoryEngine()
+	require.NoError(t, engine.GetSchema().AddRangeIndexForEntity(
+		"rel_range_idx",
+		"RELATES_TO",
+		[]string{"uuid"},
+		ConstraintEntityRelationship,
+	))
+
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine},
+		map[string]string{"db1": "db1"},
+		map[string]string{"db1": "read_write"},
+	)
+
+	indexes := composite.GetSchema().GetIndexes()
+	require.NotEmpty(t, indexes)
+
+	var found map[string]interface{}
+	for _, idx := range indexes {
+		idxMap, ok := idx.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, _ := idxMap["name"].(string); name == "rel_range_idx" {
+			found = idxMap
+			break
+		}
+	}
+	require.NotNil(t, found)
+	require.Equal(t, "RANGE", found["type"])
+	require.Equal(t, "RELATES_TO", found["label"])
+	require.Equal(t, string(ConstraintEntityRelationship), found["entityType"])
+	require.Equal(t, []string{"uuid"}, found["properties"])
+}
+
+func TestCompositeEngine_GetSchema_MergesLegacyScalarRangePropertyShape(t *testing.T) {
+	engine := NewMemoryEngine()
+	sm := engine.GetSchema()
+	require.NoError(t, sm.AddRangeIndex("legacy_range_idx", "Person", "age"))
+	// Force legacy export shape: scalar "property" only.
+	sm.mu.Lock()
+	sm.rangeIndexes["legacy_range_idx"].Properties = nil
+	sm.mu.Unlock()
+
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine},
+		map[string]string{"db1": "db1"},
+		map[string]string{"db1": "read_write"},
+	)
+
+	indexes := composite.GetSchema().GetIndexes()
+	require.NotEmpty(t, indexes)
+	var found map[string]interface{}
+	for _, idx := range indexes {
+		idxMap, ok := idx.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, _ := idxMap["name"].(string); name == "legacy_range_idx" {
+			found = idxMap
+			break
+		}
+	}
+	require.NotNil(t, found)
+	require.Equal(t, "RANGE", found["type"])
+	require.Equal(t, "Person", found["label"])
+	require.Equal(t, []string{"age"}, found["properties"])
+}

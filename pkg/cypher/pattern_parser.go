@@ -307,9 +307,6 @@ func (e *StorageExecutor) parsePropertyValue(ctx context.Context, valueStr strin
 	if v, ok := resolveDirectParamRef(ctx, valueStr); ok {
 		return normalizePropValue(v)
 	}
-	if v, ok := resolveContextPathRef(ctx, valueStr); ok {
-		return normalizePropValue(v)
-	}
 
 	// Handle null
 	if strings.EqualFold(valueStr, "null") {

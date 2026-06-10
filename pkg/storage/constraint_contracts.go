@@ -369,6 +369,12 @@ func evaluateNodeConstraintContractExpressionEngine(engine Engine, node *Node, e
 		return evaluatePropertyInExpression(node.Properties[property], values), nil
 	}
 
+	if matched, property, comparator, value, err := parseRelationshipPropertyComparisonExpression(expr); err != nil {
+		return false, err
+	} else if matched {
+		return compareConstraintExpressionValue(node.Properties[property], comparator, value), nil
+	}
+
 	if matched, pattern, comparator, threshold, err := parseCountPatternExpression(expr); err != nil {
 		return false, err
 	} else if matched {
@@ -1299,6 +1305,11 @@ func (tx *BadgerTransaction) evaluateNodeConstraintContractExpressionLocked(node
 		return false, err
 	} else if matched {
 		return evaluatePropertyInExpression(node.Properties[property], values), nil
+	}
+	if matched, property, comparator, value, err := parseRelationshipPropertyComparisonExpression(expr); err != nil {
+		return false, err
+	} else if matched {
+		return compareConstraintExpressionValue(node.Properties[property], comparator, value), nil
 	}
 	if matched, pattern, comparator, threshold, err := parseCountPatternExpression(expr); err != nil {
 		return false, err
