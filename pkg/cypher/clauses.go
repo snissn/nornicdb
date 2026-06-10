@@ -724,6 +724,72 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 					return fast, err
 				}
 			}
+			// MATCH-started mutation pipelines that carry row aliases through a
+			// trailing WITH (without nested UNWIND) must execute per-item with
+			// bound params to avoid re-entering the read-only MATCH fallback path.
+			if findKeywordIndexInContext(mutationPart, "WITH") >= 0 &&
+				findKeywordIndexInContext(mutationPart, "UNWIND") < 0 {
+				result := &ExecuteResult{
+					Columns: []string{},
+					Rows:    [][]interface{}{},
+					Stats:   &QueryStats{},
+				}
+				hasCall := findKeywordIndexInContext(mutationPart, "CALL") >= 0
+				withIdx := findKeywordIndexInContext(mutationPart, "WITH")
+				withPrefix := strings.TrimSpace(mutationPart)
+				if withIdx >= 0 {
+					withPrefix = strings.TrimSpace(mutationPart[:withIdx])
+				}
+				countAlias, countReturnOnly := parseUnwindBatchCountReturn(returnPart)
+				var processedRows int64
+				for _, item := range items {
+					fullQuery := mutationPart
+					if returnPart != "" {
+						fullQuery += " " + returnPart
+					}
+					var mutationResult *ExecuteResult
+					var err error
+					if hasCall {
+						callParams := make(map[string]interface{}, len(params)+1)
+						for k, v := range params {
+							callParams[k] = v
+						}
+						callParams[variable] = item
+						mutationResult, err = e.executeInternal(ctx, fullQuery, callParams)
+					} else if countReturnOnly {
+						substitutedMutation := e.replaceVariableInMutationQuery(withPrefix, variable, item)
+						mutationResult, err = e.executeInternal(ctx, substitutedMutation, params)
+						if err == nil {
+							processedRows++
+						}
+					} else {
+						substitutedMutation := e.replaceVariableInMutationQuery(mutationPart, variable, item)
+						substitutedFull := substitutedMutation
+						if returnPart != "" {
+							substitutedFull += " " + returnPart
+						}
+						mutationResult, err = e.executeInternal(ctx, substitutedFull, params)
+					}
+					if err != nil {
+						return nil, fmt.Errorf("UNWIND mutation failed: %w", err)
+					}
+					if mutationResult != nil && mutationResult.Stats != nil {
+						result.Stats.NodesCreated += mutationResult.Stats.NodesCreated
+						result.Stats.RelationshipsCreated += mutationResult.Stats.RelationshipsCreated
+					}
+					if mutationResult != nil && returnPart != "" && len(mutationResult.Rows) > 0 {
+						if len(result.Columns) == 0 {
+							result.Columns = mutationResult.Columns
+						}
+						result.Rows = append(result.Rows, mutationResult.Rows...)
+					}
+				}
+				if countReturnOnly {
+					result.Columns = []string{countAlias}
+					result.Rows = [][]interface{}{{processedRows}}
+				}
+				return result, nil
+			}
 		}
 		if strings.HasPrefix(upperRest, "CREATE") ||
 			strings.HasPrefix(upperRest, "MERGE") ||
@@ -776,8 +842,10 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 				// `{}` loses the property list the inner UNWIND needs.
 				trimmedMutation := strings.TrimSpace(mutationPart)
 				upperMutation := strings.ToUpper(trimmedMutation)
+				hasCallClause := findKeywordIndexInContext(mutationPart, "CALL") >= 0
+				matchStartedClause := strings.HasPrefix(upperMutation, "MATCH") || strings.HasPrefix(upperMutation, "OPTIONAL MATCH")
 				useParamExecution := strings.Contains(mutationPart, "+=") ||
-					findKeywordIndexInContext(mutationPart, "CALL") >= 0 ||
+					(hasCallClause && !matchStartedClause) ||
 					strings.HasPrefix(upperMutation, "OPTIONAL MATCH") ||
 					(findKeywordIndexInContext(mutationPart, "WITH") >= 0 &&
 						findKeywordIndexInContext(mutationPart, "UNWIND") >= 0)
@@ -919,7 +987,12 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 
 		for _, item := range items {
 			substitutedQuery := e.replaceVariableInQuery(normalizedRestQuery, variable, item)
-			subResult, err := e.Execute(ctx, substitutedQuery, params)
+			callParams := make(map[string]interface{}, len(params)+1)
+			for k, v := range params {
+				callParams[k] = v
+			}
+			callParams[variable] = item
+			subResult, err := e.Execute(ctx, substitutedQuery, callParams)
 			if err != nil {
 				return nil, fmt.Errorf("UNWIND MATCH failed: %w", err)
 			}
@@ -5214,12 +5287,14 @@ func (e *StorageExecutor) executeLoadCSV(ctx context.Context, cypher string) (*E
 // replaceVariableInQuery replaces all occurrences of a variable with its value in a query.
 func (e *StorageExecutor) replaceVariableInQuery(query string, variable string, value interface{}) string {
 	result := query
+	skipBareReplacement := false
 
 	// Handle property access patterns first (variable.property)
 	// For maps, replace variable.key with the actual value.
 	if valueMap, ok := toStringAnyMap(value); ok {
 		// Find all property access patterns
-		for key, propVal := range valueMap {
+		for _, key := range sortedMapKeysByDescendingLength(valueMap) {
+			propVal := valueMap[key]
 			propValStr := e.valueToLiteral(propVal)
 			pattern := variable + "." + key
 			result = strings.ReplaceAll(result, pattern, propValStr)
@@ -5237,10 +5312,13 @@ func (e *StorageExecutor) replaceVariableInQuery(query string, variable string, 
 	// injecting a full map literal breaks the parser because `{...}` is
 	// parsed as a node-property map.
 	if _, ok := toStringAnyMap(value); ok {
-		if findKeywordIndexInContext(query, "WITH") >= 0 ||
+		if findKeywordIndexInContext(query, "WITH") >= 0 &&
 			findKeywordIndexInContext(query, "UNWIND") >= 0 {
 			valueStr = "{}"
 		}
+	}
+	if skipBareReplacement {
+		return result
 	}
 	return replaceIdentifierOutsideQuotes(result, variable, valueStr)
 }
@@ -5252,9 +5330,11 @@ func (e *StorageExecutor) replaceVariableInQuery(query string, variable string, 
 func (e *StorageExecutor) replaceVariableInMutationQuery(query string, variable string, value interface{}) string {
 	result := query
 	valueStr := e.valueToLiteral(value)
+	skipBareReplacement := false
 
 	if valueMap, ok := toStringAnyMap(value); ok {
-		for key, propVal := range valueMap {
+		for _, key := range sortedMapKeysByDescendingLength(valueMap) {
+			propVal := valueMap[key]
 			propValStr := e.valueToLiteral(propVal)
 			pattern := variable + "." + key
 			result = strings.ReplaceAll(result, pattern, propValStr)
@@ -5266,13 +5346,33 @@ func (e *StorageExecutor) replaceVariableInMutationQuery(query string, variable 
 		// full map literal corrupts the query shape. Use an empty-map
 		// placeholder instead — the WITH/UNWIND bindings are recomputed by
 		// the executor anyway.
-		if findKeywordIndexInContext(query, "WITH") >= 0 ||
+		if findKeywordIndexInContext(query, "WITH") >= 0 &&
 			findKeywordIndexInContext(query, "UNWIND") >= 0 {
 			valueStr = "{}"
 		}
+		if findKeywordIndexInContext(query, "WITH") >= 0 &&
+			findKeywordIndexInContext(query, "UNWIND") < 0 {
+			skipBareReplacement = true
+		}
 	}
-
+	if skipBareReplacement {
+		return result
+	}
 	return replaceIdentifierOutsideQuotes(result, variable, valueStr)
+}
+
+func sortedMapKeysByDescendingLength(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		if len(keys[i]) == len(keys[j]) {
+			return keys[i] < keys[j]
+		}
+		return len(keys[i]) > len(keys[j])
+	})
+	return keys
 }
 
 func replaceIdentifierOutsideQuotes(input string, ident string, replacement string) string {

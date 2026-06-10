@@ -3,6 +3,7 @@ package bolt
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -1136,6 +1137,26 @@ func TestHandleHelloAuth(t *testing.T) {
 			t.Error("session should NOT be authenticated with unsupported scheme")
 		}
 	})
+}
+
+func TestHandleHello_IncludesUTCPatchMetadata(t *testing.T) {
+	auth := &mockBoltAuthenticator{}
+	conn := &mockConn{}
+	session := newTestSessionWithAuth(conn, &mockExecutor{}, auth, true, false)
+
+	err := session.handleHello(buildHelloMessage("basic", "admin", "admin"))
+	if err != nil {
+		t.Fatalf("handleHello error: %v", err)
+	}
+
+	// The SUCCESS metadata must advertise Bolt UTC temporal support so
+	// modern drivers hydrate DateTime values (0x49) correctly.
+	if !bytes.Contains(conn.writeData, []byte("patch_bolt")) {
+		t.Fatalf("HELLO SUCCESS missing patch_bolt metadata: %x", conn.writeData)
+	}
+	if !bytes.Contains(conn.writeData, []byte("utc")) {
+		t.Fatalf("HELLO SUCCESS missing utc patch value: %x", conn.writeData)
+	}
 }
 
 func TestHandleRunAuth(t *testing.T) {

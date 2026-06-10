@@ -1865,6 +1865,7 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 	store := e.getStorage(ctx)
 
 	returnIdx := findKeywordIndex(cypher, "RETURN")
+	withIdx := findKeywordIndexInContext(cypher, "WITH")
 
 	// Parse relationship pattern: (a)-[r:TYPE {props}]->(b)
 	// Extract start node, relationship, end node
@@ -1967,6 +1968,9 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 
 	if setIdx > 0 && relVar != "" {
 		setEnd := len(cypher)
+		if withIdx > setIdx && withIdx < setEnd {
+			setEnd = withIdx
+		}
 		if returnIdx > setIdx && returnIdx < setEnd {
 			setEnd = returnIdx
 		}

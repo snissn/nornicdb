@@ -147,6 +147,60 @@ CREATE (c)-[:PURCHASED]->(o)`
 	require.Equal(t, int64(30), purchased.Rows[0][0])
 }
 
+// TestNorthwindSeeder_OrdersPass1WithTrailingWithReturnCountHitsFastPath
+// verifies the same Pass 1 shape still hits the fast path when the query
+// carries a simple trailing WITH projection and count RETURN.
+func TestNorthwindSeeder_OrdersPass1WithTrailingWithReturnCountHitsFastPath(t *testing.T) {
+	exec := testutil.SetupTestExecutor(t)
+	ctx := context.Background()
+	_, err := exec.Execute(ctx,
+		"CREATE INDEX customer_id IF NOT EXISTS FOR (n:Customer) ON (n.customerID)", nil)
+	require.NoError(t, err)
+	for i := 1; i <= 8; i++ {
+		_, err := exec.Execute(ctx, fmt.Sprintf(
+			`CREATE (:Customer {customerID: %d, companyName: 'Cust%d'})`, i, i), nil)
+		require.NoError(t, err)
+	}
+
+	rows := make([]interface{}, 0, 30)
+	for i := 0; i < 30; i++ {
+		rows = append(rows, map[string]interface{}{
+			"orderID":     int64(10000 + i),
+			"customerID":  int64((i % 8) + 1),
+			"shipCity":    "TestCity",
+			"shipCountry": "US",
+			"orderDate":   int64(1700000000 + i*3600),
+			"notes":       "notes",
+		})
+	}
+
+	query := `
+UNWIND $rows AS row
+MATCH (c:Customer {customerID: row.customerID})
+CREATE (o:Order {orderID: row.orderID, shipCity: row.shipCity, shipCountry: row.shipCountry, orderDate: row.orderDate, notes: row.notes})
+CREATE (c)-[:PURCHASED]->(o)
+WITH o, row
+RETURN count(o) AS n`
+
+	res, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Equal(t, []string{"n"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(30), res.Rows[0][0])
+
+	trace := exec.LastHotPathTrace()
+	require.True(t, trace.UnwindMultiMatchCreateBatch,
+		"order pass-1 WITH/RETURN shape must hit UnwindMultiMatchCreateBatch; got trace=%+v", trace)
+
+	orders, err := exec.Execute(ctx, `MATCH (o:Order) RETURN count(o) AS n`, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(30), orders.Rows[0][0])
+
+	purchased, err := exec.Execute(ctx, `MATCH ()-[r:PURCHASED]->() RETURN count(r) AS n`, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(30), purchased.Rows[0][0])
+}
+
 // TestNorthwindSeeder_OrdersPass2HitsUnwindMultiMatchCreate verifies Pass 2
 // of the order seed (ORDERS edges via two independent MATCHes).
 func TestNorthwindSeeder_OrdersPass2HitsUnwindMultiMatchCreate(t *testing.T) {

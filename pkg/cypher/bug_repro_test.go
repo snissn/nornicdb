@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -411,4 +412,257 @@ func TestBug8_MatchUnwindCreateWithListPropertyPersistsAllRows(t *testing.T) {
 	require.Len(t, res.Rows, 1)
 	require.Len(t, res.Rows[0], 1)
 	assert.Equal(t, int64(3), res.Rows[0][0])
+}
+
+func TestBug8_MatchUnwindCreateWithListProperty_NArityMatrix(t *testing.T) {
+	testCases := []struct {
+		name          string
+		leadingMatchN int
+		rowCount      int
+		nestedVec     bool
+		extraListProp bool
+	}{
+		{name: "1match_1row_vec", leadingMatchN: 1, rowCount: 1},
+		{name: "1match_5rows_vec", leadingMatchN: 1, rowCount: 5},
+		{name: "2match_3rows_vec", leadingMatchN: 2, rowCount: 3},
+		{name: "2match_7rows_vec_and_tags", leadingMatchN: 2, rowCount: 7, extraListProp: true},
+		{name: "3match_4rows_nested_vec_and_tags", leadingMatchN: 3, rowCount: 4, nestedVec: true, extraListProp: true},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			baseStore := newTestMemoryEngine(t)
+			store := storage.NewNamespacedEngine(baseStore, "test")
+			exec := NewStorageExecutor(store)
+			ctx := context.Background()
+
+			_, err := exec.Execute(ctx, `CREATE (:Anchor {uuid:'a1'})`, nil)
+			require.NoError(t, err)
+			_, err = exec.Execute(ctx, `CREATE (:Anchor2 {uuid:'a2'})`, nil)
+			require.NoError(t, err)
+			_, err = exec.Execute(ctx, `CREATE (:Anchor3 {uuid:'a3'})`, nil)
+			require.NoError(t, err)
+
+			rows := make([]map[string]interface{}, 0, tc.rowCount)
+			for i := 0; i < tc.rowCount; i++ {
+				row := map[string]interface{}{
+					"id": fmt.Sprintf("r%d", i),
+					"vec": []interface{}{
+						float64(i) + 0.1,
+						float64(i) + 0.2,
+					},
+				}
+				if tc.nestedVec {
+					row["vec"] = []interface{}{
+						[]interface{}{float64(i) + 0.1, float64(i) + 0.2},
+						[]interface{}{float64(i) + 0.3, float64(i) + 0.4},
+					}
+				}
+				if tc.extraListProp {
+					row["tags"] = []interface{}{fmt.Sprintf("t%d", i), "shared"}
+				}
+				rows = append(rows, row)
+			}
+
+			leadingMatches := "MATCH (x:Anchor {uuid:'a1'})"
+			if tc.leadingMatchN >= 2 {
+				leadingMatches += "\nMATCH (y:Anchor2 {uuid:'a2'})"
+			}
+			if tc.leadingMatchN >= 3 {
+				leadingMatches += "\nMATCH (z:Anchor3 {uuid:'a3'})"
+			}
+
+			createMap := "id:r.id, vec:r.vec"
+			if tc.extraListProp {
+				createMap += ", tags:r.tags"
+			}
+
+			query := fmt.Sprintf(`
+				%s
+				UNWIND $rows AS r
+				CREATE (c:Item { %s })
+			`, leadingMatches, createMap)
+
+			_, err = exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+			require.NoError(t, err)
+
+			countRes, err := exec.Execute(ctx, `MATCH (c:Item) RETURN count(c) AS n`, nil)
+			require.NoError(t, err)
+			require.Len(t, countRes.Rows, 1)
+			require.Len(t, countRes.Rows[0], 1)
+			assert.Equal(t, int64(tc.rowCount), countRes.Rows[0][0], "row cardinality must be preserved across MATCH+UNWIND+CREATE with list-valued properties")
+
+			idRes, err := exec.Execute(ctx, `MATCH (c:Item) RETURN count(DISTINCT c.id) AS n`, nil)
+			require.NoError(t, err)
+			require.Len(t, idRes.Rows, 1)
+			require.Len(t, idRes.Rows[0], 1)
+			assert.Equal(t, int64(tc.rowCount), idRes.Rows[0][0], "created rows should remain one-per-unwind-item")
+		})
+	}
+}
+
+func TestBug9_UnwindRelationshipMergeSetWithInlineVectorProcedurePreservesProperties(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE (:Entity {uuid:'ia'})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (:Entity {uuid:'ib'})`, nil)
+	require.NoError(t, err)
+
+	params := map[string]interface{}{
+		"entity_edges": []map[string]interface{}{
+			{
+				"source_node_uuid": "ia",
+				"target_node_uuid": "ib",
+				"uuid":             "e1",
+				"name":             "DIRECTED",
+				"fact":             "A directed B",
+				"group_id":         "g",
+				"fact_embedding":   []interface{}{0.1, 0.2, 0.3},
+			},
+		},
+	}
+	writeRes, err := exec.Execute(ctx, `
+		UNWIND $entity_edges AS edge
+		MATCH (source:Entity {uuid: edge.source_node_uuid})
+		MATCH (target:Entity {uuid: edge.target_node_uuid})
+		MERGE (source)-[e:RELATES_TO {uuid: edge.uuid}]->(target)
+		SET e = edge
+		WITH e, edge
+		CALL db.create.setRelationshipVectorProperty(e, "fact_embedding", edge.fact_embedding)
+		RETURN edge.uuid AS uuid
+	`, params)
+	require.NoError(t, err)
+	_ = writeRes
+
+	check, err := exec.Execute(ctx, `
+		MATCH (:Entity {uuid:'ia'})-[e:RELATES_TO {uuid:'e1'}]->(:Entity {uuid:'ib'})
+		RETURN e.name AS name, e.fact AS fact, e.group_id AS group_id, e.source_node_uuid AS src, e.target_node_uuid AS dst, e.fact_embedding AS emb
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, check.Rows, 1)
+	require.Len(t, check.Rows[0], 6)
+	assert.Equal(t, "DIRECTED", check.Rows[0][0])
+	assert.Equal(t, "A directed B", check.Rows[0][1])
+	assert.Equal(t, "g", check.Rows[0][2])
+	assert.Equal(t, "ia", check.Rows[0][3])
+	assert.Equal(t, "ib", check.Rows[0][4])
+	assert.NotNil(t, check.Rows[0][5], "fact_embedding should remain present after inline vector procedure")
+}
+
+func TestBug9_UnwindRelationshipVectorProcedure_NArityMatrix_NoSilentDropsOrErrors(t *testing.T) {
+	testCases := []struct {
+		name         string
+		rowCount     int
+		includeTags  bool
+		includeMeta  bool
+		nestedVector bool
+	}{
+		{name: "1row_base", rowCount: 1},
+		{name: "3rows_with_tags", rowCount: 3, includeTags: true},
+		{name: "7rows_with_tags_and_meta", rowCount: 7, includeTags: true, includeMeta: true},
+		{name: "9rows_nested_vector_and_meta", rowCount: 9, includeMeta: true, nestedVector: true},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			baseStore := newTestMemoryEngine(t)
+			store := storage.NewNamespacedEngine(baseStore, "test")
+			exec := NewStorageExecutor(store)
+			ctx := context.Background()
+
+			// Build per-row source/target endpoints so each row has a unique
+			// relationship identity in this engine's MERGE path.
+			for i := 0; i < tc.rowCount; i++ {
+				_, err := exec.Execute(ctx,
+					fmt.Sprintf(`CREATE (:Entity {uuid:'s%d'})`, i),
+					nil,
+				)
+				require.NoError(t, err)
+				_, err = exec.Execute(ctx,
+					fmt.Sprintf(`CREATE (:Entity {uuid:'t%d'})`, i),
+					nil,
+				)
+				require.NoError(t, err)
+			}
+
+			edges := make([]map[string]interface{}, 0, tc.rowCount)
+			for i := 0; i < tc.rowCount; i++ {
+				edge := map[string]interface{}{
+					"source_node_uuid": fmt.Sprintf("s%d", i),
+					"target_node_uuid": fmt.Sprintf("t%d", i),
+					"uuid":             fmt.Sprintf("e%d", i),
+					"name":             "DIRECTED",
+					"fact":             fmt.Sprintf("fact-%d", i),
+					"group_id":         fmt.Sprintf("g%d", i%2),
+					"fact_embedding":   []interface{}{float64(i) + 0.1, float64(i) + 0.2, float64(i) + 0.3},
+				}
+				if tc.nestedVector {
+					edge["fact_embedding"] = []interface{}{
+						[]interface{}{float64(i) + 0.1, float64(i) + 0.2},
+						[]interface{}{float64(i) + 0.3, float64(i) + 0.4},
+					}
+				}
+				if tc.includeTags {
+					edge["tags"] = []interface{}{fmt.Sprintf("tag-%d", i), "shared"}
+				}
+				if tc.includeMeta {
+					edge["meta"] = map[string]interface{}{
+						"ordinal": int64(i),
+						"kind":    "edge",
+					}
+				}
+				edges = append(edges, edge)
+			}
+
+			writeRes, err := exec.Execute(ctx, `
+				UNWIND $entity_edges AS edge
+				MATCH (source:Entity {uuid: edge.source_node_uuid})
+				MATCH (target:Entity {uuid: edge.target_node_uuid})
+				MERGE (source)-[e:RELATES_TO {uuid: edge.uuid}]->(target)
+				SET e = edge
+				WITH e, edge
+				CALL db.create.setRelationshipVectorProperty(e, "fact_embedding", edge.fact_embedding)
+				RETURN edge.uuid AS uuid
+			`, map[string]interface{}{"entity_edges": edges})
+			require.NoError(t, err, "matrix case should not fail at execution time")
+			require.Len(t, writeRes.Rows, tc.rowCount, "each input row should return one uuid")
+
+			countRes, err := exec.Execute(ctx, `MATCH ()-[e:RELATES_TO]->() RETURN count(e) AS n`, nil)
+			require.NoError(t, err)
+			require.Len(t, countRes.Rows, 1)
+			require.Len(t, countRes.Rows[0], 1)
+			assert.Equal(t, int64(tc.rowCount), countRes.Rows[0][0], "relationship row cardinality must be preserved")
+
+			for i := 0; i < tc.rowCount; i++ {
+				inspect, err := exec.Execute(ctx, fmt.Sprintf(`
+						MATCH ()-[e:RELATES_TO]->()
+						WHERE e.uuid = 'e%d'
+						RETURN e.name AS name, e.fact AS fact, e.group_id AS gid, e.source_node_uuid AS src, e.target_node_uuid AS dst, e.fact_embedding AS emb, e.tags AS tags, e.meta AS meta
+					`, i), nil)
+				require.NoError(t, err)
+				require.Len(t, inspect.Rows, 1, "edge e%d should exist", i)
+				row := inspect.Rows[0]
+				require.Len(t, row, 8)
+
+				assert.Equal(t, "DIRECTED", row[0], "edge e%d name should persist", i)
+				assert.Equal(t, fmt.Sprintf("fact-%d", i), row[1], "edge e%d fact should persist", i)
+				assert.Equal(t, fmt.Sprintf("g%d", i%2), row[2], "edge e%d group_id should persist", i)
+				assert.Equal(t, fmt.Sprintf("s%d", i), row[3], "edge e%d source_node_uuid should persist", i)
+				assert.Equal(t, fmt.Sprintf("t%d", i), row[4], "edge e%d target_node_uuid should persist", i)
+				assert.NotNil(t, row[5], "edge e%d embedding should remain present", i)
+				if tc.includeTags {
+					assert.NotNil(t, row[6], "edge e%d tags should remain present", i)
+				}
+				if tc.includeMeta {
+					assert.NotNil(t, row[7], "edge e%d meta should remain present", i)
+				}
+			}
+		})
+	}
 }

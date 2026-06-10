@@ -133,3 +133,15 @@ func TestBuildPropsFromSpecAndIndexMatchingParen(t *testing.T) {
 	require.Equal(t, -1, indexMatchingParen("a(b)"))
 	require.Equal(t, -1, indexMatchingParen("(a(b)"))
 }
+
+func TestIsSimpleWithPassthroughClause(t *testing.T) {
+	require.True(t, isSimpleWithPassthroughClause("o, row"))
+	require.True(t, isSimpleWithPassthroughClause("o AS keep, row AS source"))
+	require.True(t, isSimpleWithPassthroughClause("o,row"))
+
+	require.False(t, isSimpleWithPassthroughClause(""))
+	require.False(t, isSimpleWithPassthroughClause("o,"))
+	require.False(t, isSimpleWithPassthroughClause("o, row.products"))
+	require.False(t, isSimpleWithPassthroughClause("o, toString(row.id) AS s"))
+	require.False(t, isSimpleWithPassthroughClause("o + 1 AS x"))
+}

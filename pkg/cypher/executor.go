@@ -2938,6 +2938,16 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		if callIdx > 0 {
 			callPart := strings.TrimSpace(cypher[callIdx:])
 			if !isCallSubquery(callPart) {
+				prefix := cypher[:callIdx]
+				hasMutationBeforeCall := findKeywordIndexInContext(prefix, "MERGE") >= 0 ||
+					findKeywordIndexInContext(prefix, "CREATE") >= 0 ||
+					findKeywordIndexInContext(prefix, "SET") >= 0 ||
+					findKeywordIndexInContext(prefix, "DELETE") >= 0 ||
+					findKeywordIndexInContext(prefix, "DETACH DELETE") >= 0 ||
+					findKeywordIndexInContext(prefix, "REMOVE") >= 0
+				if hasMutationBeforeCall {
+					goto skipMatchCallRoute
+				}
 				if findKeywordIndex(cypher[:callIdx], "WITH") > 0 {
 					return e.executeMatchWithClause(ctx, cypher)
 				}
@@ -2945,6 +2955,7 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 			}
 		}
 	}
+skipMatchCallRoute:
 
 	// MERGE queries get special handling - they have their own ON CREATE SET / ON MATCH SET logic
 	if startsWithMerge {

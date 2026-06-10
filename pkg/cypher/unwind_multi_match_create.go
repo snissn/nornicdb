@@ -79,10 +79,34 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 	if trimmed == "" {
 		return nil, false, nil
 	}
-	upper := strings.ToUpper(trimmed)
-	// RETURN / WITH / nested UNWIND / SET / MERGE / DELETE / REMOVE / FOREACH
-	// disqualify this fast path. The router has other paths for those.
-	disqualifiers := []string{"RETURN", "WITH", "SET", "MERGE", "DELETE", "REMOVE", "FOREACH", "OPTIONAL MATCH"}
+
+	mutationPart := trimmed
+	returnPart := ""
+	countAlias := ""
+	if returnIdx := findKeywordIndexInContext(trimmed, "RETURN"); returnIdx >= 0 {
+		mutationPart = strings.TrimSpace(trimmed[:returnIdx])
+		returnPart = strings.TrimSpace(trimmed[returnIdx:])
+		alias, ok := parseUnwindBatchCountReturn(returnPart)
+		if !ok {
+			return nil, false, nil
+		}
+		countAlias = alias
+	}
+	if withIdx := findKeywordIndexInContext(mutationPart, "WITH"); withIdx >= 0 {
+		withClause := strings.TrimSpace(mutationPart[withIdx+len("WITH"):])
+		if !isSimpleWithPassthroughClause(withClause) {
+			return nil, false, nil
+		}
+		mutationPart = strings.TrimSpace(mutationPart[:withIdx])
+	}
+	if mutationPart == "" {
+		return nil, false, nil
+	}
+
+	upper := strings.ToUpper(mutationPart)
+	// nested UNWIND / SET / MERGE / DELETE / REMOVE / FOREACH disqualify
+	// this fast path. RETURN and a simple passthrough WITH are handled above.
+	disqualifiers := []string{"SET", "MERGE", "DELETE", "REMOVE", "FOREACH", "OPTIONAL MATCH"}
 	for _, d := range disqualifiers {
 		if findKeywordIndex(upper, d) >= 0 {
 			return nil, false, nil
@@ -93,7 +117,7 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 		return nil, false, nil
 	}
 
-	plan, ok := parseUnwindMultiMatchCreatePlan(restQuery, unwindVar)
+	plan, ok := parseUnwindMultiMatchCreatePlan(mutationPart, unwindVar)
 	if !ok {
 		return nil, false, nil
 	}
@@ -104,6 +128,7 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	processedRows := 0
 
 	// Collect all nodes and edges across every row, then issue two bulk
 	// storage calls. On Badger+WAL+Async this collapses N*(WAL fsync +
@@ -191,8 +216,13 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 	}
 
 	for _, row := range rows {
+		prevNodes := len(pendingNodes)
+		prevEdges := len(pendingEdges)
 		if err := e.planUnwindMultiMatchCreateRowIndexed(plan, row, batchIndex, &pendingNodes, &pendingEdges); err != nil {
 			return nil, true, err
+		}
+		if len(pendingNodes) > prevNodes || len(pendingEdges) > prevEdges {
+			processedRows++
 		}
 	}
 
@@ -210,7 +240,41 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 	}
 
 	e.markUnwindMultiMatchCreateBatchUsed()
+	if countAlias != "" {
+		result.Columns = []string{countAlias}
+		result.Rows = [][]interface{}{{int64(processedRows)}}
+	}
 	return result, true, nil
+}
+
+func isSimpleWithPassthroughClause(clause string) bool {
+	trimmed := strings.TrimSpace(clause)
+	if trimmed == "" || strings.HasPrefix(trimmed, ",") || strings.HasSuffix(trimmed, ",") {
+		return false
+	}
+	parts := splitTopLevelComma(clause)
+	if len(parts) == 0 {
+		return false
+	}
+	for _, raw := range parts {
+		token := strings.TrimSpace(raw)
+		if token == "" {
+			return false
+		}
+		asIdx := findKeywordIndexInContext(token, "AS")
+		if asIdx >= 0 {
+			lhs := strings.TrimSpace(token[:asIdx])
+			rhs := strings.TrimSpace(token[asIdx+2:])
+			if !isSimpleIdentifier(lhs) || !isSimpleIdentifier(rhs) {
+				return false
+			}
+			continue
+		}
+		if !isSimpleIdentifier(token) {
+			return false
+		}
+	}
+	return true
 }
 
 // planUnwindMultiMatchCreateRowIndexed resolves row-bound MATCH targets
