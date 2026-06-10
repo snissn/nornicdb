@@ -271,3 +271,20 @@ func TestCompositeEngine_GetSchema_AllIndexTypes(t *testing.T) {
 	assert.Equal(t, 1, typeCounts["VECTOR"], "Should have 1 vector index")
 	assert.Equal(t, 1, typeCounts["RANGE"], "Should have 1 range index")
 }
+
+func TestAnyToStringSlice_DeterministicAcrossShapes(t *testing.T) {
+	t.Run("native string slice", func(t *testing.T) {
+		got := anyToStringSlice([]string{"a", "b", "", "  "})
+		require.Equal(t, []string{"a", "b"}, got)
+	})
+
+	t.Run("interface slice from generic decode", func(t *testing.T) {
+		got := anyToStringSlice([]interface{}{"a", "b", 7, nil, ""})
+		require.Equal(t, []string{"a", "b"}, got)
+	})
+
+	t.Run("unsupported shape", func(t *testing.T) {
+		got := anyToStringSlice(map[string]interface{}{"a": 1})
+		require.Nil(t, got)
+	})
+}

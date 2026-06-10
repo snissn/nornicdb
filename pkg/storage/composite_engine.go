@@ -39,6 +39,29 @@ type CompositeEngine struct {
 	mu sync.RWMutex
 }
 
+func anyToStringSlice(raw interface{}) []string {
+	switch v := raw.(type) {
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, s := range v {
+			if strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 // NewCompositeEngine creates a new composite engine that spans multiple constituent databases.
 //
 // Parameters:
@@ -1021,21 +1044,23 @@ func (c *CompositeEngine) GetSchema() *SchemaManager {
 					switch idxType {
 					case "PROPERTY":
 						if label, ok := idxMap["label"].(string); ok {
-							if properties, ok := idxMap["properties"].([]string); ok && len(properties) > 0 {
+							properties := anyToStringSlice(idxMap["properties"])
+							if len(properties) > 0 {
 								_ = mergedSchema.AddPropertyIndex(idxName, label, properties)
 							}
 						}
 					case "COMPOSITE":
 						if label, ok := idxMap["label"].(string); ok {
-							if properties, ok := idxMap["properties"].([]string); ok && len(properties) >= 2 {
+							properties := anyToStringSlice(idxMap["properties"])
+							if len(properties) >= 2 {
 								_ = mergedSchema.AddCompositeIndex(idxName, label, properties)
 							}
 						}
 					case "FULLTEXT":
-						if labels, ok := idxMap["labels"].([]string); ok {
-							if properties, ok := idxMap["properties"].([]string); ok {
-								_ = mergedSchema.AddFulltextIndex(idxName, labels, properties)
-							}
+						labels := anyToStringSlice(idxMap["labels"])
+						properties := anyToStringSlice(idxMap["properties"])
+						if len(labels) > 0 && len(properties) > 0 {
+							_ = mergedSchema.AddFulltextIndex(idxName, labels, properties)
 						}
 					case "VECTOR":
 						if label, ok := idxMap["label"].(string); ok {
@@ -1057,7 +1082,7 @@ func (c *CompositeEngine) GetSchema() *SchemaManager {
 						if label, ok := idxMap["label"].(string); ok {
 							// Support both legacy scalar "property" and newer
 							// plural "properties" shapes from GetIndexes().
-							if properties, ok := idxMap["properties"].([]string); ok && len(properties) > 0 {
+							if properties := anyToStringSlice(idxMap["properties"]); len(properties) > 0 {
 								entityType := ConstraintEntityNode
 								if etRaw, ok := idxMap["entityType"].(string); ok && strings.EqualFold(etRaw, string(ConstraintEntityRelationship)) {
 									entityType = ConstraintEntityRelationship
