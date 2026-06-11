@@ -381,6 +381,10 @@ func (e *StorageExecutor) executeQueryAgainstStorage(ctx context.Context, cypher
 	// upperQuery is passed in to avoid redundant conversion
 	upper := upperQuery
 
+	if result, handled := e.tryFastPathAnyMatchVectorCosine(ctx, cypher, upperQuery); handled {
+		return result, nil
+	}
+
 	// Normalize whitespace for compound query detection
 	normalizedUpper := strings.ReplaceAll(strings.ReplaceAll(upper, "\n", " "), "\t", " ")
 

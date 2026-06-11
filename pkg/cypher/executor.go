@@ -2908,16 +2908,7 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 	if result, handled := e.tryFastPathSimpleMatchReturnLimit(ctx, cypher, upperQuery); handled {
 		return result, nil
 	}
-	if result, handled := e.tryFastPathMatchVectorCosine(ctx, cypher, upperQuery); handled {
-		return result, nil
-	}
-	if result, handled := e.tryFastPathMatchWithVectorCosineProjection(ctx, cypher, upperQuery); handled {
-		return result, nil
-	}
-	if result, handled := e.tryFastPathMatchRelationshipVectorCosine(ctx, cypher, upperQuery); handled {
-		return result, nil
-	}
-	if result, handled := e.tryFastPathMatchWithRelationshipVectorCosineProjection(ctx, cypher, upperQuery); handled {
+	if result, handled := e.tryFastPathAnyMatchVectorCosine(ctx, cypher, upperQuery); handled {
 		return result, nil
 	}
 

@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -91,4 +92,52 @@ func TestE2E_VectorCosine_RelationshipProjectionFastPath_DirectAnalog(t *testing
 	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
 	require.Len(t, res.Rows, 2)
 	require.Equal(t, "r1", res.Rows[0][0])
+}
+
+func TestE2E_VectorCosine_RelationshipProjectionFastPath_ExplicitTransaction(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	for i := 0; i < 12; i++ {
+		_, err := exec.Execute(ctx, fmt.Sprintf("CREATE (:Entity {uuid:'n-%d', group_id:'g'})", i), nil)
+		require.NoError(t, err)
+	}
+	for i := 0; i < 10; i++ {
+		vec := "[0.0,1.0,0.0]"
+		if i < 3 {
+			vec = "[1.0,0.0,0.0]"
+		}
+		_, err := exec.Execute(ctx, fmt.Sprintf(
+			"MATCH (a:Entity {uuid:'n-%d'}), (b:Entity {uuid:'n-%d'}) CREATE (a)-[:RELATES_TO {uuid:'e-%d', fact_embedding:%s}]->(b)",
+			i, i+1, i, vec,
+		), nil)
+		require.NoError(t, err)
+	}
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX rel_tx_idx FOR ()-[e:RELATES_TO]-() ON (e.fact_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	query := `MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
+WITH DISTINCT e, n, m, vector.similarity.cosine(e.fact_embedding, $q) AS score
+WHERE score > $min
+RETURN e.uuid AS edge_uuid, n.uuid AS src_uuid, m.uuid AS dst_uuid, score
+ORDER BY score DESC
+LIMIT $limit`
+
+	_, err = exec.Execute(ctx, "BEGIN", nil)
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, query, map[string]interface{}{
+		"q":     []float64{1.0, 0.0, 0.0},
+		"min":   0.5,
+		"limit": 5,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 3)
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath, "explicit transaction should route relationship cosine through vector-index fast path")
+
+	_, err = exec.Execute(ctx, "COMMIT", nil)
+	require.NoError(t, err)
 }

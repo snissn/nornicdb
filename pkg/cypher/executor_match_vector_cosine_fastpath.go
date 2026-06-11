@@ -570,6 +570,22 @@ type vectorEdgeScore struct {
 	score float64
 }
 
+func (e *StorageExecutor) tryFastPathAnyMatchVectorCosine(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, bool) {
+	if result, handled := e.tryFastPathMatchVectorCosine(ctx, cypher, upperQuery); handled {
+		return result, true
+	}
+	if result, handled := e.tryFastPathMatchWithVectorCosineProjection(ctx, cypher, upperQuery); handled {
+		return result, true
+	}
+	if result, handled := e.tryFastPathMatchRelationshipVectorCosine(ctx, cypher, upperQuery); handled {
+		return result, true
+	}
+	if result, handled := e.tryFastPathMatchWithRelationshipVectorCosineProjection(ctx, cypher, upperQuery); handled {
+		return result, true
+	}
+	return nil, false
+}
+
 func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName string, limit int, queryExpr string, orderDesc bool) ([]vectorNodeScore, bool) {
 	callQueryExpr := queryExpr
 	negateOutputScore := false

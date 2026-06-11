@@ -93,6 +93,38 @@ LIMIT $lim`,
 	}
 }
 
+func TestE2E_VectorCosine_QueryShape_ExplicitTransactionUsesIndexedPath(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX tx_emb_idx FOR (n:Tx) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 16, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	for i := 0; i < 60; i++ {
+		vec := make([]float64, 16)
+		vec[i%16] = 1.0
+		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Tx {uuid:'tx-%d', name_embedding:%s})", i, formatInlineFloat64Vector(vec)), nil)
+		require.NoError(t, err)
+	}
+
+	query := "MATCH (n:Tx) WITH n, vector.similarity.cosine(n.name_embedding,$q) AS s RETURN n.uuid, s ORDER BY s DESC LIMIT 5"
+	q := make([]float64, 16)
+	q[0] = 1.0
+
+	_, err = exec.Execute(ctx, "BEGIN", nil)
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, query, map[string]interface{}{"q": q})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 5)
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath, "explicit transaction should route through cosine vector-index fast path")
+
+	_, err = exec.Execute(ctx, "COMMIT", nil)
+	require.NoError(t, err)
+}
+
 func formatInlineFloat64Vector(vec []float64) string {
 	if len(vec) == 0 {
 		return "[]"
