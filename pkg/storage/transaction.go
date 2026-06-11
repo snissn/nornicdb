@@ -120,7 +120,7 @@ func copyNode(node *Node) *Node {
 	nodeCopy.Labels = append(nodeCopy.Labels, node.Labels...)
 
 	if node.Properties != nil {
-		nodeCopy.Properties = make(map[string]interface{})
+		nodeCopy.Properties = make(map[string]interface{}, len(node.Properties))
 		for k, v := range node.Properties {
 			nodeCopy.Properties[k] = v
 		}

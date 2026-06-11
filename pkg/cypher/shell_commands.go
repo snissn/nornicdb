@@ -419,16 +419,23 @@ func topLevelColonIndex(input string) int {
 }
 
 func (e *StorageExecutor) mergeShellParams(explicitParams map[string]interface{}) map[string]interface{} {
-	merged := e.getShellParamsSnapshot()
-	if len(explicitParams) == 0 {
-		if len(merged) == 0 {
+	e.shellParamsMu.RLock()
+	shellLen := len(e.shellParams)
+	if shellLen == 0 {
+		e.shellParamsMu.RUnlock()
+		if len(explicitParams) == 0 {
 			return nil
 		}
-		return merged
+		// Fast path: no shell params to merge, so return explicit params directly.
+		return explicitParams
 	}
-	if merged == nil {
-		merged = make(map[string]interface{}, len(explicitParams))
+
+	merged := make(map[string]interface{}, shellLen+len(explicitParams))
+	for key, value := range e.shellParams {
+		merged[key] = value
 	}
+	e.shellParamsMu.RUnlock()
+
 	for key, value := range explicitParams {
 		merged[key] = value
 	}

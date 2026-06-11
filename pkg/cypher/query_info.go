@@ -89,6 +89,7 @@ const (
 // QueryAnalyzer extracts query metadata with caching.
 type QueryAnalyzer struct {
 	cache   map[string]*QueryInfo
+	raw     map[string]*QueryInfo
 	cacheMu sync.RWMutex
 	maxSize int
 }
@@ -100,12 +101,21 @@ func NewQueryAnalyzer(maxSize int) *QueryAnalyzer {
 	}
 	return &QueryAnalyzer{
 		cache:   make(map[string]*QueryInfo),
+		raw:     make(map[string]*QueryInfo),
 		maxSize: maxSize,
 	}
 }
 
 // Analyze extracts query information, using cache when available.
 func (a *QueryAnalyzer) Analyze(cypher string) *QueryInfo {
+	// Fast path: exact query text cache hit avoids normalization cost on hot loops.
+	a.cacheMu.RLock()
+	if info, ok := a.raw[cypher]; ok {
+		a.cacheMu.RUnlock()
+		return info
+	}
+	a.cacheMu.RUnlock()
+
 	// Normalize for cache key
 	normalized := normalizeQuery(cypher)
 
@@ -131,7 +141,14 @@ func (a *QueryAnalyzer) Analyze(cypher string) *QueryInfo {
 			break
 		}
 	}
+	if len(a.raw) >= a.maxSize {
+		for k := range a.raw {
+			delete(a.raw, k)
+			break
+		}
+	}
 	a.cache[normalized] = info
+	a.raw[cypher] = info
 	a.cacheMu.Unlock()
 
 	return info
@@ -141,6 +158,7 @@ func (a *QueryAnalyzer) Analyze(cypher string) *QueryInfo {
 func (a *QueryAnalyzer) ClearCache() {
 	a.cacheMu.Lock()
 	a.cache = make(map[string]*QueryInfo)
+	a.raw = make(map[string]*QueryInfo)
 	a.cacheMu.Unlock()
 }
 

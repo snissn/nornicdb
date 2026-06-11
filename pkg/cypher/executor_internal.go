@@ -45,7 +45,7 @@ func (e *StorageExecutor) executeInternal(ctx context.Context, cypher string, pa
 	}
 
 	ctx = context.WithValue(ctx, paramsKey, params)
-	upper := strings.ToUpper(cypher)
+	upper := e.cachedUpperQuery(cypher)
 
 	// If we're in an explicit transaction, execute within it.
 	if e.txContext != nil && e.txContext.active {

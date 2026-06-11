@@ -343,6 +343,12 @@ type StorageExecutor struct {
 	// unwindMergeChainPlanCache memoizes parsed plans for the generalized
 	// UNWIND ... MERGE batch hot path keyed by mutation query text.
 	unwindMergeChainPlanCache *unwindMergeChainPlanCache
+	// upperQueryCache memoizes uppercase routing forms for exact query text
+	// to avoid repeated strings.ToUpper allocations on hot query shapes.
+	upperQueryCache *upperQueryCache
+	// syntaxValidationCache memoizes successful Nornic-parser syntax checks
+	// for exact query text to avoid repeated bracket/string scans on hot loops.
+	syntaxValidationCache *syntaxValidationCache
 
 	// log is the structured logger used for slow-query and operational log
 	// emission. Threaded via SetLogger after construction (D-01 non-breaking
@@ -373,6 +379,18 @@ type StorageExecutor struct {
 type unwindMergeChainPlanCache struct {
 	mu    sync.RWMutex
 	plans map[string]unwindMergeChainPlan
+}
+
+type upperQueryCache struct {
+	mu    sync.RWMutex
+	cache map[string]string
+	max   int
+}
+
+type syntaxValidationCache struct {
+	mu    sync.RWMutex
+	cache map[string]struct{}
+	max   int
 }
 
 func (e *StorageExecutor) cloneWithStorage(override storage.Engine) *StorageExecutor {
@@ -428,6 +446,8 @@ func (e *StorageExecutor) cloneWithStorage(override storage.Engine) *StorageExec
 		vectorQueryEmbedCache:       e.vectorQueryEmbedCache,
 		vectorQueryEmbedInflight:    e.vectorQueryEmbedInflight,
 		unwindMergeChainPlanCache:   e.unwindMergeChainPlanCache,
+		upperQueryCache:             e.upperQueryCache,
+		syntaxValidationCache:       e.syntaxValidationCache,
 		// Plan 04-03: propagate the metrics bag + database label through
 		// per-query / per-storage clones so observation chokepoints in
 		// Execute() see the same bag regardless of clone depth.
@@ -1269,7 +1289,7 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 
 	// For routing, we still need upperQuery for some handlers
 	// TODO: Migrate handlers to use QueryInfo directly
-	upperQuery := strings.ToUpper(strings.TrimSpace(cypher))
+	upperQuery := e.cachedUpperQuery(cypher)
 
 	// Try cache for read-only queries only when cache policy allows it.
 	if info.IsReadOnly && e.cache != nil && isCacheableReadQuery(cypher) {
@@ -1387,6 +1407,10 @@ func trimTrailingStatementDelimiters(query string) string {
 
 func normalizeCypherSyntaxConfusables(query string) string {
 	if query == "" {
+		return query
+	}
+	// Fast path: common ASCII-only Cypher text has no confusables to normalize.
+	if isLikelyPlainASCIICypher(query) {
 		return query
 	}
 
@@ -1524,6 +1548,47 @@ func normalizeCypherSyntaxConfusables(query string) string {
 	}
 
 	return builder.String()
+}
+
+func isLikelyPlainASCIICypher(query string) bool {
+	for i := 0; i < len(query); i++ {
+		if query[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *StorageExecutor) cachedUpperQuery(query string) string {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return ""
+	}
+	if e.upperQueryCache == nil {
+		e.upperQueryCache = &upperQueryCache{
+			cache: make(map[string]string, 1024),
+			max:   4096,
+		}
+	}
+	c := e.upperQueryCache
+	c.mu.RLock()
+	if upper, ok := c.cache[trimmed]; ok {
+		c.mu.RUnlock()
+		return upper
+	}
+	c.mu.RUnlock()
+
+	upper := strings.ToUpper(trimmed)
+	c.mu.Lock()
+	if len(c.cache) >= c.max {
+		for k := range c.cache {
+			delete(c.cache, k)
+			break
+		}
+	}
+	c.cache[trimmed] = upper
+	c.mu.Unlock()
+	return upper
 }
 
 func cypherSyntaxConfusableReplacement(r rune) (string, bool) {
@@ -3463,16 +3528,10 @@ func (e *StorageExecutor) validateSyntaxANTLR(cypher string) error {
 
 // validateSyntaxNornic performs fast inline syntax validation.
 func (e *StorageExecutor) validateSyntaxNornic(cypher string) error {
-	// Check for valid starting keyword (including EXPLAIN/PROFILE prefixes and transaction control)
-	validStarts := []string{"MATCH", "CREATE", "MERGE", "DELETE", "DETACH", "CALL", "RETURN", "WITH", "UNWIND", "OPTIONAL", "DROP", "SHOW", "FOREACH", "LOAD", "EXPLAIN", "PROFILE", "ALTER", "USE", "BEGIN", "COMMIT", "ROLLBACK"}
-	hasValidStart := false
-	for _, start := range validStarts {
-		if startsWithKeywordFold(cypher, start) {
-			hasValidStart = true
-			break
-		}
+	if e.hasCachedValidSyntax(cypher) {
+		return nil
 	}
-	if !hasValidStart {
+	if !hasValidStartKeyword(cypher) {
 		return fmt.Errorf("syntax error: query must start with a valid clause (MATCH, CREATE, MERGE, DELETE, CALL, SHOW, EXPLAIN, PROFILE, ALTER, USE, BEGIN, COMMIT, ROLLBACK, etc.)")
 	}
 
@@ -3529,5 +3588,60 @@ func (e *StorageExecutor) validateSyntaxNornic(cypher string) error {
 		return fmt.Errorf("syntax error: unclosed quote")
 	}
 
+	e.markCachedValidSyntax(cypher)
 	return nil
+}
+
+var validSyntaxStarts = [...]string{
+	"MATCH", "CREATE", "MERGE", "DELETE", "DETACH", "CALL", "RETURN", "WITH",
+	"UNWIND", "OPTIONAL", "DROP", "SHOW", "FOREACH", "LOAD", "EXPLAIN",
+	"PROFILE", "ALTER", "USE", "BEGIN", "COMMIT", "ROLLBACK",
+}
+
+func hasValidStartKeyword(cypher string) bool {
+	for _, start := range validSyntaxStarts {
+		if startsWithKeywordFold(cypher, start) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *StorageExecutor) hasCachedValidSyntax(cypher string) bool {
+	if cypher == "" {
+		return false
+	}
+	if e.syntaxValidationCache == nil {
+		e.syntaxValidationCache = &syntaxValidationCache{
+			cache: make(map[string]struct{}, 1024),
+			max:   4096,
+		}
+	}
+	c := e.syntaxValidationCache
+	c.mu.RLock()
+	_, ok := c.cache[cypher]
+	c.mu.RUnlock()
+	return ok
+}
+
+func (e *StorageExecutor) markCachedValidSyntax(cypher string) {
+	if cypher == "" {
+		return
+	}
+	if e.syntaxValidationCache == nil {
+		e.syntaxValidationCache = &syntaxValidationCache{
+			cache: make(map[string]struct{}, 1024),
+			max:   4096,
+		}
+	}
+	c := e.syntaxValidationCache
+	c.mu.Lock()
+	if len(c.cache) >= c.max {
+		for k := range c.cache {
+			delete(c.cache, k)
+			break
+		}
+	}
+	c.cache[cypher] = struct{}{}
+	c.mu.Unlock()
 }

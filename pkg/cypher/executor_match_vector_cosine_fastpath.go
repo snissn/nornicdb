@@ -2,11 +2,12 @@ package cypher
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -114,14 +115,13 @@ func (e *StorageExecutor) tryFastPathMatchVectorCosine(ctx context.Context, cyph
 	}
 
 	rows := make([][]interface{}, 0, len(nodeScores))
+	nodeCtx := map[string]*storage.Node{varName: nil}
 	for _, hit := range nodeScores {
-		node := hit.node
-		score := hit.score
-		nodeCtx := map[string]*storage.Node{varName: node}
+		nodeCtx[varName] = hit.node
 		row := make([]interface{}, len(returnItems))
 		for i, item := range returnItems {
 			if i == cosineIdx {
-				row[i] = score
+				row[i] = hit.score
 				continue
 			}
 			row[i] = e.evaluateExpressionWithContext(ctx, item.expr, nodeCtx, nil)
@@ -264,6 +264,11 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 	}
 
 	rows := make([][]interface{}, 0, len(nodeScores))
+	nodeCtx := map[string]*storage.Node{varName: nil}
+	scoreExprIsAlias := make([]bool, len(returnItems))
+	for i := range returnItems {
+		scoreExprIsAlias[i] = strings.EqualFold(strings.TrimSpace(returnItems[i].expr), scoreRef)
+	}
 	for _, hit := range nodeScores {
 		if preWhereClause != "" && !e.evaluateWhere(ctx, hit.node, varName, preWhereClause) {
 			continue
@@ -271,11 +276,10 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 		if scoreOp != "" && !compareScore(hit.score, scoreOp, scoreCmp) {
 			continue
 		}
-		nodeCtx := map[string]*storage.Node{varName: hit.node}
+		nodeCtx[varName] = hit.node
 		row := make([]interface{}, len(returnItems))
 		for i, item := range returnItems {
-			expr := strings.TrimSpace(item.expr)
-			if strings.EqualFold(expr, scoreRef) {
+			if scoreExprIsAlias[i] {
 				row[i] = hit.score
 				continue
 			}
@@ -381,9 +385,10 @@ func (e *StorageExecutor) tryFastPathMatchRelationshipVectorCosine(ctx context.C
 	}
 
 	rows := make([][]interface{}, 0, len(edgeScores))
+	nodeCtx := make(map[string]*storage.Node, 2)
+	edgeCtx := make(map[string]*storage.Edge, 1)
 	for _, hit := range edgeScores {
-		nodeCtx, edgeCtx, ok := e.buildRelationshipContext(pattern, hit.edge)
-		if !ok {
+		if !e.buildRelationshipContextInto(pattern, hit.edge, nodeCtx, edgeCtx) {
 			continue
 		}
 		if preWhereClause != "" && !evaluateExpressionBoolWithContext(e, ctx, preWhereClause, nodeCtx, edgeCtx) {
@@ -529,9 +534,14 @@ func (e *StorageExecutor) tryFastPathMatchWithRelationshipVectorCosineProjection
 	}
 
 	rows := make([][]interface{}, 0, len(edgeScores))
+	nodeCtx := make(map[string]*storage.Node, 2)
+	edgeCtx := make(map[string]*storage.Edge, 1)
+	scoreExprIsAlias := make([]bool, len(returnItems))
+	for i := range returnItems {
+		scoreExprIsAlias[i] = strings.EqualFold(strings.TrimSpace(returnItems[i].expr), scoreRef)
+	}
 	for _, hit := range edgeScores {
-		nodeCtx, edgeCtx, ok := e.buildRelationshipContext(pattern, hit.edge)
-		if !ok {
+		if !e.buildRelationshipContextInto(pattern, hit.edge, nodeCtx, edgeCtx) {
 			continue
 		}
 		if preWhereClause != "" && !evaluateExpressionBoolWithContext(e, ctx, preWhereClause, nodeCtx, edgeCtx) {
@@ -543,8 +553,7 @@ func (e *StorageExecutor) tryFastPathMatchWithRelationshipVectorCosineProjection
 
 		row := make([]interface{}, len(returnItems))
 		for i, item := range returnItems {
-			expr := strings.TrimSpace(item.expr)
-			if strings.EqualFold(expr, scoreRef) {
+			if scoreExprIsAlias[i] {
 				row[i] = hit.score
 				continue
 			}
@@ -587,42 +596,65 @@ func (e *StorageExecutor) tryFastPathAnyMatchVectorCosine(ctx context.Context, c
 }
 
 func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName string, limit int, queryExpr string, orderDesc bool) ([]vectorNodeScore, bool) {
-	callQueryExpr := queryExpr
-	negateOutputScore := false
+	queryVector, ok := e.resolveCosineQueryVector(ctx, queryExpr)
+	if !ok || len(queryVector) == 0 {
+		return nil, false
+	}
 	if !orderDesc {
-		negatedExpr, ok := e.buildNegatedCosineQueryExpr(ctx, queryExpr)
-		if !ok {
-			return nil, false
+		for i := range queryVector {
+			queryVector[i] = -queryVector[i]
 		}
-		callQueryExpr = negatedExpr
-		negateOutputScore = true
 	}
 
-	callQuery := fmt.Sprintf(
-		"CALL db.index.vector.queryNodes('%s', %d, %s) YIELD node, score",
-		strings.ReplaceAll(indexName, "'", "''"),
-		limit,
-		callQueryExpr,
-	)
-	callRes, err := e.callDbIndexVectorQueryNodes(ctx, callQuery)
+	var targetLabel, targetProperty string
+	similarityFunc := "cosine"
+	wantDims := 0
+	if schema := e.storage.GetSchema(); schema != nil {
+		if vectorIdx, exists := schema.GetVectorIndex(indexName); exists {
+			targetLabel = vectorIdx.Label
+			targetProperty = vectorIdx.Property
+			similarityFunc = vectorIdx.SimilarityFunc
+			if vectorIdx.Dimensions > 0 {
+				wantDims = vectorIdx.Dimensions
+			}
+		}
+	}
+	if wantDims <= 0 && len(queryVector) > 0 {
+		wantDims = len(queryVector)
+	}
+	if wantDims <= 0 {
+		wantDims = search.DefaultVectorDimensions
+	}
+	if e.searchService != nil && !e.searchService.VectorEnabled() {
+		return []vectorNodeScore{}, true
+	}
+	svc := e.searchService
+	if svc == nil || svc.VectorIndexDimensions() != wantDims {
+		svc = search.NewServiceWithDimensions(e.storage, wantDims)
+		e.searchService = svc
+	}
+	if !svc.VectorEnabled() {
+		return []vectorNodeScore{}, true
+	}
+	hits, err := svc.VectorQueryNodes(ctx, queryVector, search.VectorQuerySpec{
+		IndexName:  indexName,
+		Label:      targetLabel,
+		Property:   targetProperty,
+		Similarity: similarityFunc,
+		Limit:      limit,
+	})
 	if err != nil {
 		return nil, false
 	}
 
-	out := make([]vectorNodeScore, 0, len(callRes.Rows))
-	for _, hit := range callRes.Rows {
-		if len(hit) < 2 {
+	out := make([]vectorNodeScore, 0, len(hits))
+	for _, hit := range hits {
+		node, err := e.storage.GetNode(storage.NodeID(hit.ID))
+		if err != nil || node == nil {
 			continue
 		}
-		node, ok := hit[0].(*storage.Node)
-		if !ok || node == nil {
-			continue
-		}
-		score, ok := toFloat64(hit[1])
-		if !ok {
-			return nil, false
-		}
-		if negateOutputScore {
+		score := hit.Score
+		if !orderDesc {
 			score = -score
 		}
 		out = append(out, vectorNodeScore{node: node, score: score})
@@ -635,60 +667,50 @@ func (e *StorageExecutor) fetchCosineRelationshipScores(ctx context.Context, ind
 	if !ok || len(vec) == 0 {
 		return nil, false
 	}
-	if !orderDesc {
-		for i := range vec {
-			vec[i] = -vec[i]
+	var targetRelType, targetProperty string
+	similarityFunc := "cosine"
+	if schema := e.storage.GetSchema(); schema != nil {
+		if vectorIdx, exists := schema.GetVectorIndex(indexName); exists {
+			targetRelType = vectorIdx.Label
+			targetProperty = vectorIdx.Property
+			similarityFunc = vectorIdx.SimilarityFunc
 		}
 	}
-	callQueryExpr := formatInlineFloat32Vector(vec)
-	negateOutputScore := !orderDesc
-
-	callQuery := fmt.Sprintf(
-		"CALL db.index.vector.queryRelationships('%s', %d, %s) YIELD relationship, score",
-		strings.ReplaceAll(indexName, "'", "''"),
-		limit,
-		callQueryExpr,
-	)
-	callRes, err := e.callDbIndexVectorQueryRelationships(ctx, callQuery)
+	edges, err := e.storage.AllEdges()
 	if err != nil {
 		return nil, false
 	}
-
-	out := make([]vectorEdgeScore, 0, len(callRes.Rows))
-	for _, row := range callRes.Rows {
-		if len(row) < 2 {
+	out := make([]vectorEdgeScore, 0, min(limit, len(edges)))
+	for _, edge := range edges {
+		if targetRelType != "" && edge.Type != targetRelType {
 			continue
 		}
-		relMap, ok := row[0].(map[string]interface{})
-		if !ok || relMap == nil {
+		if targetProperty == "" {
 			continue
 		}
-		edgeID := stringOr(firstPresent(relMap, "_id", "_edgeId"), "")
-		if strings.TrimSpace(edgeID) == "" {
+		embedding := toFloat32Slice(edge.Properties[targetProperty])
+		if len(embedding) == 0 || len(embedding) != len(vec) {
 			continue
 		}
-		edge := &storage.Edge{
-			ID:        storage.EdgeID(edgeID),
-			Type:      stringOr(firstPresent(relMap, "_type", "type"), ""),
-			StartNode: storage.NodeID(stringOr(firstPresent(relMap, "_start", "startNode"), "")),
-			EndNode:   storage.NodeID(stringOr(firstPresent(relMap, "_end", "endNode"), "")),
-		}
-		if props, ok := relMap["properties"].(map[string]interface{}); ok && props != nil {
-			edge.Properties = cloneStringAnyMap(props)
-		} else {
-			edge.Properties = map[string]interface{}{}
-		}
-		if edge.Type == "" || edge.StartNode == "" || edge.EndNode == "" {
-			continue
-		}
-		score, ok := toFloat64(row[1])
-		if !ok {
-			return nil, false
-		}
-		if negateOutputScore {
-			score = -score
+		score := 0.0
+		switch similarityFunc {
+		case "euclidean":
+			score = vector.EuclideanSimilarity(vec, embedding)
+		case "dot":
+			score = vector.DotProduct(vec, embedding)
+		default:
+			score = vector.CosineSimilarity(vec, embedding)
 		}
 		out = append(out, vectorEdgeScore{edge: edge, score: score})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if orderDesc {
+			return out[i].score > out[j].score
+		}
+		return out[i].score < out[j].score
+	})
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	return out, true
 }
@@ -976,19 +998,34 @@ func parseSimpleEndpointRef(content string) (string, []string, bool) {
 }
 
 func (e *StorageExecutor) buildRelationshipContext(pattern parsedSimpleMatchRelationshipPattern, edge *storage.Edge) (map[string]*storage.Node, map[string]*storage.Edge, bool) {
-	if edge == nil {
+	nodeCtx := make(map[string]*storage.Node, 2)
+	edgeCtx := make(map[string]*storage.Edge, 1)
+	if !e.buildRelationshipContextInto(pattern, edge, nodeCtx, edgeCtx) {
 		return nil, nil, false
+	}
+	return nodeCtx, edgeCtx, true
+}
+
+func (e *StorageExecutor) buildRelationshipContextInto(pattern parsedSimpleMatchRelationshipPattern, edge *storage.Edge, nodeCtx map[string]*storage.Node, edgeCtx map[string]*storage.Edge) bool {
+	if edge == nil {
+		return false
+	}
+	for k := range nodeCtx {
+		delete(nodeCtx, k)
+	}
+	for k := range edgeCtx {
+		delete(edgeCtx, k)
 	}
 	startID := storage.EnsureNodeIDDatabasePrefixForEngine(e.storage, edge.StartNode)
 	endID := storage.EnsureNodeIDDatabasePrefixForEngine(e.storage, edge.EndNode)
 
 	startNode, err := e.storage.GetNode(startID)
 	if err != nil || startNode == nil {
-		return nil, nil, false
+		return false
 	}
 	endNode, err := e.storage.GetNode(endID)
 	if err != nil || endNode == nil {
-		return nil, nil, false
+		return false
 	}
 
 	var leftNode, rightNode *storage.Node
@@ -1001,24 +1038,21 @@ func (e *StorageExecutor) buildRelationshipContext(pattern parsedSimpleMatchRela
 	}
 
 	if len(pattern.leftLabels) > 0 && !nodeHasAnyLabel(leftNode, pattern.leftLabels) {
-		return nil, nil, false
+		return false
 	}
 	if len(pattern.rightLabels) > 0 && !nodeHasAnyLabel(rightNode, pattern.rightLabels) {
-		return nil, nil, false
+		return false
 	}
-
-	nodeCtx := map[string]*storage.Node{}
 	if pattern.leftVar != "" {
 		nodeCtx[pattern.leftVar] = leftNode
 	}
 	if pattern.rightVar != "" {
 		nodeCtx[pattern.rightVar] = rightNode
 	}
-	edgeCtx := map[string]*storage.Edge{}
 	if pattern.relVar != "" {
 		edgeCtx[pattern.relVar] = edge
 	}
-	return nodeCtx, edgeCtx, true
+	return true
 }
 
 func evaluateExpressionBoolWithContext(e *StorageExecutor, ctx context.Context, expr string, nodeCtx map[string]*storage.Node, edgeCtx map[string]*storage.Edge) bool {

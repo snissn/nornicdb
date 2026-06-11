@@ -60,6 +60,10 @@ func topLevelKeywordIndex(s, keyword string) int {
 }
 
 func keywordIndexFrom(s, keyword string, from int, opts keywordScanOpts) int {
+	if isDefaultKeywordScanOpts(opts) {
+		return keywordIndexFromDefault(s, keyword, from)
+	}
+
 	ks, ke := trimKeywordWSBounds(keyword)
 	if ks >= ke {
 		return -1
@@ -220,6 +224,167 @@ func keywordIndexFrom(s, keyword string, from int, opts keywordScanOpts) int {
 	}
 
 	return -1
+}
+
+func keywordIndexFromDefault(s, keyword string, from int) int {
+	ks, ke := trimKeywordWSBounds(keyword)
+	if ks >= ke {
+		return -1
+	}
+	if from < 0 {
+		from = 0
+	}
+	if from >= len(s) {
+		return -1
+	}
+
+	first := asciiUpper(keyword[ks])
+
+	var (
+		parenDepth   int
+		bracketDepth int
+		braceDepth   int
+
+		inSingleQuote  bool
+		inDoubleQuote  bool
+		inBacktick     bool
+		inLineComment  bool
+		inBlockComment bool
+	)
+
+	for i := from; i < len(s); i++ {
+		c := s[i]
+
+		if inLineComment {
+			if c == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+		if inBlockComment {
+			if c == '*' && i+1 < len(s) && s[i+1] == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+		if inSingleQuote {
+			if c == '\\' && i+1 < len(s) {
+				i++
+				continue
+			}
+			if c == '\'' {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+			continue
+		}
+		if inDoubleQuote {
+			if c == '\\' && i+1 < len(s) {
+				i++
+				continue
+			}
+			if c == '"' {
+				if i+1 < len(s) && s[i+1] == '"' {
+					i++
+					continue
+				}
+				inDoubleQuote = false
+			}
+			continue
+		}
+		if inBacktick {
+			if c == '`' {
+				if i+1 < len(s) && s[i+1] == '`' {
+					i++
+					continue
+				}
+				inBacktick = false
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(s) {
+			if s[i+1] == '/' {
+				inLineComment = true
+				i++
+				continue
+			}
+			if s[i+1] == '*' {
+				inBlockComment = true
+				i++
+				continue
+			}
+		}
+		if c == '\'' {
+			inSingleQuote = true
+			continue
+		}
+		if c == '"' {
+			inDoubleQuote = true
+			continue
+		}
+		if c == '`' {
+			inBacktick = true
+			continue
+		}
+
+		switch c {
+		case '(':
+			parenDepth++
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '{':
+			braceDepth++
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		}
+
+		if parenDepth > 0 || bracketDepth > 0 {
+			continue
+		}
+
+		if asciiUpper(c) != first {
+			continue
+		}
+
+		if !keywordLeftBoundaryOK(s, i, keywordBoundaryWord) {
+			continue
+		}
+
+		endPos, ok := keywordMatchAt(s, i, keyword, ks, ke)
+		if !ok {
+			continue
+		}
+		if !keywordRightBoundaryOK(s, endPos, keywordBoundaryWord) {
+			continue
+		}
+		return i
+	}
+
+	return -1
+}
+
+func isDefaultKeywordScanOpts(opts keywordScanOpts) bool {
+	return opts.SkipParens &&
+		opts.SkipBrackets &&
+		!opts.SkipBraces &&
+		opts.SkipStrings &&
+		opts.SkipBackticks &&
+		opts.SkipComments &&
+		opts.Boundary == keywordBoundaryWord
 }
 
 func keywordMatchAt(s string, pos int, keyword string, ks, ke int) (endPos int, ok bool) {
