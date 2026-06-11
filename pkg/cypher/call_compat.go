@@ -110,6 +110,10 @@ func (e *StorageExecutor) callDbIndexFulltextQueryRelationships(cypher string) (
 		Columns: []string{"relationship", "score"},
 		Rows:    [][]interface{}{},
 	}
+	opts, err := e.extractFulltextQueryOptions(cypher)
+	if err != nil {
+		return nil, err
+	}
 
 	indexName, query := e.extractFulltextParams(cypher)
 	if query == "" {
@@ -161,6 +165,7 @@ func (e *StorageExecutor) callDbIndexFulltextQueryRelationships(cypher string) (
 			result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
 		}
 	}
+	applyFulltextOptions(result, opts)
 
 	return result, nil
 }

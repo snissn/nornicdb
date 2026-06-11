@@ -355,6 +355,34 @@ func TestCallDbIndexFulltextQueryNodes_DirectBranches(t *testing.T) {
 	assert.Equal(t, storage.NodeID("n2"), node.ID)
 	_, scoreOK := res.Rows[0][1].(float64)
 	assert.True(t, scoreOK)
+
+	// Neo4j compatibility: 3rd options MAP arg supports skip/limit windowing.
+	res, err = exec.callDbIndexFulltextQueryNodes("CALL db.index.fulltext.queryNodes('idx_ft', 'alpha', {skip: 1, limit: 1})")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Len(t, res.Rows, 1)
+
+	// Non-map third argument should fail like Neo4j signature enforcement.
+	_, err = exec.callDbIndexFulltextQueryNodes("CALL db.index.fulltext.queryNodes('idx_ft', 'alpha', 5)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MAP")
+}
+
+func TestCallDbIndexFulltextQueryNodes_ExecuteAcceptsThreeArgs(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (:Doc {content:'alpha'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE FULLTEXT INDEX idx_exec IF NOT EXISTS FOR (n:Doc) ON EACH [n.content]", nil)
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, "CALL db.index.fulltext.queryNodes('idx_exec', 'alpha', {limit: 1}) YIELD node, score RETURN node, score", nil)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Len(t, res.Rows, 1)
 }
 
 // TestYieldReturnWithOtherProcedures tests YIELD...RETURN with various procedures

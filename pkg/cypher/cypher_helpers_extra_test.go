@@ -955,6 +955,16 @@ func TestCypherHelpers_CallCompatRelationshipQueries(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, res.Rows)
 
+	// Neo4j compatibility: optional options map (skip/limit).
+	res, err = exec.callDbIndexFulltextQueryRelationships("CALL db.index.fulltext.queryRelationships('idx','searchable', {skip: 0, limit: 1})")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+
+	// Third arg must be a map.
+	_, err = exec.callDbIndexFulltextQueryRelationships("CALL db.index.fulltext.queryRelationships('idx','searchable', 1)")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "MAP")
+
 	// Vector relationship query: parse error.
 	_, err = exec.callDbIndexVectorQueryRelationships(ctx, "CALL db.index.vector.queryRelationships('idx', 2)")
 	require.Error(t, err)

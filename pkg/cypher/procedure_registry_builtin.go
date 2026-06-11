@@ -54,11 +54,11 @@ func ensureBuiltInProceduresRegistered() {
 				return e.callDbSchemaRelProperties()
 			})
 
-		registerBuiltInProcedure("db.index.fulltext.queryNodes", "db.index.fulltext.queryNodes(indexName :: STRING, query :: STRING) :: (node :: NODE, score :: FLOAT)", "Fulltext search on nodes", ProcedureModeRead, 2, 2, false,
+		registerBuiltInProcedure("db.index.fulltext.queryNodes", "db.index.fulltext.queryNodes(indexName :: STRING, query :: STRING, options = {} :: MAP) :: (node :: NODE, score :: FLOAT)", "Fulltext search on nodes", ProcedureModeRead, 2, 3, false,
 			func(ctx context.Context, e *StorageExecutor, cypher string, args []interface{}) (*ExecuteResult, error) {
 				return e.callDbIndexFulltextQueryNodes(cypher)
 			})
-		registerBuiltInProcedure("db.index.fulltext.queryRelationships", "db.index.fulltext.queryRelationships(indexName :: STRING, query :: STRING) :: (relationship :: RELATIONSHIP, score :: FLOAT)", "Fulltext search on relationships", ProcedureModeRead, 2, 2, false,
+		registerBuiltInProcedure("db.index.fulltext.queryRelationships", "db.index.fulltext.queryRelationships(indexName :: STRING, query :: STRING, options = {} :: MAP) :: (relationship :: RELATIONSHIP, score :: FLOAT)", "Fulltext search on relationships", ProcedureModeRead, 2, 3, false,
 			func(ctx context.Context, e *StorageExecutor, cypher string, args []interface{}) (*ExecuteResult, error) {
 				return e.callDbIndexFulltextQueryRelationships(cypher)
 			})

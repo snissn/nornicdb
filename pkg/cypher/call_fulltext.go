@@ -1,9 +1,11 @@
 package cypher
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -39,6 +41,10 @@ func (e *StorageExecutor) callDbIndexFulltextQueryNodes(cypher string) (*Execute
 	result := &ExecuteResult{
 		Columns: []string{"node", "score"},
 		Rows:    [][]interface{}{},
+	}
+	opts, err := e.extractFulltextQueryOptions(cypher)
+	if err != nil {
+		return nil, err
 	}
 
 	// Extract query string and index name
@@ -108,6 +114,7 @@ func (e *StorageExecutor) callDbIndexFulltextQueryNodes(cypher string) (*Execute
 			}
 			result.Rows = append(result.Rows, []interface{}{node, 1.0})
 		}
+		applyFulltextOptions(result, opts)
 		return result, nil
 	}
 	if propName, ok := fulltextFieldPresenceQuery(query); ok {
@@ -131,6 +138,7 @@ func (e *StorageExecutor) callDbIndexFulltextQueryNodes(cypher string) (*Execute
 			}
 			result.Rows = append(result.Rows, []interface{}{node, 1.0})
 		}
+		applyFulltextOptions(result, opts)
 		return result, nil
 	}
 
@@ -238,6 +246,7 @@ func (e *StorageExecutor) callDbIndexFulltextQueryNodes(cypher string) (*Execute
 			sn.score,
 		})
 	}
+	applyFulltextOptions(result, opts)
 
 	return result, nil
 }
@@ -294,6 +303,117 @@ func (e *StorageExecutor) extractFulltextParams(cypher string) (indexName, query
 	}
 
 	return indexName, query
+}
+
+type fulltextQueryOptions struct {
+	skip  int
+	limit int
+}
+
+func (e *StorageExecutor) extractFulltextQueryOptions(cypher string) (fulltextQueryOptions, error) {
+	opts := fulltextQueryOptions{skip: 0, limit: -1}
+
+	upper := strings.ToUpper(cypher)
+	callIdx := strings.Index(upper, "DB.INDEX.FULLTEXT.QUERYNODES")
+	if callIdx == -1 {
+		callIdx = strings.Index(upper, "DB.INDEX.FULLTEXT.QUERYRELATIONSHIPS")
+		if callIdx == -1 {
+			return opts, nil
+		}
+	}
+
+	rest := cypher[callIdx:]
+	parenIdx := strings.Index(rest, "(")
+	if parenIdx == -1 {
+		return opts, nil
+	}
+
+	parenContent := rest[parenIdx+1:]
+	depth := 1
+	endIdx := -1
+	for i, c := range parenContent {
+		if c == '(' {
+			depth++
+		} else if c == ')' {
+			depth--
+			if depth == 0 {
+				endIdx = i
+				break
+			}
+		}
+	}
+	if endIdx == -1 {
+		return opts, nil
+	}
+
+	params := parenContent[:endIdx]
+	parts := splitParamsCarefully(params)
+	if len(parts) < 3 {
+		return opts, nil
+	}
+	if len(parts) > 3 {
+		return opts, fmt.Errorf("invalid fulltext query syntax: expected 2 or 3 arguments")
+	}
+
+	raw := strings.TrimSpace(parts[2])
+	if raw == "" {
+		return opts, nil
+	}
+	if !strings.HasPrefix(raw, "{") || !strings.HasSuffix(raw, "}") {
+		return opts, fmt.Errorf("procedure options must be a MAP")
+	}
+
+	parsed := e.parseMapLiteral(context.Background(), raw)
+	if v, ok := parsed["skip"]; ok {
+		i, convOK := fulltextOptionToInt(v)
+		if !convOK || i < 0 {
+			return opts, fmt.Errorf("invalid fulltext options.skip: %v", v)
+		}
+		opts.skip = i
+	}
+	if v, ok := parsed["limit"]; ok {
+		i, convOK := fulltextOptionToInt(v)
+		if !convOK || i < 0 {
+			return opts, fmt.Errorf("invalid fulltext options.limit: %v", v)
+		}
+		opts.limit = i
+	}
+
+	return opts, nil
+}
+
+func fulltextOptionToInt(v interface{}) (int, bool) {
+	switch t := v.(type) {
+	case int:
+		return t, true
+	case int64:
+		return int(t), true
+	case float64:
+		return int(t), float64(int(t)) == t
+	case float32:
+		return int(t), float32(int(t)) == t
+	case string:
+		i, err := strconv.Atoi(strings.TrimSpace(t))
+		return i, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func applyFulltextOptions(result *ExecuteResult, opts fulltextQueryOptions) {
+	if result == nil || len(result.Rows) == 0 {
+		return
+	}
+	if opts.skip > 0 {
+		if opts.skip >= len(result.Rows) {
+			result.Rows = [][]interface{}{}
+			return
+		}
+		result.Rows = result.Rows[opts.skip:]
+	}
+	if opts.limit >= 0 && opts.limit < len(result.Rows) {
+		result.Rows = result.Rows[:opts.limit]
+	}
 }
 
 // parseFulltextQuery parses a fulltext query into regular terms, exclude terms, and must-have terms
