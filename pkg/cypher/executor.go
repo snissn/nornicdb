@@ -2914,6 +2914,12 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 	if result, handled := e.tryFastPathMatchWithVectorCosineProjection(ctx, cypher, upperQuery); handled {
 		return result, nil
 	}
+	if result, handled := e.tryFastPathMatchRelationshipVectorCosine(ctx, cypher, upperQuery); handled {
+		return result, nil
+	}
+	if result, handled := e.tryFastPathMatchWithRelationshipVectorCosineProjection(ctx, cypher, upperQuery); handled {
+		return result, nil
+	}
 
 	// FAST PATH: Check for common compound query patterns using pre-compiled regex
 	// This avoids multiple findKeywordIndex calls for frequently-used patterns

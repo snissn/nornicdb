@@ -10,6 +10,16 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+type parsedSimpleMatchRelationshipPattern struct {
+	leftVar     string
+	leftLabels  []string
+	rightVar    string
+	rightLabels []string
+	relVar      string
+	relType     string
+	isReverse   bool
+}
+
 // tryFastPathMatchVectorCosine handles a strict vector-search shape:
 //
 //	MATCH (n:Label)
@@ -281,8 +291,282 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 	return &ExecuteResult{Columns: columns, Rows: rows, Stats: &QueryStats{}}, true
 }
 
+// tryFastPathMatchRelationshipVectorCosine handles relationship direct-return shape:
+//
+//	MATCH ()-[e:TYPE]->()
+//	RETURN ..., vector.similarity.cosine(e.<prop>, <query>) AS <scoreAlias>, ...
+//	ORDER BY <scoreAlias> DESC|ASC
+//	LIMIT <k>
+func (e *StorageExecutor) tryFastPathMatchRelationshipVectorCosine(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, bool) {
+	trimmed := strings.TrimSpace(cypher)
+	if !strings.HasPrefix(strings.TrimSpace(upperQuery), "MATCH") {
+		return nil, false
+	}
+	for _, kw := range []string{
+		"SKIP", "WITH", "UNWIND", "OPTIONAL MATCH", "CALL",
+		"CREATE", "MERGE", "DELETE", "DETACH DELETE", "SET", "REMOVE", "UNION",
+	} {
+		if findKeywordIndex(trimmed, kw) > 0 {
+			return nil, false
+		}
+	}
+
+	returnIdx := findKeywordIndex(trimmed, "RETURN")
+	orderIdx := findKeywordIndex(trimmed, "ORDER BY")
+	limitIdx := findKeywordIndex(trimmed, "LIMIT")
+	if returnIdx <= 0 || orderIdx <= returnIdx || limitIdx <= orderIdx {
+		return nil, false
+	}
+
+	matchSegment := strings.TrimSpace(trimmed[len("MATCH"):returnIdx])
+	preWhereClause := ""
+	if preWhereIdx := findKeywordIndex(matchSegment, "WHERE"); preWhereIdx > 0 {
+		preWhereClause = strings.TrimSpace(matchSegment[preWhereIdx+len("WHERE"):])
+		matchSegment = strings.TrimSpace(matchSegment[:preWhereIdx])
+		if preWhereClause == "" {
+			return nil, false
+		}
+	}
+
+	pattern, ok := e.parseSimpleMatchRelationshipPattern(matchSegment)
+	if !ok || strings.TrimSpace(pattern.relVar) == "" || strings.TrimSpace(pattern.relType) == "" {
+		return nil, false
+	}
+
+	returnPart := strings.TrimSpace(trimmed[returnIdx+len("RETURN") : orderIdx])
+	returnItems := e.parseReturnItems(returnPart)
+	if len(returnItems) == 0 {
+		return nil, false
+	}
+
+	cosineIdx, vectorProp, queryExpr, scoreRef, ok := parseCosineReturnShape(returnItems, pattern.relVar)
+	if !ok {
+		return nil, false
+	}
+
+	orderPart := strings.TrimSpace(trimmed[orderIdx+len("ORDER BY") : limitIdx])
+	orderDesc, ok := parseOrderByScoreDirection(orderPart, scoreRef)
+	if !ok {
+		return nil, false
+	}
+
+	limitPart := strings.TrimSpace(trimmed[limitIdx+len("LIMIT"):])
+	limit, ok := parseFastPathLimit(ctx, limitPart)
+	if !ok || limit < 0 {
+		return nil, false
+	}
+
+	columns := make([]string, len(returnItems))
+	for i, item := range returnItems {
+		if item.alias != "" {
+			columns[i] = item.alias
+		} else {
+			columns[i] = item.expr
+		}
+	}
+	if limit == 0 {
+		e.markCosineVectorIndexFastPathUsed()
+		return &ExecuteResult{Columns: columns, Rows: [][]interface{}{}, Stats: &QueryStats{}}, true
+	}
+
+	indexName, hasIndex := findCosineVectorIndexName(e.storage.GetSchema(), pattern.relType, vectorProp)
+	if !hasIndex {
+		return nil, false
+	}
+
+	candidateLimit := chooseVectorCandidateLimit(limit, preWhereClause != "")
+	edgeScores, ok := e.fetchCosineRelationshipScores(ctx, indexName, candidateLimit, queryExpr, orderDesc)
+	if !ok {
+		return nil, false
+	}
+
+	rows := make([][]interface{}, 0, len(edgeScores))
+	for _, hit := range edgeScores {
+		nodeCtx, edgeCtx, ok := e.buildRelationshipContext(pattern, hit.edge)
+		if !ok {
+			continue
+		}
+		if preWhereClause != "" && !evaluateExpressionBoolWithContext(e, ctx, preWhereClause, nodeCtx, edgeCtx) {
+			continue
+		}
+
+		row := make([]interface{}, len(returnItems))
+		for i, item := range returnItems {
+			if i == cosineIdx {
+				row[i] = hit.score
+				continue
+			}
+			row[i] = e.evaluateExpressionWithContext(ctx, item.expr, nodeCtx, edgeCtx)
+		}
+		rows = append(rows, row)
+		if len(rows) >= limit {
+			break
+		}
+	}
+
+	e.markCosineVectorIndexFastPathUsed()
+	return &ExecuteResult{Columns: columns, Rows: rows, Stats: &QueryStats{}}, true
+}
+
+// tryFastPathMatchWithRelationshipVectorCosineProjection handles Graphiti relationship shape:
+//
+//	MATCH (n)-[e:TYPE]->(m) [WHERE ...]
+//	WITH [DISTINCT] e[, n, m], vector.similarity.cosine(e.<prop>, <query>) AS <scoreAlias>
+//	[WHERE <scoreAlias> <op> <number|$param>]
+//	RETURN ...
+//	ORDER BY <scoreAlias> DESC|ASC
+//	LIMIT <k>
+func (e *StorageExecutor) tryFastPathMatchWithRelationshipVectorCosineProjection(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, bool) {
+	trimmed := strings.TrimSpace(cypher)
+	if !strings.HasPrefix(strings.TrimSpace(upperQuery), "MATCH") {
+		return nil, false
+	}
+	for _, kw := range []string{
+		"SKIP", "UNWIND", "OPTIONAL MATCH", "CALL",
+		"CREATE", "MERGE", "DELETE", "DETACH DELETE", "SET", "REMOVE", "UNION",
+	} {
+		if findKeywordIndex(trimmed, kw) > 0 {
+			return nil, false
+		}
+	}
+
+	withIdx := findKeywordIndex(trimmed, "WITH")
+	returnIdx := findKeywordIndex(trimmed, "RETURN")
+	orderIdx := findKeywordIndex(trimmed, "ORDER BY")
+	limitIdx := findKeywordIndex(trimmed, "LIMIT")
+	if withIdx <= 0 || returnIdx <= withIdx || orderIdx <= returnIdx || limitIdx <= orderIdx {
+		return nil, false
+	}
+
+	preWithSegment := strings.TrimSpace(trimmed[len("MATCH"):withIdx])
+	preWhereClause := ""
+	if preWhereIdx := findKeywordIndex(preWithSegment, "WHERE"); preWhereIdx > 0 {
+		preWhereClause = strings.TrimSpace(preWithSegment[preWhereIdx+len("WHERE"):])
+		preWithSegment = strings.TrimSpace(preWithSegment[:preWhereIdx])
+		if preWhereClause == "" {
+			return nil, false
+		}
+	}
+
+	pattern, ok := e.parseSimpleMatchRelationshipPattern(preWithSegment)
+	if !ok || strings.TrimSpace(pattern.relVar) == "" || strings.TrimSpace(pattern.relType) == "" {
+		return nil, false
+	}
+
+	withToReturn := strings.TrimSpace(trimmed[withIdx+len("WITH") : returnIdx])
+	postWhereClause := ""
+	withProjectionRaw := withToReturn
+	if postWhereIdx := findKeywordIndex(withToReturn, "WHERE"); postWhereIdx > 0 {
+		postWhereClause = strings.TrimSpace(withToReturn[postWhereIdx+len("WHERE"):])
+		withProjectionRaw = strings.TrimSpace(withToReturn[:postWhereIdx])
+		if postWhereClause == "" {
+			return nil, false
+		}
+	}
+
+	withProjection := trimOptionalDistinctPrefix(strings.TrimSpace(withProjectionRaw))
+	withItems := e.parseReturnItems(withProjection)
+	if len(withItems) < 2 || !withProjectionContainsVariable(withItems, pattern.relVar) {
+		return nil, false
+	}
+
+	_, vectorProp, queryExpr, scoreRef, ok := parseCosineReturnShape(withItems, pattern.relVar)
+	if !ok || scoreRef == "" {
+		return nil, false
+	}
+
+	scoreOp := ""
+	scoreCmp := float64(0)
+	if postWhereClause != "" {
+		op, cmp, ok := e.parseScoreComparisonPredicate(ctx, postWhereClause, scoreRef)
+		if !ok {
+			return nil, false
+		}
+		scoreOp = op
+		scoreCmp = cmp
+	}
+
+	returnPart := strings.TrimSpace(trimmed[returnIdx+len("RETURN") : orderIdx])
+	returnItems := e.parseReturnItems(returnPart)
+	if len(returnItems) == 0 {
+		return nil, false
+	}
+
+	orderPart := strings.TrimSpace(trimmed[orderIdx+len("ORDER BY") : limitIdx])
+	orderDesc, ok := parseOrderByScoreDirection(orderPart, scoreRef)
+	if !ok {
+		return nil, false
+	}
+
+	limitPart := strings.TrimSpace(trimmed[limitIdx+len("LIMIT"):])
+	limit, ok := parseFastPathLimit(ctx, limitPart)
+	if !ok || limit < 0 {
+		return nil, false
+	}
+
+	columns := make([]string, len(returnItems))
+	for i, item := range returnItems {
+		if item.alias != "" {
+			columns[i] = item.alias
+		} else {
+			columns[i] = item.expr
+		}
+	}
+	if limit == 0 {
+		e.markCosineVectorIndexFastPathUsed()
+		return &ExecuteResult{Columns: columns, Rows: [][]interface{}{}, Stats: &QueryStats{}}, true
+	}
+
+	indexName, hasIndex := findCosineVectorIndexName(e.storage.GetSchema(), pattern.relType, vectorProp)
+	if !hasIndex {
+		return nil, false
+	}
+
+	candidateLimit := chooseVectorCandidateLimit(limit, preWhereClause != "" || scoreOp != "")
+	edgeScores, ok := e.fetchCosineRelationshipScores(ctx, indexName, candidateLimit, queryExpr, orderDesc)
+	if !ok {
+		return nil, false
+	}
+
+	rows := make([][]interface{}, 0, len(edgeScores))
+	for _, hit := range edgeScores {
+		nodeCtx, edgeCtx, ok := e.buildRelationshipContext(pattern, hit.edge)
+		if !ok {
+			continue
+		}
+		if preWhereClause != "" && !evaluateExpressionBoolWithContext(e, ctx, preWhereClause, nodeCtx, edgeCtx) {
+			continue
+		}
+		if scoreOp != "" && !compareScore(hit.score, scoreOp, scoreCmp) {
+			continue
+		}
+
+		row := make([]interface{}, len(returnItems))
+		for i, item := range returnItems {
+			expr := strings.TrimSpace(item.expr)
+			if strings.EqualFold(expr, scoreRef) {
+				row[i] = hit.score
+				continue
+			}
+			row[i] = e.evaluateExpressionWithContext(ctx, item.expr, nodeCtx, edgeCtx)
+		}
+		rows = append(rows, row)
+		if len(rows) >= limit {
+			break
+		}
+	}
+
+	e.markCosineVectorIndexFastPathUsed()
+	return &ExecuteResult{Columns: columns, Rows: rows, Stats: &QueryStats{}}, true
+}
+
 type vectorNodeScore struct {
 	node  *storage.Node
+	score float64
+}
+
+type vectorEdgeScore struct {
+	edge  *storage.Edge
 	score float64
 }
 
@@ -326,6 +610,69 @@ func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName s
 			score = -score
 		}
 		out = append(out, vectorNodeScore{node: node, score: score})
+	}
+	return out, true
+}
+
+func (e *StorageExecutor) fetchCosineRelationshipScores(ctx context.Context, indexName string, limit int, queryExpr string, orderDesc bool) ([]vectorEdgeScore, bool) {
+	vec, ok := e.resolveCosineQueryVector(ctx, queryExpr)
+	if !ok || len(vec) == 0 {
+		return nil, false
+	}
+	if !orderDesc {
+		for i := range vec {
+			vec[i] = -vec[i]
+		}
+	}
+	callQueryExpr := formatInlineFloat32Vector(vec)
+	negateOutputScore := !orderDesc
+
+	callQuery := fmt.Sprintf(
+		"CALL db.index.vector.queryRelationships('%s', %d, %s) YIELD relationship, score",
+		strings.ReplaceAll(indexName, "'", "''"),
+		limit,
+		callQueryExpr,
+	)
+	callRes, err := e.callDbIndexVectorQueryRelationships(ctx, callQuery)
+	if err != nil {
+		return nil, false
+	}
+
+	out := make([]vectorEdgeScore, 0, len(callRes.Rows))
+	for _, row := range callRes.Rows {
+		if len(row) < 2 {
+			continue
+		}
+		relMap, ok := row[0].(map[string]interface{})
+		if !ok || relMap == nil {
+			continue
+		}
+		edgeID := stringOr(firstPresent(relMap, "_id", "_edgeId"), "")
+		if strings.TrimSpace(edgeID) == "" {
+			continue
+		}
+		edge := &storage.Edge{
+			ID:        storage.EdgeID(edgeID),
+			Type:      stringOr(firstPresent(relMap, "_type", "type"), ""),
+			StartNode: storage.NodeID(stringOr(firstPresent(relMap, "_start", "startNode"), "")),
+			EndNode:   storage.NodeID(stringOr(firstPresent(relMap, "_end", "endNode"), "")),
+		}
+		if props, ok := relMap["properties"].(map[string]interface{}); ok && props != nil {
+			edge.Properties = cloneStringAnyMap(props)
+		} else {
+			edge.Properties = map[string]interface{}{}
+		}
+		if edge.Type == "" || edge.StartNode == "" || edge.EndNode == "" {
+			continue
+		}
+		score, ok := toFloat64(row[1])
+		if !ok {
+			return nil, false
+		}
+		if negateOutputScore {
+			score = -score
+		}
+		out = append(out, vectorEdgeScore{edge: edge, score: score})
 	}
 	return out, true
 }
@@ -501,30 +848,11 @@ func findCosineVectorIndexName(schema *storage.SchemaManager, label string, prop
 }
 
 func (e *StorageExecutor) buildNegatedCosineQueryExpr(ctx context.Context, queryExpr string) (string, bool) {
-	value := e.parseValue(ctx, strings.TrimSpace(queryExpr))
-	var vector []float32
-	switch v := value.(type) {
-	case []float32:
-		vector = append([]float32(nil), v...)
-	case []float64:
-		vector = make([]float32, len(v))
-		for i, val := range v {
-			vector[i] = float32(val)
-		}
-	case []interface{}:
-		vector = toFloat32Slice(v)
-	case string:
-		if strings.TrimSpace(v) == "" || e.embedder == nil {
-			return "", false
-		}
-		embedded, err := e.embedVectorQueryText(ctx, v)
-		if err != nil {
-			return "", false
-		}
-		vector = embedded
-	default:
-		vector = toFloat32Slice(value)
+	vector, ok := e.resolveCosineQueryVector(ctx, queryExpr)
+	if !ok || len(vector) == 0 {
+		return "", false
 	}
+	vector = append([]float32(nil), vector...)
 	if len(vector) == 0 {
 		return "", false
 	}
@@ -532,6 +860,35 @@ func (e *StorageExecutor) buildNegatedCosineQueryExpr(ctx context.Context, query
 		vector[i] = -vector[i]
 	}
 	return formatInlineFloat32Vector(vector), true
+}
+
+func (e *StorageExecutor) resolveCosineQueryVector(ctx context.Context, queryExpr string) ([]float32, bool) {
+	value := e.parseValue(ctx, strings.TrimSpace(queryExpr))
+	switch v := value.(type) {
+	case []float32:
+		return append([]float32(nil), v...), len(v) > 0
+	case []float64:
+		out := make([]float32, len(v))
+		for i, val := range v {
+			out[i] = float32(val)
+		}
+		return out, len(out) > 0
+	case []interface{}:
+		out := toFloat32Slice(v)
+		return out, len(out) > 0
+	case string:
+		if strings.TrimSpace(v) == "" || e.embedder == nil {
+			return nil, false
+		}
+		embedded, err := e.embedVectorQueryText(ctx, v)
+		if err != nil {
+			return nil, false
+		}
+		return embedded, len(embedded) > 0
+	default:
+		out := toFloat32Slice(value)
+		return out, len(out) > 0
+	}
 }
 
 func formatInlineFloat32Vector(vec []float32) string {
@@ -549,6 +906,114 @@ func formatInlineFloat32Vector(vec []float32) string {
 	}
 	b.WriteByte(']')
 	return b.String()
+}
+
+func (e *StorageExecutor) parseSimpleMatchRelationshipPattern(pattern string) (parsedSimpleMatchRelationshipPattern, bool) {
+	sourceContent, relContent, targetContent, isReverse, remainder, err := e.parseCreateRelPatternWithVars(pattern)
+	if err != nil || strings.TrimSpace(remainder) != "" {
+		return parsedSimpleMatchRelationshipPattern{}, false
+	}
+	relVar, relType, relPropsStr, err := parseCreateRelationshipContent(relContent)
+	if err != nil || strings.TrimSpace(relPropsStr) != "" || strings.TrimSpace(relType) == "" {
+		return parsedSimpleMatchRelationshipPattern{}, false
+	}
+
+	leftVar, leftLabels, ok := parseSimpleEndpointRef(sourceContent)
+	if !ok {
+		return parsedSimpleMatchRelationshipPattern{}, false
+	}
+	rightVar, rightLabels, ok := parseSimpleEndpointRef(targetContent)
+	if !ok {
+		return parsedSimpleMatchRelationshipPattern{}, false
+	}
+
+	return parsedSimpleMatchRelationshipPattern{
+		leftVar:     leftVar,
+		leftLabels:  leftLabels,
+		rightVar:    rightVar,
+		rightLabels: rightLabels,
+		relVar:      strings.TrimSpace(relVar),
+		relType:     strings.TrimSpace(relType),
+		isReverse:   isReverse,
+	}, true
+}
+
+func parseSimpleEndpointRef(content string) (string, []string, bool) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", nil, true
+	}
+	if strings.Contains(content, "{") || strings.Contains(content, "}") || strings.Contains(content, "-") {
+		return "", nil, false
+	}
+	parts := strings.Split(content, ":")
+	v := strings.TrimSpace(parts[0])
+	labels := make([]string, 0, len(parts)-1)
+	for _, p := range parts[1:] {
+		lbl := strings.TrimSpace(p)
+		if lbl == "" {
+			return "", nil, false
+		}
+		labels = append(labels, lbl)
+	}
+	return v, labels, true
+}
+
+func (e *StorageExecutor) buildRelationshipContext(pattern parsedSimpleMatchRelationshipPattern, edge *storage.Edge) (map[string]*storage.Node, map[string]*storage.Edge, bool) {
+	if edge == nil {
+		return nil, nil, false
+	}
+	startID := storage.EnsureNodeIDDatabasePrefixForEngine(e.storage, edge.StartNode)
+	endID := storage.EnsureNodeIDDatabasePrefixForEngine(e.storage, edge.EndNode)
+
+	startNode, err := e.storage.GetNode(startID)
+	if err != nil || startNode == nil {
+		return nil, nil, false
+	}
+	endNode, err := e.storage.GetNode(endID)
+	if err != nil || endNode == nil {
+		return nil, nil, false
+	}
+
+	var leftNode, rightNode *storage.Node
+	if pattern.isReverse {
+		leftNode = endNode
+		rightNode = startNode
+	} else {
+		leftNode = startNode
+		rightNode = endNode
+	}
+
+	if len(pattern.leftLabels) > 0 && !nodeHasAnyLabel(leftNode, pattern.leftLabels) {
+		return nil, nil, false
+	}
+	if len(pattern.rightLabels) > 0 && !nodeHasAnyLabel(rightNode, pattern.rightLabels) {
+		return nil, nil, false
+	}
+
+	nodeCtx := map[string]*storage.Node{}
+	if pattern.leftVar != "" {
+		nodeCtx[pattern.leftVar] = leftNode
+	}
+	if pattern.rightVar != "" {
+		nodeCtx[pattern.rightVar] = rightNode
+	}
+	edgeCtx := map[string]*storage.Edge{}
+	if pattern.relVar != "" {
+		edgeCtx[pattern.relVar] = edge
+	}
+	return nodeCtx, edgeCtx, true
+}
+
+func evaluateExpressionBoolWithContext(e *StorageExecutor, ctx context.Context, expr string, nodeCtx map[string]*storage.Node, edgeCtx map[string]*storage.Edge) bool {
+	raw := e.evaluateExpressionWithContext(ctx, expr, nodeCtx, edgeCtx)
+	if b, ok := raw.(bool); ok {
+		return b
+	}
+	if b, ok := toBool(raw); ok {
+		return b
+	}
+	return false
 }
 
 func trimOptionalDistinctPrefix(withClause string) string {
