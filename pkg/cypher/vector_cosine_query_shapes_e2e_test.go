@@ -32,7 +32,7 @@ func TestE2E_VectorCosine_QueryShapes_StayOnIndexedPaths(t *testing.T) {
 
 	q := make([]float64, 16)
 	q[0] = 1.0
-	params := map[string]interface{}{"q": q, "g": "g", "lim": 5, "min": 0.1}
+	params := map[string]interface{}{"q": q, "g": "g", "groups": []string{"g"}, "lim": 5, "min": 0.1}
 
 	shapes := []struct {
 		name            string
@@ -57,6 +57,16 @@ func TestE2E_VectorCosine_QueryShapes_StayOnIndexedPaths(t *testing.T) {
 		{
 			name:            "V4 direct return cosine with parameterized limit",
 			query:           "MATCH (c:Chunk) RETURN vector.similarity.cosine(c.emb,$q) AS s ORDER BY s DESC LIMIT $lim",
+			requireFastPath: true,
+		},
+		{
+			name: "V5 graphiti projection with pre and post where",
+			query: `MATCH (c:Chunk) WHERE c.group_id IN $groups
+WITH c, vector.similarity.cosine(c.emb,$q) AS score
+WHERE score > $min
+RETURN c.uuid, score
+ORDER BY score DESC
+LIMIT $lim`,
 			requireFastPath: true,
 		},
 	}

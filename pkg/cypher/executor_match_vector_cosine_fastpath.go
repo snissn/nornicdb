@@ -152,23 +152,37 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 	if withIdx <= 0 || returnIdx <= withIdx || orderIdx <= returnIdx || limitIdx <= orderIdx {
 		return nil, false
 	}
-	whereIdx := findKeywordIndex(trimmed, "WHERE")
-	if whereIdx > 0 && (whereIdx <= withIdx || whereIdx >= returnIdx) {
-		return nil, false
+	preWithSegment := strings.TrimSpace(trimmed[len("MATCH"):withIdx])
+	preWhereClause := ""
+	if preWhereIdx := findKeywordIndex(preWithSegment, "WHERE"); preWhereIdx > 0 {
+		preWhereClause = strings.TrimSpace(preWithSegment[preWhereIdx+len("WHERE"):])
+		preWithSegment = strings.TrimSpace(preWithSegment[:preWhereIdx])
+		if preWhereClause == "" {
+			return nil, false
+		}
 	}
 
-	matchPart := strings.TrimSpace(trimmed[len("MATCH"):withIdx])
+	matchPart := preWithSegment
 	varName, labels, ok := parseSimpleMatchSingleNodePattern(matchPart)
 	if !ok || len(labels) != 1 {
 		return nil, false
 	}
 	label := labels[0]
 
-	withProjectionEnd := returnIdx
-	if whereIdx > withIdx {
-		withProjectionEnd = whereIdx
+	withToReturn := strings.TrimSpace(trimmed[withIdx+len("WITH") : returnIdx])
+	postWhereClause := ""
+	withProjectionRaw := withToReturn
+	if postWhereIdx := findKeywordIndex(withToReturn, "WHERE"); postWhereIdx > 0 {
+		postWhereClause = strings.TrimSpace(withToReturn[postWhereIdx+len("WHERE"):])
+		withProjectionRaw = strings.TrimSpace(withToReturn[:postWhereIdx])
+		if postWhereClause == "" {
+			return nil, false
+		}
 	}
-	withProjection := strings.TrimSpace(trimmed[withIdx+len("WITH") : withProjectionEnd])
+
+	withProjectionEnd := returnIdx
+	_ = withProjectionEnd
+	withProjection := strings.TrimSpace(withProjectionRaw)
 	withProjection = trimOptionalDistinctPrefix(withProjection)
 	withItems := e.parseReturnItems(withProjection)
 	if len(withItems) < 2 {
@@ -188,9 +202,8 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 
 	scoreOp := ""
 	scoreCmp := float64(0)
-	if whereIdx > withIdx {
-		wherePart := strings.TrimSpace(trimmed[whereIdx+len("WHERE") : returnIdx])
-		op, cmp, ok := e.parseScoreComparisonPredicate(ctx, wherePart, scoreRef)
+	if postWhereClause != "" {
+		op, cmp, ok := e.parseScoreComparisonPredicate(ctx, postWhereClause, scoreRef)
 		if !ok {
 			return nil, false
 		}
@@ -234,13 +247,17 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 		return nil, false
 	}
 
-	nodeScores, ok := e.fetchCosineNodeScores(ctx, indexName, limit, queryExpr, orderDesc)
+	candidateLimit := chooseVectorCandidateLimit(limit, preWhereClause != "" || scoreOp != "")
+	nodeScores, ok := e.fetchCosineNodeScores(ctx, indexName, candidateLimit, queryExpr, orderDesc)
 	if !ok {
 		return nil, false
 	}
 
 	rows := make([][]interface{}, 0, len(nodeScores))
 	for _, hit := range nodeScores {
+		if preWhereClause != "" && !e.evaluateWhere(ctx, hit.node, varName, preWhereClause) {
+			continue
+		}
 		if scoreOp != "" && !compareScore(hit.score, scoreOp, scoreCmp) {
 			continue
 		}
@@ -630,4 +647,21 @@ func compareScore(score float64, op string, target float64) bool {
 	default:
 		return false
 	}
+}
+
+func chooseVectorCandidateLimit(limit int, filtered bool) int {
+	if limit <= 0 {
+		return 0
+	}
+	if !filtered {
+		return limit
+	}
+	over := limit * 20
+	if over < 200 {
+		over = 200
+	}
+	if over > 5000 {
+		over = 5000
+	}
+	return over
 }

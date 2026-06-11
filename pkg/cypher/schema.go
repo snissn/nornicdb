@@ -2437,12 +2437,17 @@ func (e *StorageExecutor) executeCreateVectorIndex(ctx context.Context, cypher s
 	if err != nil {
 		return nil, fmt.Errorf("invalid CREATE VECTOR INDEX syntax")
 	}
-	if parsed.isRelationship || parsed.label == "" || len(parsed.properties) != 1 || parsed.indexName == "" {
+	if len(parsed.properties) != 1 || parsed.indexName == "" ||
+		(!parsed.isRelationship && parsed.label == "") ||
+		(parsed.isRelationship && parsed.relationshipType == "") {
 		return nil, fmt.Errorf("invalid CREATE VECTOR INDEX syntax")
 	}
 
 	indexName := parsed.indexName
 	label := parsed.label
+	if parsed.isRelationship {
+		label = parsed.relationshipType
+	}
 	property := parsed.properties[0]
 
 	// Parse OPTIONS if present - use configured default dimensions
@@ -2461,7 +2466,10 @@ func (e *StorageExecutor) executeCreateVectorIndex(ctx context.Context, cypher s
 		return nil, err
 	}
 
-	if e.searchService == nil || e.searchService.VectorEnabled() {
+	// Relationship vector indexes are consumed by relationship vector procedures
+	// directly from relationship properties and schema metadata.
+	// registerVectorSpace is node-vector specific; keep relationship indexes out.
+	if !parsed.isRelationship && (e.searchService == nil || e.searchService.VectorEnabled()) {
 		e.registerVectorSpace(indexName, label, property, dimensions, similarityFunc)
 	}
 
