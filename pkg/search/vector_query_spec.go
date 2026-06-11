@@ -263,6 +263,14 @@ func (s *Service) scoreVectorIDDot(normalizedQuery []float32, vecID string) (flo
 	}
 	score := float64(vector.DotProductSIMD(normalizedQuery, vec))
 	s.vectorIndex.mu.RUnlock()
+	// SIMD float32 accumulation can drift slightly outside cosine bounds.
+	// Clamp to preserve Cypher cosine semantics and avoid dropping boundary hits
+	// (for example, opposite vectors drifting to <-1 on ASC fast-path queries).
+	if score > 1.0 {
+		score = 1.0
+	} else if score < -1.0 {
+		score = -1.0
+	}
 	return score, true
 }
 
