@@ -5,6 +5,57 @@ All notable changes to NornicDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.1.6] - 2026-06-12
+
+Release focused on Neo4j/Graphiti compatibility hardening, vector-search performance correctness, and a new offline admin import/export workflow.
+
+### Added
+
+- **`nornicdb-admin` offline tooling** for full-database import/export workflows:
+  - `database import full` with multi-file node/relationship sources, deterministic reports, structured exit codes, and fail-fast source validation.
+  - Neo4j CSV package round-trip support, including schema export/import surfaces and full-schema package generation for operational migrations.
+- **Operations documentation for admin workflows**, including import/export usage, package layout, and recovery behavior.
+
+### Changed
+
+- **Cypher DDL and clause parsing migrated further from regex matching to keyword/token scanning** across schema/index and helper paths, improving parser determinism and reducing fragile query-shape coupling.
+- **Configuration/docs alignment for async writes**: YAML and environment-variable behavior is now documented and validated consistently for production operators.
+
+### Fixed
+
+- **Graphiti-blocking write-path correctness issues resolved end-to-end**:
+  - `SET n:<labels>` + `SET n = <map>` composition no longer drops properties/labels.
+  - Bulk `UNWIND ... MERGE/SET ... WITH ... CALL db.create.setNodeVectorProperty(...)` no longer silently discards row writes.
+  - Matching relationship path with `db.create.setRelationshipVectorProperty(...)` no longer collapses relationship properties.
+  - `MATCH + UNWIND + CREATE` with list-valued properties preserves row cardinality (no first-row-only collapse).
+  - Relationship variables survive `WITH` projection correctly (`e.name`, `properties(e)`, etc. evaluate instead of returning literal expression text).
+- **Bolt temporal compatibility corrected for modern Neo4j drivers**:
+  - Datetime values now round-trip as typed temporal values instead of legacy/unhydrated structures or stringified Go time values.
+- **Vector query compatibility and performance fast paths expanded**:
+  - Fast-path routing now covers Graphiti query shapes using `WITH ... vector.similarity.cosine(...) AS score`, score filtering, and managed transaction execution paths.
+  - Relationship cosine queries now route through vector-index-backed execution where applicable.
+  - `CREATE VECTOR INDEX ... FOR ()-[e:TYPE]-() ON (e.prop)` is supported and integrated with fast-path execution.
+  - Ascending cosine ordering correctness tightened (full score-range handling and deterministic boundary clamping).
+- **Neo4j fulltext procedure compatibility improved**:
+  - `db.index.fulltext.queryNodes`/`queryRelationships` now accept the optional 3rd `options` argument form used by official Neo4j tooling.
+- **Neo4j relationship index DDL compatibility improved**:
+  - Relationship property index syntax (`CREATE INDEX ... FOR ()-[e:TYPE]-() ON (e.prop)`) is accepted and persisted correctly.
+- **Storage/schema correctness regressions fixed**:
+  - Composite schema index merging now preserves all index classes deterministically.
+- **Knowledge-policy gating order corrected**:
+  - Reverse-decay scoring is applied before visibility suppression/on-access hooks to preserve expected scoring semantics.
+
+### Internal
+
+- **Bundled coverage/regression expansion** across `cypher`, `storage`, `search`, `config`, and `adminimport` to lock in the compatibility and performance fixes above.
+
+### Technical Details
+
+- **Range covered**: `v1.1.5..main`
+- **Commits in range**: 38 (non-merge)
+- **Repository delta**: 111 files changed, +11,307 / -1,880 lines
+- **Notes**: transient PR-feedback and test-only commits are intentionally collapsed into the user-facing items above.
+
 ## [v1.1.5] - 2026-06-03
 
 Post-`v1.1.4` stabilization focused on Cypher/Bolt correctness, storage resilience, and deterministic behavior under real Neo4j-driver query shapes. This range also includes broad coverage expansion; all test/coverage work is bundled under a single item below.
