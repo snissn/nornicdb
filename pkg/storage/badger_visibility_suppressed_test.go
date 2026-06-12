@@ -21,6 +21,7 @@ func setupVisibilityTestEngine(t *testing.T) *BadgerEngine {
 			VisibilityThreshold: 0.10,
 			ScoreFrom:           knowledgepolicy.ScoreFromCreated,
 			Enabled:             true,
+			DecayEnabled:        true,
 		},
 	}
 	bindings := map[string]*knowledgepolicy.DecayProfileBinding{
@@ -112,5 +113,50 @@ func TestVisibilitySuppressed_NotSuppressedPassesThrough(t *testing.T) {
 	nowNanos := DecayScoringTime()
 	if eng.filterNodeByDecay(node, nowNanos) {
 		t.Error("recent non-suppressed node should not be filtered")
+	}
+}
+
+func TestVisibilitySuppressed_ScoringRunsBeforeStaleFlagForReverseFloor(t *testing.T) {
+	eng := newTestEngine(t)
+	eng.SetDecayEnabled(true)
+
+	bundles := map[string]*knowledgepolicy.DecayProfileBundle{
+		"reverse_floor": {
+			Name:                "reverse_floor",
+			Scope:               knowledgepolicy.ScopeNode,
+			Function:            knowledgepolicy.DecayFunctionExponential,
+			HalfLifeSeconds:     -3600,
+			VisibilityThreshold: 0.10,
+			ScoreFloor:          0.20,
+			ScoreFrom:           knowledgepolicy.ScoreFromCreated,
+			Enabled:             true,
+			DecayEnabled:        true,
+		},
+	}
+	bindings := map[string]*knowledgepolicy.DecayProfileBinding{
+		"bind_reverse_floor": {
+			Name:         "bind_reverse_floor",
+			ProfileRef:   "reverse_floor",
+			TargetLabels: []string{"ReverseMemory"},
+		},
+	}
+	bt, err := knowledgepolicy.BuildBindingTable(bundles, bindings, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.GetSchemaForNamespace("nornic").SetBindingTable(bt)
+
+	now := time.Now()
+	node := &Node{
+		ID:                   "nornic:reverse-floor",
+		Labels:               []string{"ReverseMemory"},
+		Properties:           map[string]interface{}{"name": "test"},
+		CreatedAt:            now,
+		UpdatedAt:            now,
+		VisibilitySuppressed: true,
+	}
+
+	if eng.filterNodeByDecay(node, now.UnixNano()) {
+		t.Fatal("lightweight scoring must run before stale VisibilitySuppressed flag; scoreFloor clears the gate")
 	}
 }

@@ -60,19 +60,16 @@ func (b *BadgerEngine) filterNodeByDecay(node *Node, nowNanos int64) bool {
 	if b.revealAll.Load() {
 		return false
 	}
-	if node.VisibilitySuppressed {
-		// Explicit-flag suppression counted separately from threshold-based
-		// suppression so operators can distinguish already-suppressed reads
-		// (cheap) from scoring-driven reads (expensive).
-		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
-			kp.IncReadFilterDropped("node", "")
-			kp.IncSuppression("node", "explicit_flag", "")
-		}
-		return true
-	}
 
 	scorer := b.getScorerForNode(node.ID)
 	if scorer == nil {
+		if node.VisibilitySuppressed {
+			if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+				kp.IncReadFilterDropped("node", "")
+				kp.IncSuppression("node", "explicit_flag", "")
+			}
+			return true
+		}
 		return false
 	}
 
@@ -90,6 +87,13 @@ func (b *BadgerEngine) filterNodeByDecay(node *Node, nowNanos int64) bool {
 		node.UpdatedAt.UnixNano(),
 		nowNanos,
 	)
+	if res.NoDecay && node.VisibilitySuppressed {
+		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+			kp.IncReadFilterDropped("node", "")
+			kp.IncSuppression("node", "explicit_flag", "")
+		}
+		return true
+	}
 	suppress := res.SuppressionEligible
 	if suppress {
 		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
@@ -107,16 +111,16 @@ func (b *BadgerEngine) filterEdgeByDecay(edge *Edge, nowNanos int64) bool {
 	if b.revealAll.Load() {
 		return false
 	}
-	if edge.VisibilitySuppressed {
-		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
-			kp.IncReadFilterDropped("edge", "")
-			kp.IncSuppression("edge", "explicit_flag", "")
-		}
-		return true
-	}
 
 	scorer := b.getScorerForEdge(edge.ID)
 	if scorer == nil {
+		if edge.VisibilitySuppressed {
+			if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+				kp.IncReadFilterDropped("edge", "")
+				kp.IncSuppression("edge", "explicit_flag", "")
+			}
+			return true
+		}
 		return false
 	}
 
@@ -134,6 +138,13 @@ func (b *BadgerEngine) filterEdgeByDecay(edge *Edge, nowNanos int64) bool {
 		edge.CreatedAt.UnixNano(),
 		nowNanos,
 	)
+	if res.NoDecay && edge.VisibilitySuppressed {
+		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {
+			kp.IncReadFilterDropped("edge", "")
+			kp.IncSuppression("edge", "explicit_flag", "")
+		}
+		return true
+	}
 	suppress := res.SuppressionEligible
 	if suppress {
 		if kp := observability.GetKnowledgePolicyMetrics(); kp != nil {

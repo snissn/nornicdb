@@ -99,6 +99,54 @@ func TestInverseDecay_FreshAccess_WeakensScore(t *testing.T) {
 		"score below visibility threshold must mark suppressionEligible")
 }
 
+func TestInverseDecay_FreshAccessStartsAtScoreFloor(t *testing.T) {
+	bundle := inverseExpBundle("consolidation", 10)
+	bundle.ScoreFloor = 0.20
+	bundle.VisibilityThreshold = 0.10
+	binding := DecayProfileBinding{
+		Name:         "memory_binding",
+		ProfileRef:   "consolidation",
+		TargetLabels: []string{"Memory"},
+	}
+
+	now := int64(1_000_000_000_000)
+	created := now - 30*oneSecondNanos
+	access := &AccessMetaEntry{
+		TargetID:    "test:n",
+		TargetScope: ScopeNode,
+		Fixed:       AccessMetaFixedFields{LastAccessedAt: now, AccessCount: 1},
+	}
+
+	res := scoreInverse(t, bundle, binding, []string{"Memory"}, access, created, 0, now)
+	require.InDelta(t, bundle.ScoreFloor, res.FinalScore, 1e-12,
+		"fresh reverse decay must start at scoreFloor, not raw inverse score 0")
+	require.False(t, res.SuppressionEligible,
+		"scoreFloor above threshold must pass the scoring gate")
+}
+
+func TestInverseDecay_FreshAccessBelowThresholdStillStartsAtScoreFloor(t *testing.T) {
+	bundle := inverseExpBundle("consolidation", 10)
+	bundle.ScoreFloor = 0.05
+	bundle.VisibilityThreshold = 0.10
+	binding := DecayProfileBinding{
+		Name:         "memory_binding",
+		ProfileRef:   "consolidation",
+		TargetLabels: []string{"Memory"},
+	}
+
+	now := int64(1_000_000_000_000)
+	access := &AccessMetaEntry{
+		TargetID:    "test:n",
+		TargetScope: ScopeNode,
+		Fixed:       AccessMetaFixedFields{LastAccessedAt: now, AccessCount: 1},
+	}
+
+	res := scoreInverse(t, bundle, binding, []string{"Memory"}, access, now, 0, now)
+	require.InDelta(t, bundle.ScoreFloor, res.FinalScore, 1e-12)
+	require.True(t, res.SuppressionEligible,
+		"scoreFloor below threshold must still fail the scoring gate")
+}
+
 func TestInverseDecay_ScoreGrowsMonotonicallyAfterAccess(t *testing.T) {
 	bundle := inverseExpBundle("consolidation", 10)
 	binding := DecayProfileBinding{

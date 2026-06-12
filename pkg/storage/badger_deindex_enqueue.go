@@ -93,10 +93,9 @@ func (b *BadgerEngine) evaluateNodeSuppressionInTxn(txn *badger.Txn, nodeID Node
 //
 // Cypher SET/REMOVE-label semantics: a node that moves out of a suppressing
 // label binding must become visible on the next read; a node that moves
-// into one must become suppressed. The persisted flag is the only signal
-// the read path's fast-suppress branch consults, so we have to update it
-// explicitly here — without this rebind, the stale flag short-circuits
-// filterNodeByDecay and the rescore never runs.
+// into one must become suppressed. The persisted flag is still the cheap
+// fallback when no scorer exists, so keep it aligned with the current
+// binding.
 //
 // When decay is disabled at the engine level, this is a no-op so the
 // codepath cost stays zero on operators who don't use the feature.
@@ -105,8 +104,8 @@ func (b *BadgerEngine) rescoreSuppressionAfterLabelChangeInTxn(txn *badger.Txn, 
 		return nil
 	}
 	wasSuppressed := node.VisibilitySuppressed
-	// filterNodeByDecay short-circuits on a true flag, so clear it
-	// before scoring against the new labels.
+	// Score against the new labels and then persist the current visibility
+	// decision with the updated body.
 	node.VisibilitySuppressed = false
 	suppressNow := b.filterNodeByDecay(node, DecayScoringTime())
 	node.VisibilitySuppressed = suppressNow

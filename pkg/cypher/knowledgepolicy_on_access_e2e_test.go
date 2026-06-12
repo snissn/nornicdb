@@ -433,3 +433,86 @@ func TestE2E_OnAccessDoesNotTriggerForScalarProjection(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, entry, "scalar projection must not count as materializing the node")
 }
+
+func TestE2E_OnAccessOnlyTriggersAfterScoringGate(t *testing.T) {
+	bundles := map[string]*knowledgepolicy.DecayProfileBundle{
+		"blocked_reverse": {
+			Name:                "blocked_reverse",
+			Scope:               knowledgepolicy.ScopeNode,
+			Function:            knowledgepolicy.DecayFunctionExponential,
+			HalfLifeSeconds:     -3600,
+			VisibilityThreshold: 0.10,
+			ScoreFloor:          0.05,
+			ScoreFrom:           knowledgepolicy.ScoreFromCreated,
+			Enabled:             true,
+			DecayEnabled:        true,
+		},
+		"passing_reverse": {
+			Name:                "passing_reverse",
+			Scope:               knowledgepolicy.ScopeNode,
+			Function:            knowledgepolicy.DecayFunctionExponential,
+			HalfLifeSeconds:     -3600,
+			VisibilityThreshold: 0.10,
+			ScoreFloor:          0.20,
+			ScoreFrom:           knowledgepolicy.ScoreFromCreated,
+			Enabled:             true,
+			DecayEnabled:        true,
+		},
+	}
+	bindings := map[string]*knowledgepolicy.DecayProfileBinding{
+		"blocked_bind": {
+			Name:         "blocked_bind",
+			ProfileRef:   "blocked_reverse",
+			TargetLabels: []string{"BlockedReverse"},
+		},
+		"passing_bind": {
+			Name:         "passing_bind",
+			ProfileRef:   "passing_reverse",
+			TargetLabels: []string{"PassingReverse"},
+		},
+	}
+	policies := map[string]*knowledgepolicy.PromotionPolicyDef{
+		"blocked_policy": {
+			Name:         "blocked_policy",
+			TargetLabels: []string{"BlockedReverse"},
+			Enabled:      true,
+			OnAccess: &knowledgepolicy.PromotionPolicyOnAccess{Mutations: []knowledgepolicy.OnAccessMutation{
+				{Expression: "n.accessCount = coalesce(n.accessCount, 0) + 1"},
+			}},
+		},
+		"passing_policy": {
+			Name:         "passing_policy",
+			TargetLabels: []string{"PassingReverse"},
+			Enabled:      true,
+			OnAccess: &knowledgepolicy.PromotionPolicyOnAccess{Mutations: []knowledgepolicy.OnAccessMutation{
+				{Expression: "n.accessCount = coalesce(n.accessCount, 0) + 1"},
+			}},
+		},
+	}
+
+	be, acc, flusher, exec, ctx := setupOnAccessE2E(t, bundles, bindings, policies)
+	now := time.Now()
+	_, err := be.CreateNode(&storage.Node{ID: "test:blocked-reverse", Labels: []string{"BlockedReverse"}, Properties: map[string]interface{}{"name": "blocked"}, CreatedAt: now, UpdatedAt: now})
+	require.NoError(t, err)
+	_, err = be.CreateNode(&storage.Node{ID: "test:passing-reverse", Labels: []string{"PassingReverse"}, Properties: map[string]interface{}{"name": "passing"}, CreatedAt: now, UpdatedAt: now})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `MATCH (n:BlockedReverse) RETURN n`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 0, "scoreFloor below threshold should fail the scoring gate")
+	requireBufferedAccessCounts(t, acc, map[string]int64{"test:blocked-reverse": 0})
+	flusher.Flush()
+	entry, err := be.GetAccessMeta("test:blocked-reverse")
+	require.NoError(t, err)
+	require.Nil(t, entry, "ON ACCESS must not run for rows rejected by the scoring gate")
+
+	result, err = exec.Execute(ctx, `MATCH (n:PassingReverse) RETURN n`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1, "scoreFloor above threshold should pass the scoring gate")
+	requireBufferedAccessCounts(t, acc, map[string]int64{"test:passing-reverse": 1})
+	flusher.Flush()
+	entry, err = be.GetAccessMeta("test:passing-reverse")
+	require.NoError(t, err)
+	require.NotNil(t, entry)
+	require.Equal(t, int64(1), entry.Fixed.AccessCount)
+}
