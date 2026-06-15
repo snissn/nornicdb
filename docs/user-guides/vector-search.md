@@ -48,6 +48,17 @@ db.searchService = search.NewServiceWithDimensions(storage, 1024)
 
 `search.Service.IndexNode()` also indexes `node.NamedEmbeddings` (client-managed vectors, e.g. Qdrant gRPC) under IDs like `nodeID-named-{vectorName}`.
 
+### HNSW Construction Acceleration
+
+Large vector indexes are built through HNSW. On supported Apple Metal hosts, NornicDB attempts GPU-assisted construction by default: the GPU scores nearest-neighbor candidates in batches, while the CPU still performs final HNSW graph mutation and reciprocal linking. If Metal is unavailable or a build kernel fails, construction restarts through the normal CPU builder and the persisted HNSW artifact format remains unchanged.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `NORNICDB_HNSW_BUILD_GPU_ENABLED` | `true` | Attempt GPU-assisted HNSW construction. |
+| `NORNICDB_HNSW_BUILD_GPU_BATCH_SIZE` | `2048` | Vectors per construction batch. |
+| `NORNICDB_HNSW_BUILD_GPU_CANDIDATE_K` | `128` | Candidate neighbors requested from the accelerator before CPU linking. |
+| `NORNICDB_HNSW_BUILD_GPU_DISTANCE_PRECISION` | `fp32` | Build candidate-search precision. |
+
 #### 2. User-Defined Cypher Indexes (Optional)
 
 Create named indexes for specific labels/properties:

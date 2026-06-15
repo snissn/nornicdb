@@ -110,6 +110,30 @@ Layer 0: [●]-[●]-[●]-[●]-[●]-[●]-[●]-[●]-[●]-[●]  ← All do
 | `efConstruction` | 200 | Candidate pool size during build (larger = better index, slower build) |
 | `efSearch` | 100 | Candidate pool size during search (larger = more accurate, slower search) |
 
+### GPU-Assisted HNSW Construction
+
+HNSW construction can use a GPU-assisted candidate search path while keeping CPU graph mutation/linking and the same persisted HNSW format. The Metal builder performs an approximate layer-0 graph beam: it expands candidate neighborhoods from the current HNSW graph, scores those candidates in batched Metal matrix/top-k kernels, then lets the CPU perform final reciprocal graph linking. The default is to try GPU construction first (`NORNICDB_HNSW_BUILD_GPU_ENABLED=true`) and restart on the CPU builder if the accelerator is unavailable or fails.
+
+Benchmark the targeted construction path directly:
+
+```bash
+go test ./pkg/search -bench 'BenchmarkHNSWBuildCPUVsAcceleratedCandidates|BenchmarkHNSWBuildFromVectorFileStore' -benchmem -run '^$'
+```
+
+Reference result on an Apple M3 Max for `BenchmarkHNSWBuildCPUVsAcceleratedCandidatesLarge1024D`:
+
+| Path | Time |
+| --- | ---: |
+| CPU HNSW build | `1.45 s/op` |
+| Metal graph-beam build | `0.93 s/op` |
+
+`BenchmarkHNSWBuildFromVectorFileStore` auto-detects the first `*.vec`/`*.meta` vector store under `./data`. To pin a specific store:
+
+```bash
+NORNICDB_HNSW_BUILD_BENCH_VECTOR_BASE=/path/to/vectors \
+go test ./pkg/search -bench BenchmarkHNSWBuildFromVectorFileStore -benchmem -run '^$'
+```
+
 **Performance:**
 
 Vector similarity search is accelerated by NornicDB's SIMD layer, which uses AVX2+FMA assembly for float32 operations via the viterin/vek library. Real-world benchmarks on Intel i9-9900KF (AVX2+FMA):

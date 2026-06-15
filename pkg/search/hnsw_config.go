@@ -3,6 +3,7 @@ package search
 
 import (
 	"math"
+	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/envutil"
 )
@@ -31,6 +32,9 @@ const (
 //   - NORNICDB_VECTOR_HNSW_M: Max connections per node (default: based on preset)
 //   - NORNICDB_VECTOR_HNSW_EF_CONSTRUCTION: Candidate list size during construction (default: based on preset)
 //   - NORNICDB_VECTOR_HNSW_EF_SEARCH: Candidate list size during search (default: based on preset)
+//   - NORNICDB_HNSW_BUILD_GPU_ENABLED: Attempt GPU-assisted construction (default: true)
+//   - NORNICDB_HNSW_BUILD_GPU_BATCH_SIZE: GPU build batch size (default: 2048)
+//   - NORNICDB_HNSW_BUILD_GPU_CANDIDATE_K: GPU candidate count per vector (default: 128)
 //
 // Quality Presets:
 //   - fast: M=16, efConstruction=100, efSearch=50 (faster, lower recall)
@@ -69,6 +73,20 @@ func HNSWConfigFromEnv() HNSWConfig {
 		config.EfSearch = efSearch
 	}
 
+	config.UseGPUBuild = envutil.GetBoolStrict("NORNICDB_HNSW_BUILD_GPU_ENABLED", true)
+	config.GPUBuildBatchSize = envutil.GetInt("NORNICDB_HNSW_BUILD_GPU_BATCH_SIZE", 2048)
+	if config.GPUBuildBatchSize <= 0 {
+		config.GPUBuildBatchSize = 2048
+	}
+	config.GPUBuildCandidateK = envutil.GetInt("NORNICDB_HNSW_BUILD_GPU_CANDIDATE_K", 128)
+	if config.GPUBuildCandidateK <= 0 {
+		config.GPUBuildCandidateK = 128
+	}
+	config.GPUBuildDistancePrecision = strings.ToLower(strings.TrimSpace(envutil.Get("NORNICDB_HNSW_BUILD_GPU_DISTANCE_PRECISION", "fp32")))
+	if config.GPUBuildDistancePrecision == "" {
+		config.GPUBuildDistancePrecision = "fp32"
+	}
+
 	return config
 }
 
@@ -100,17 +118,25 @@ func presetDefaults(preset HNSWQualityPreset) HNSWConfig {
 	switch preset {
 	case QualityFast:
 		return HNSWConfig{
-			M:               16,
-			EfConstruction:  100,
-			EfSearch:        50,
-			LevelMultiplier: 1.0 / math.Log(16.0),
+			M:                         16,
+			EfConstruction:            100,
+			EfSearch:                  50,
+			LevelMultiplier:           1.0 / math.Log(16.0),
+			UseGPUBuild:               true,
+			GPUBuildBatchSize:         2048,
+			GPUBuildCandidateK:        128,
+			GPUBuildDistancePrecision: "fp32",
 		}
 	case QualityAccurate:
 		return HNSWConfig{
-			M:               32,
-			EfConstruction:  400,
-			EfSearch:        200,
-			LevelMultiplier: 1.0 / math.Log(32.0),
+			M:                         32,
+			EfConstruction:            400,
+			EfSearch:                  200,
+			LevelMultiplier:           1.0 / math.Log(32.0),
+			UseGPUBuild:               true,
+			GPUBuildBatchSize:         2048,
+			GPUBuildCandidateK:        128,
+			GPUBuildDistancePrecision: "fp32",
 		}
 	case QualityBalanced:
 		fallthrough

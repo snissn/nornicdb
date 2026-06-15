@@ -43,6 +43,8 @@ typedef struct {
     id<MTLComputePipelineState> topkSimple;
     id<MTLComputePipelineState> topkSelect;
     id<MTLComputePipelineState> normalize;
+    id<MTLComputePipelineState> hnswBuildCosineMatrix;
+    id<MTLComputePipelineState> hnswBuildTopKRows;
 } MetalContext;
 
 void* metal_create_device(void) {
@@ -190,6 +192,64 @@ void* metal_create_device(void) {
                 @"    for (uint i = 0; i < dimensions; i++) {\n"
                 @"        vectors[base + i] *= inv_norm;\n"
                 @"    }\n"
+                @"}\n"
+                @"\n"
+                @"kernel void hnsw_build_cosine_matrix(\n"
+                @"    device const float* frontier [[buffer(0)]],\n"
+                @"    device const float* queries [[buffer(1)]],\n"
+                @"    device float* scores [[buffer(2)]],\n"
+                @"    constant uint& frontier_n [[buffer(3)]],\n"
+                @"    constant uint& query_n [[buffer(4)]],\n"
+                @"    constant uint& dimensions [[buffer(5)]],\n"
+                @"    uint2 gid [[thread_position_in_grid]])\n"
+                @"{\n"
+                @"    uint fid = gid.x;\n"
+                @"    uint qid = gid.y;\n"
+                @"    if (fid >= frontier_n || qid >= query_n) return;\n"
+                @"    float dot = 0.0f;\n"
+                @"    uint fbase = fid * dimensions;\n"
+                @"    uint qbase = qid * dimensions;\n"
+                @"    for (uint d = 0; d < dimensions; d++) {\n"
+                @"        dot = fma(frontier[fbase + d], queries[qbase + d], dot);\n"
+                @"    }\n"
+                @"    scores[qid * frontier_n + fid] = dot;\n"
+                @"}\n"
+                @"\n"
+                @"kernel void hnsw_build_topk_rows(\n"
+                @"    device const float* scores [[buffer(0)]],\n"
+                @"    device uint* topk_indices [[buffer(1)]],\n"
+                @"    device float* topk_scores [[buffer(2)]],\n"
+                @"    constant uint& frontier_n [[buffer(3)]],\n"
+                @"    constant uint& query_n [[buffer(4)]],\n"
+                @"    constant uint& k [[buffer(5)]],\n"
+                @"    uint qid [[thread_position_in_grid]])\n"
+                @"{\n"
+                @"    if (qid >= query_n || k == 0 || k > 256) return;\n"
+                @"    float best_scores[256];\n"
+                @"    uint best_indices[256];\n"
+                @"    for (uint i = 0; i < k; i++) {\n"
+                @"        best_scores[i] = -2.0f;\n"
+                @"        best_indices[i] = UINT_MAX;\n"
+                @"    }\n"
+                @"    uint row = qid * frontier_n;\n"
+                @"    for (uint fid = 0; fid < frontier_n; fid++) {\n"
+                @"        float score = scores[row + fid];\n"
+                @"        if (score > best_scores[k - 1] || (score == best_scores[k - 1] && fid < best_indices[k - 1])) {\n"
+                @"            uint pos = k - 1;\n"
+                @"            while (pos > 0 && (score > best_scores[pos - 1] || (score == best_scores[pos - 1] && fid < best_indices[pos - 1]))) {\n"
+                @"                best_scores[pos] = best_scores[pos - 1];\n"
+                @"                best_indices[pos] = best_indices[pos - 1];\n"
+                @"                pos--;\n"
+                @"            }\n"
+                @"            best_scores[pos] = score;\n"
+                @"            best_indices[pos] = fid;\n"
+                @"        }\n"
+                @"    }\n"
+                @"    uint out = qid * k;\n"
+                @"    for (uint i = 0; i < k; i++) {\n"
+                @"        topk_scores[out + i] = best_scores[i];\n"
+                @"        topk_indices[out + i] = best_indices[i];\n"
+                @"    }\n"
                 @"}\n";
             
             ctx->library = [device newLibraryWithSource:shaderSource options:nil error:&error];
@@ -246,6 +306,26 @@ void* metal_create_device(void) {
                 return NULL;
             }
         }
+
+        func = [ctx->library newFunctionWithName:@"hnsw_build_cosine_matrix"];
+        if (func) {
+            ctx->hnswBuildCosineMatrix = [device newComputePipelineStateWithFunction:func error:&error];
+            if (!ctx->hnswBuildCosineMatrix) {
+                set_error(error, "Failed to create hnsw_build_cosine_matrix pipeline");
+                free(ctx);
+                return NULL;
+            }
+        }
+
+        func = [ctx->library newFunctionWithName:@"hnsw_build_topk_rows"];
+        if (func) {
+            ctx->hnswBuildTopKRows = [device newComputePipelineStateWithFunction:func error:&error];
+            if (!ctx->hnswBuildTopKRows) {
+                set_error(error, "Failed to create hnsw_build_topk_rows pipeline");
+                free(ctx);
+                return NULL;
+            }
+        }
         
         return ctx;
     }
@@ -264,6 +344,8 @@ void metal_release_device(void* device) {
         ctx->topkSimple = nil;
         ctx->topkSelect = nil;
         ctx->normalize = nil;
+        ctx->hnswBuildCosineMatrix = nil;
+        ctx->hnswBuildTopKRows = nil;
         free(ctx);
     }
 }
@@ -589,6 +671,92 @@ int metal_normalize_vectors(
             return -1;
         }
         
+        return 0;
+    }
+}
+
+int metal_hnsw_build_topk(
+    void* device,
+    void* frontier_buf,
+    void* queries_buf,
+    void* scores_buf,
+    void* indices_buf,
+    void* topk_scores_buf,
+    unsigned int frontier_n,
+    unsigned int query_n,
+    unsigned int dimensions,
+    unsigned int k)
+{
+    if (!device || !frontier_buf || !queries_buf || !scores_buf || !indices_buf || !topk_scores_buf) {
+        set_error(nil, "Invalid parameters");
+        return -1;
+    }
+    if (frontier_n == 0 || query_n == 0 || dimensions == 0 || k == 0 || k > 256) {
+        set_error(nil, "Invalid HNSW build top-k dimensions");
+        return -1;
+    }
+
+    @autoreleasepool {
+        MetalContext* ctx = (MetalContext*)device;
+        if (!ctx->hnswBuildCosineMatrix || !ctx->hnswBuildTopKRows) {
+            set_error(nil, "HNSW build pipelines not initialized");
+            return -1;
+        }
+
+        id<MTLBuffer> frontier = (__bridge id<MTLBuffer>)frontier_buf;
+        id<MTLBuffer> queries = (__bridge id<MTLBuffer>)queries_buf;
+        id<MTLBuffer> scores = (__bridge id<MTLBuffer>)scores_buf;
+        id<MTLBuffer> indices = (__bridge id<MTLBuffer>)indices_buf;
+        id<MTLBuffer> topkScores = (__bridge id<MTLBuffer>)topk_scores_buf;
+
+        id<MTLCommandBuffer> commandBuffer = [ctx->commandQueue commandBuffer];
+        if (!commandBuffer) {
+            set_error(nil, "Failed to create command buffer");
+            return -1;
+        }
+
+        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        if (!encoder) {
+            set_error(nil, "Failed to create command encoder");
+            return -1;
+        }
+
+        [encoder setComputePipelineState:ctx->hnswBuildCosineMatrix];
+        [encoder setBuffer:frontier offset:0 atIndex:0];
+        [encoder setBuffer:queries offset:0 atIndex:1];
+        [encoder setBuffer:scores offset:0 atIndex:2];
+        [encoder setBytes:&frontier_n length:sizeof(frontier_n) atIndex:3];
+        [encoder setBytes:&query_n length:sizeof(query_n) atIndex:4];
+        [encoder setBytes:&dimensions length:sizeof(dimensions) atIndex:5];
+
+        NSUInteger cosineThreads = MIN(ctx->hnswBuildCosineMatrix.maxTotalThreadsPerThreadgroup, 256);
+        NSUInteger tx = 16;
+        NSUInteger ty = MAX((NSUInteger)1, cosineThreads / tx);
+        MTLSize cosineGrid = MTLSizeMake(frontier_n, query_n, 1);
+        MTLSize cosineGroup = MTLSizeMake(tx, ty, 1);
+        [encoder dispatchThreads:cosineGrid threadsPerThreadgroup:cosineGroup];
+
+        [encoder setComputePipelineState:ctx->hnswBuildTopKRows];
+        [encoder setBuffer:scores offset:0 atIndex:0];
+        [encoder setBuffer:indices offset:0 atIndex:1];
+        [encoder setBuffer:topkScores offset:0 atIndex:2];
+        [encoder setBytes:&frontier_n length:sizeof(frontier_n) atIndex:3];
+        [encoder setBytes:&query_n length:sizeof(query_n) atIndex:4];
+        [encoder setBytes:&k length:sizeof(k) atIndex:5];
+
+        NSUInteger topkThreads = MIN(ctx->hnswBuildTopKRows.maxTotalThreadsPerThreadgroup, 256);
+        MTLSize topkGrid = MTLSizeMake(query_n, 1, 1);
+        MTLSize topkGroup = MTLSizeMake(topkThreads, 1, 1);
+        [encoder dispatchThreads:topkGrid threadsPerThreadgroup:topkGroup];
+
+        [encoder endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+
+        if (commandBuffer.error) {
+            set_error(commandBuffer.error, "HNSW build top-k kernel failed");
+            return -1;
+        }
         return 0;
     }
 }

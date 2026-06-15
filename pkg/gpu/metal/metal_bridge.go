@@ -100,6 +100,19 @@ int metal_mps_matrix_vector_multiply(MetalDevice device, MetalBuffer a, MetalBuf
     unsigned int m, unsigned int n, float alpha, float beta);
 int metal_mps_batch_cosine_similarity(MetalDevice device, MetalBuffer embeddings, MetalBuffer query,
     MetalBuffer scores, unsigned int n, unsigned int dims);
+
+int metal_hnsw_build_topk(
+    MetalDevice device,
+    MetalBuffer frontier,
+    MetalBuffer queries,
+    MetalBuffer scores,
+    MetalBuffer indices,
+    MetalBuffer topk_scores,
+    unsigned int frontier_n,
+    unsigned int query_n,
+    unsigned int dimensions,
+    unsigned int k
+);
 */
 import "C"
 
@@ -553,6 +566,65 @@ func (d *Device) Search(
 	}
 
 	return results, nil
+}
+
+// HNSWBuildTopK computes batched cosine top-k for HNSW construction.
+//
+// The frontier and query buffers must contain normalized vectors in row-major
+// layout: frontier is [frontierN x dimensions], queries is [queryN x dimensions].
+// It returns compact row-major outputs with queryN*k indices and scores.
+func (d *Device) HNSWBuildTopK(
+	frontier, queries *Buffer,
+	frontierN, queryN, dimensions uint32,
+	k int,
+) ([]uint32, []float32, error) {
+	if k <= 0 || frontierN == 0 || queryN == 0 {
+		return nil, nil, nil
+	}
+	if k > int(frontierN) {
+		k = int(frontierN)
+	}
+
+	scoresBuf, err := d.NewEmptyBuffer(uint64(frontierN)*uint64(queryN)*4, StorageShared)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer scoresBuf.Release()
+
+	outCount := uint64(queryN) * uint64(k)
+	indicesBuf, err := d.NewEmptyBuffer(outCount*4, StorageShared)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer indicesBuf.Release()
+
+	topkScoresBuf, err := d.NewEmptyBuffer(outCount*4, StorageShared)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer topkScoresBuf.Release()
+
+	d.mu.Lock()
+	result := C.metal_hnsw_build_topk(
+		d.ptr,
+		frontier.ptr,
+		queries.ptr,
+		scoresBuf.ptr,
+		indicesBuf.ptr,
+		topkScoresBuf.ptr,
+		C.uint(frontierN),
+		C.uint(queryN),
+		C.uint(dimensions),
+		C.uint(k),
+	)
+	d.mu.Unlock()
+	if result != 0 {
+		errMsg := C.GoString(C.metal_last_error())
+		C.metal_clear_error()
+		return nil, nil, fmt.Errorf("%w: %s", ErrKernelExecution, errMsg)
+	}
+
+	return indicesBuf.ReadUint32(int(outCount)), topkScoresBuf.ReadFloat32(int(outCount)), nil
 }
 
 // =============================================================================

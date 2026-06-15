@@ -100,6 +100,11 @@ func (d *Device) Search(embeddings *Buffer, query []float32, n, dimensions uint3
 	return nil, ErrMetalNotAvailable
 }
 
+// HNSWBuildTopK computes batched HNSW construction candidates (stub).
+func (d *Device) HNSWBuildTopK(frontier, queries *Buffer, frontierN, queryN, dimensions uint32, k int) ([]uint32, []float32, error) {
+	return nil, nil, ErrMetalNotAvailable
+}
+
 // =============================================================================
 // Memory Tracking (stubs)
 // =============================================================================

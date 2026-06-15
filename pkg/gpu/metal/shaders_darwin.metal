@@ -372,3 +372,76 @@ kernel void filter_by_similarity(
         filtered_indices[idx] = gid;
     }
 }
+
+// =============================================================================
+// Kernel: HNSW Build Batched Cosine Matrix
+// =============================================================================
+// Computes scores for a query batch against a frontier shard. Both inputs are
+// normalized, so cosine similarity is a dot product.
+
+kernel void hnsw_build_cosine_matrix(
+    device const float* frontier [[buffer(0)]],
+    device const float* queries [[buffer(1)]],
+    device float* scores [[buffer(2)]],
+    constant uint& frontier_n [[buffer(3)]],
+    constant uint& query_n [[buffer(4)]],
+    constant uint& dimensions [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint fid = gid.x;
+    uint qid = gid.y;
+    if (fid >= frontier_n || qid >= query_n) return;
+
+    float dot = 0.0f;
+    uint fbase = fid * dimensions;
+    uint qbase = qid * dimensions;
+    for (uint d = 0; d < dimensions; d++) {
+        dot = fma(frontier[fbase + d], queries[qbase + d], dot);
+    }
+    scores[qid * frontier_n + fid] = dot;
+}
+
+// =============================================================================
+// Kernel: HNSW Build Top-K Rows
+// =============================================================================
+// Selects top-k candidates for each query row from the score matrix.
+
+kernel void hnsw_build_topk_rows(
+    device const float* scores [[buffer(0)]],
+    device uint* topk_indices [[buffer(1)]],
+    device float* topk_scores [[buffer(2)]],
+    constant uint& frontier_n [[buffer(3)]],
+    constant uint& query_n [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    uint qid [[thread_position_in_grid]])
+{
+    if (qid >= query_n || k == 0 || k > 256) return;
+
+    float best_scores[256];
+    uint best_indices[256];
+    for (uint i = 0; i < k; i++) {
+        best_scores[i] = -2.0f;
+        best_indices[i] = UINT_MAX;
+    }
+
+    uint row = qid * frontier_n;
+    for (uint fid = 0; fid < frontier_n; fid++) {
+        float score = scores[row + fid];
+        if (score > best_scores[k - 1] || (score == best_scores[k - 1] && fid < best_indices[k - 1])) {
+            uint pos = k - 1;
+            while (pos > 0 && (score > best_scores[pos - 1] || (score == best_scores[pos - 1] && fid < best_indices[pos - 1]))) {
+                best_scores[pos] = best_scores[pos - 1];
+                best_indices[pos] = best_indices[pos - 1];
+                pos--;
+            }
+            best_scores[pos] = score;
+            best_indices[pos] = fid;
+        }
+    }
+
+    uint out = qid * k;
+    for (uint i = 0; i < k; i++) {
+        topk_scores[out + i] = best_scores[i];
+        topk_indices[out + i] = best_indices[i];
+    }
+}

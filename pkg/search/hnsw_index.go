@@ -41,19 +41,27 @@ var errHNSWIndexFull = errors.New("hnsw index full")
 
 // HNSWConfig contains configuration parameters for the HNSW index.
 type HNSWConfig struct {
-	M               int     // Max connections per node per layer (default: 16)
-	EfConstruction  int     // Candidate list size during construction (default: 200)
-	EfSearch        int     // Candidate list size during search (default: 100)
-	LevelMultiplier float64 // Level multiplier = 1/ln(M)
+	M                         int     // Max connections per node per layer (default: 16)
+	EfConstruction            int     // Candidate list size during construction (default: 200)
+	EfSearch                  int     // Candidate list size during search (default: 100)
+	LevelMultiplier           float64 // Level multiplier = 1/ln(M)
+	UseGPUBuild               bool    // Attempt GPU-assisted construction when available
+	GPUBuildBatchSize         int     // Number of vectors per GPU construction batch
+	GPUBuildCandidateK        int     // Number of GPU nearest-neighbor candidates per vector
+	GPUBuildDistancePrecision string  // Distance precision for GPU build kernels (currently fp32)
 }
 
 // DefaultHNSWConfig returns sensible defaults for HNSW index.
 func DefaultHNSWConfig() HNSWConfig {
 	return HNSWConfig{
-		M:               16,
-		EfConstruction:  200,
-		EfSearch:        100,
-		LevelMultiplier: 1.0 / math.Log(16.0),
+		M:                         16,
+		EfConstruction:            200,
+		EfSearch:                  100,
+		LevelMultiplier:           1.0 / math.Log(16.0),
+		UseGPUBuild:               true,
+		GPUBuildBatchSize:         2048,
+		GPUBuildCandidateK:        128,
+		GPUBuildDistancePrecision: "fp32",
 	}
 }
 
@@ -171,6 +179,17 @@ func (h *HNSWIndex) Config() HNSWConfig {
 	return h.config
 }
 
+// SupportsGPUBuild reports whether this index can be constructed through the
+// GPU-assisted builder. The persisted index format is unchanged either way.
+func (h *HNSWIndex) SupportsGPUBuild() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.dimensions > 0 && h.config.M > 0 && h.config.EfConstruction > 0
+}
+
 // Add inserts a vector into the index.
 func (h *HNSWIndex) Add(id string, vec []float32) error {
 	if len(vec) != h.dimensions {
@@ -276,6 +295,119 @@ func (h *HNSWIndex) Add(id string, vec []float32) error {
 	}
 
 	return nil
+}
+
+func (h *HNSWIndex) addWithLevel0Candidates(id string, vec []float32, level0Candidates []uint32) error {
+	if len(level0Candidates) == 0 {
+		return h.Add(id, vec)
+	}
+	if len(vec) != h.dimensions {
+		return ErrDimensionMismatch
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if id == "" {
+		return nil
+	}
+	if internalID, ok := h.idToInternal[id]; ok && int(internalID) < len(h.deleted) && !h.deleted[internalID] {
+		off := int(h.vecOff[internalID])
+		if h.vectorLookup == nil && off >= 0 && off+h.dimensions <= len(h.vectors) {
+			dst := h.vectors[off : off+h.dimensions]
+			copy(dst, vec)
+			vector.NormalizeInPlace(dst)
+			return nil
+		}
+		h.removeLocked(internalID)
+	}
+
+	level := h.randomLevel()
+	if len(h.nodeLevel) >= int(^uint32(0)) {
+		return errHNSWIndexFull
+	}
+	internalID := uint32(len(h.nodeLevel))
+	m := h.config.M
+	if m <= 0 {
+		return nil
+	}
+
+	var normalized []float32
+	if h.vectorLookup != nil {
+		normalized = make([]float32, h.dimensions)
+		copy(normalized, vec)
+		vector.NormalizeInPlace(normalized)
+		h.vecOff = append(h.vecOff, -1)
+	} else {
+		vecOff := len(h.vectors)
+		h.vectors = append(h.vectors, vec...)
+		normalized = h.vectors[vecOff : vecOff+h.dimensions]
+		vector.NormalizeInPlace(normalized)
+		h.vecOff = append(h.vecOff, int32(vecOff))
+	}
+
+	h.nodeLevel = append(h.nodeLevel, uint16(level))
+	neighborsOff := len(h.neighborsArena)
+	h.neighborsArena = append(h.neighborsArena, make([]uint32, (level+1)*m)...)
+	h.neighborsOff = append(h.neighborsOff, int32(neighborsOff))
+	countsOff := len(h.neighborCountsArena)
+	h.neighborCountsArena = append(h.neighborCountsArena, make([]uint16, level+1)...)
+	h.neighborCountsOff = append(h.neighborCountsOff, int32(countsOff))
+	h.internalToID = append(h.internalToID, id)
+	h.idToInternal[id] = internalID
+	h.deleted = append(h.deleted, false)
+	h.liveCount++
+
+	if !h.hasEntryPoint {
+		h.entryPoint = internalID
+		h.hasEntryPoint = true
+		h.maxLevel = level
+		return nil
+	}
+
+	ep := h.entryPoint
+	epLevel := int(h.nodeLevel[ep])
+	for l := epLevel; l > level; l-- {
+		ep = h.searchLayerSingle(normalized, ep, l)
+	}
+	for l := min(level, epLevel); l > 0; l-- {
+		candidates := h.searchLayer(normalized, ep, h.config.EfConstruction, l)
+		neighbors := h.selectNeighbors(normalized, candidates, h.config.M)
+		h.setNeighborsAtLevelLocked(internalID, l, neighbors)
+		for _, neighborID := range neighbors {
+			if int(neighborID) >= len(h.nodeLevel) || h.deleted[neighborID] {
+				continue
+			}
+			h.insertNeighborAtLevelLocked(neighborID, l, internalID)
+		}
+		if len(candidates) > 0 {
+			ep = candidates[0]
+		}
+	}
+
+	neighbors := h.selectNeighbors(normalized, level0Candidates, h.config.M)
+	h.setNeighborsAtLevelLocked(internalID, 0, neighbors)
+	for _, neighborID := range neighbors {
+		if int(neighborID) >= len(h.nodeLevel) || h.deleted[neighborID] {
+			continue
+		}
+		h.insertNeighborAtLevelLocked(neighborID, 0, internalID)
+	}
+
+	if level > h.maxLevel {
+		h.entryPoint = internalID
+		h.hasEntryPoint = true
+		h.maxLevel = level
+	}
+
+	return nil
+}
+
+func (h *HNSWIndex) internalID(id string) (uint32, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	internalID, ok := h.idToInternal[id]
+	return internalID, ok
 }
 
 // Update updates an existing vector in the index.
@@ -1095,6 +1227,9 @@ func (h *HNSWIndex) selectNeighbors(query []float32, candidates []uint32, m int)
 	}
 
 	sort.Slice(dists, func(i, j int) bool {
+		if dists[i].dist == dists[j].dist {
+			return dists[i].id < dists[j].id
+		}
 		return dists[i].dist < dists[j].dist
 	})
 

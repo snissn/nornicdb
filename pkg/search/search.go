@@ -4163,41 +4163,106 @@ func (s *Service) switchBruteStrategy(target strategyMode) bool {
 
 func (s *Service) buildHNSWForTransition(ctx context.Context, dimensions int, vi *VectorIndex, vfs *VectorFileStore) (*HNSWIndex, error) {
 	config := HNSWConfigFromEnv()
-	built := NewHNSWIndex(dimensions, config)
 	if vfs != nil && vfs.Count() > 0 {
-		if err := vfs.IterateChunked(10000, func(ids []string, vecs [][]float32) error {
-			for i := range ids {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				default:
+		total := vfs.Count()
+		iter := func(batchSize int, fn func([]hnswBuildPair) error) error {
+			return vfs.IterateChunked(batchSize, func(ids []string, vecs [][]float32) error {
+				batch := make([]hnswBuildPair, 0, len(ids))
+				for i := range ids {
+					batch = append(batch, hnswBuildPair{id: ids[i], vec: vecs[i]})
 				}
-				if err := built.Add(ids[i], vecs[i]); err != nil {
-					return err
-				}
-			}
-			return nil
-		}); err != nil {
-			return nil, err
+				return fn(batch)
+			})
 		}
-		return built, nil
+		built, _, err := buildHNSWWithOptionalGPU(ctx, dimensions, config, nil, total, iter, nil)
+		return built, err
 	}
 	if vi == nil {
 		return nil, fmt.Errorf("vector index unavailable")
 	}
 	vi.mu.RLock()
-	defer vi.mu.RUnlock()
+	pairs := make([]hnswBuildPair, 0, len(vi.vectors))
 	for id, vec := range vi.vectors {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-		if err := built.Add(id, vec); err != nil {
-			return nil, err
-		}
+		pairs = append(pairs, hnswBuildPair{id: id, vec: vec})
 	}
-	return built, nil
+	vi.mu.RUnlock()
+	iter := hnswPairSliceIterator(pairs)
+	built, _, err := buildHNSWWithOptionalGPU(ctx, dimensions, config, nil, len(pairs), iter, nil)
+	return built, err
+}
+
+func hnswPairSliceIterator(pairs []hnswBuildPair) hnswBuildIterator {
+	return func(batchSize int, fn func([]hnswBuildPair) error) error {
+		if batchSize <= 0 {
+			batchSize = 10000
+		}
+		for start := 0; start < len(pairs); start += batchSize {
+			end := start + batchSize
+			if end > len(pairs) {
+				end = len(pairs)
+			}
+			if err := fn(pairs[start:end]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func hnswVectorFileStoreIterator(vfs *VectorFileStore, seedNodeIDs map[string]struct{}) hnswBuildIterator {
+	return func(batchSize int, fn func([]hnswBuildPair) error) error {
+		addChunk := func(ids []string, vecs [][]float32, seedOnly bool) error {
+			batch := make([]hnswBuildPair, 0, len(ids))
+			for i := range ids {
+				isSeed := vectorIDInSeedNodeSet(ids[i], seedNodeIDs)
+				if seedOnly && !isSeed {
+					continue
+				}
+				if !seedOnly && isSeed {
+					continue
+				}
+				batch = append(batch, hnswBuildPair{id: ids[i], vec: vecs[i]})
+			}
+			if len(batch) == 0 {
+				return nil
+			}
+			return fn(batch)
+		}
+		if len(seedNodeIDs) > 0 {
+			if err := vfs.IterateChunked(batchSize, func(ids []string, vecs [][]float32) error {
+				return addChunk(ids, vecs, true)
+			}); err != nil {
+				return err
+			}
+		}
+		return vfs.IterateChunked(batchSize, func(ids []string, vecs [][]float32) error {
+			return addChunk(ids, vecs, false)
+		})
+	}
+}
+
+func hnswOrderedVectorIndexPairs(vi *VectorIndex, seedNodeIDs map[string]struct{}) []hnswBuildPair {
+	vi.mu.RLock()
+	pairs := make([]hnswBuildPair, 0, len(vi.vectors))
+	for id, vec := range vi.vectors {
+		pairs = append(pairs, hnswBuildPair{id: id, vec: vec})
+	}
+	vi.mu.RUnlock()
+	if len(seedNodeIDs) == 0 || len(pairs) == 0 {
+		return pairs
+	}
+	seedPairs := make([]hnswBuildPair, 0, len(pairs)/8)
+	otherPairs := make([]hnswBuildPair, 0, len(pairs))
+	for _, p := range pairs {
+		if vectorIDInSeedNodeSet(p.id, seedNodeIDs) {
+			seedPairs = append(seedPairs, p)
+			continue
+		}
+		otherPairs = append(otherPairs, p)
+	}
+	pairs = append(seedPairs, otherPairs...)
+	log.Printf("[HNSW] 🧭 Lexical-seeded build order: %d seeded vectors prioritized", len(seedPairs))
+	return pairs
 }
 
 func (s *Service) ensureGPUIndexSynced(vi *VectorIndex, vfs *VectorFileStore) error {
@@ -4527,7 +4592,6 @@ func (s *Service) getOrCreateHNSWIndex(ctx context.Context, dimensions int) (*HN
 	s.hnswMu.RUnlock()
 
 	config := HNSWConfigFromEnv()
-	built := NewHNSWIndex(dimensions, config)
 
 	s.mu.RLock()
 	vfs := s.vectorFileStore
@@ -4539,101 +4603,25 @@ func (s *Service) getOrCreateHNSWIndex(ctx context.Context, dimensions int) (*HN
 		log.Printf("[HNSW] 🧭 Lexical seeding enabled: %d seed node IDs", len(seedNodeIDs))
 	}
 
-	const hnswProgressInterval = 50000 // log progress every N vectors
+	var built *HNSWIndex
+	var buildStats hnswBuildStats
 	if vfs != nil && vfs.Count() > 0 {
 		total := vfs.Count()
 		log.Printf("[HNSW] 🔨 Building from file store: %d vectors (chunk size 10k)", total)
-		built.SetVectorLookup(s.getVectorLookup())
-		chunkSize := 10000
-		var added int
-		addChunkVectors := func(ids []string, vecs [][]float32, seedOnly bool) error {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			for i := range ids {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				isSeed := vectorIDInSeedNodeSet(ids[i], seedNodeIDs)
-				if seedOnly && !isSeed {
-					continue
-				}
-				if !seedOnly && isSeed {
-					continue
-				}
-				if err := built.Add(ids[i], vecs[i]); err != nil {
-					return fmt.Errorf("failed to add vector to HNSW: %w", err)
-				}
-				added++
-			}
-			if added%hnswProgressInterval == 0 || added == total {
-				log.Printf("[HNSW] 🔨 Progress: %d / %d vectors", added, total)
-			}
-			return nil
-		}
-		if len(seedNodeIDs) > 0 {
-			// Seed-first pass: add vectors belonging to BM25 lexical seed docs first.
-			if err := vfs.IterateChunked(chunkSize, func(ids []string, vecs [][]float32) error {
-				return addChunkVectors(ids, vecs, true)
-			}); err != nil {
-				return nil, err
-			}
-			// Follow-up pass: add the remaining vectors.
-			if err := vfs.IterateChunked(chunkSize, func(ids []string, vecs [][]float32) error {
-				return addChunkVectors(ids, vecs, false)
-			}); err != nil {
-				return nil, err
-			}
-		} else if err := vfs.IterateChunked(chunkSize, func(ids []string, vecs [][]float32) error {
-			return addChunkVectors(ids, vecs, false)
-		}); err != nil {
+		var err error
+		built, buildStats, err = buildHNSWWithOptionalGPU(ctx, dimensions, config, s.getVectorLookup(), total, hnswVectorFileStoreIterator(vfs, seedNodeIDs), nil)
+		if err != nil {
 			return nil, err
 		}
-		log.Printf("[HNSW] 🔨 Built from file store: %d vectors", added)
+		log.Printf("[HNSW] 🔨 Built from file store: %d vectors", built.Size())
 	} else if vi != nil {
-		vi.mu.RLock()
-		pairs := make([]struct {
-			id  string
-			vec []float32
-		}, 0, len(vi.vectors))
-		for id, vec := range vi.vectors {
-			pairs = append(pairs, struct {
-				id  string
-				vec []float32
-			}{id: id, vec: vec})
-		}
-		vi.mu.RUnlock()
-		if len(seedNodeIDs) > 0 && len(pairs) > 0 {
-			seedPairs := make([]struct {
-				id  string
-				vec []float32
-			}, 0, len(pairs)/8)
-			otherPairs := make([]struct {
-				id  string
-				vec []float32
-			}, 0, len(pairs))
-			for _, p := range pairs {
-				if vectorIDInSeedNodeSet(p.id, seedNodeIDs) {
-					seedPairs = append(seedPairs, p)
-					continue
-				}
-				otherPairs = append(otherPairs, p)
-			}
-			pairs = append(seedPairs, otherPairs...)
-			log.Printf("[HNSW] 🧭 Lexical-seeded build order: %d seeded vectors prioritized", len(seedPairs))
-		}
+		pairs := hnswOrderedVectorIndexPairs(vi, seedNodeIDs)
 		total := len(pairs)
 		log.Printf("[HNSW] 🔨 Building from in-memory index: %d vectors", total)
-		for i, p := range pairs {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			if err := built.Add(p.id, p.vec); err != nil {
-				return nil, fmt.Errorf("failed to add vector to HNSW: %w", err)
-			}
-			if (i+1)%hnswProgressInterval == 0 || i+1 == total {
-				log.Printf("[HNSW] 🔨 Progress: %d / %d vectors", i+1, total)
-			}
+		var err error
+		built, buildStats, err = buildHNSWWithOptionalGPU(ctx, dimensions, config, nil, total, hnswPairSliceIterator(pairs), nil)
+		if err != nil {
+			return nil, err
 		}
 		log.Printf("[HNSW] 🔨 Built from memory: %d vectors", total)
 	} else {
@@ -4653,8 +4641,9 @@ func (s *Service) getOrCreateHNSWIndex(ctx context.Context, dimensions int) (*HN
 	if quality == "" {
 		quality = "fast"
 	}
-	log.Printf("🔍 HNSW index created: quality=%s M=%d efConstruction=%d efSearch=%d vectors=%d tombstone_ratio=%.2f",
-		quality, config.M, config.EfConstruction, config.EfSearch, built.Size(), built.TombstoneRatio())
+	log.Printf("🔍 HNSW index created: quality=%s M=%d efConstruction=%d efSearch=%d vectors=%d tombstone_ratio=%.2f build_strategy=%s build_backend=%s build_batches=%d build_kernel_errors=%d build_fallback=%t build_duration=%s",
+		quality, config.M, config.EfConstruction, config.EfSearch, built.Size(), built.TombstoneRatio(),
+		buildStats.Strategy, buildStats.Backend, buildStats.Batches, buildStats.KernelErrors, buildStats.Fallback, buildStats.Duration)
 
 	s.hnswIndex = built
 	s.hnswMu.Unlock()
