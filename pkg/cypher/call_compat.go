@@ -9,6 +9,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/buildinfo"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -373,6 +374,27 @@ func (e *StorageExecutor) callDbIndexVectorQueryRelationships(ctx context.Contex
 			targetProperty = vectorIdx.Property
 			similarityFunc = vectorIdx.SimilarityFunc
 		}
+	}
+
+	if e.searchService != nil && targetProperty != "" && e.searchService.HasRelationshipVectorEntries(targetRelType, targetProperty) {
+		hits, err := e.searchService.VectorQueryRelationships(ctx, queryVector, search.RelationshipVectorQuerySpec{
+			IndexName:  indexName,
+			Type:       targetRelType,
+			Property:   targetProperty,
+			Similarity: similarityFunc,
+			Limit:      k,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, hit := range hits {
+			edge, err := e.storage.GetEdge(storage.EdgeID(hit.ID))
+			if err != nil {
+				continue
+			}
+			result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), hit.Score})
+		}
+		return result, nil
 	}
 
 	// Get all edges and filter to those with embeddings
@@ -890,6 +912,9 @@ func (e *StorageExecutor) callDbCreateSetRelationshipVectorProperty(ctx context.
 	err = store.UpdateEdge(rel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update relationship: %w", err)
+	}
+	if e.searchService != nil {
+		_ = e.searchService.IndexEdge(rel)
 	}
 
 	return &ExecuteResult{

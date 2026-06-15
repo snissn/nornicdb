@@ -6,6 +6,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -235,6 +236,73 @@ func BenchmarkGraphitiScenarioHotspots(b *testing.B) {
 				"limit":         50,
 			})
 			require.NoError(b, err)
+		}
+	})
+}
+
+func BenchmarkGraphitiRelationshipVectorFastPath(b *testing.B) {
+	const (
+		dim         = 32
+		entityCount = 512
+		edgeCount   = 4096
+		chunkCount  = 0
+		limit       = 50
+	)
+
+	setup := func(b *testing.B, attachSearch bool) (*StorageExecutor, context.Context) {
+		b.Helper()
+
+		base, err := storage.NewBadgerEngineInMemory()
+		require.NoError(b, err)
+		b.Cleanup(func() { _ = base.Close() })
+
+		ns := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(ns)
+		exec.cache = nil
+		ctx := context.Background()
+
+		_, err = exec.Execute(ctx, "CREATE VECTOR INDEX rel_idx FOR ()-[e:RELATES_TO]-() ON (e.fact_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 32, `vector.similarity_function`: 'cosine'}}", nil)
+		require.NoError(b, err)
+
+		payload := buildGraphitiScenarioPayload(entityCount, edgeCount, chunkCount, dim)
+		_, err = exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": payload.nodes})
+		require.NoError(b, err)
+		_, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
+		require.NoError(b, err)
+
+		if attachSearch {
+			searchSvc := search.NewServiceWithDimensions(ns, dim)
+			require.NoError(b, searchSvc.BuildIndexes(ctx))
+			require.True(b, searchSvc.HasRelationshipVectorEntries("RELATES_TO", "fact_embedding"))
+			exec.SetSearchService(searchSvc)
+		}
+
+		return exec, ctx
+	}
+
+	baselineExec, baselineCtx := setup(b, false)
+	indexedExec, indexedCtx := setup(b, true)
+	queryVec := unitVectorF64(0, dim)
+	params := map[string]interface{}{
+		"search_vector": queryVec,
+		"min_score":     -1.0,
+		"limit":         limit,
+	}
+
+	b.ReportAllocs()
+	b.Run("storage_scan_baseline", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			res, err := baselineExec.Execute(baselineCtx, graphitiEdgeSimilarityQuery, params)
+			require.NoError(b, err)
+			require.NotEmpty(b, res.Rows)
+		}
+	})
+
+	b.Run("indexed_relationship_vectors", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			res, err := indexedExec.Execute(indexedCtx, graphitiEdgeSimilarityQuery, params)
+			require.NoError(b, err)
+			require.NotEmpty(b, res.Rows)
 		}
 	})
 }

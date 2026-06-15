@@ -782,6 +782,26 @@ func (e *StorageExecutor) fetchCosineRelationshipScores(ctx context.Context, ind
 			similarityFunc = vectorIdx.SimilarityFunc
 		}
 	}
+	if orderDesc && e.searchService != nil && targetProperty != "" && e.searchService.HasRelationshipVectorEntries(targetRelType, targetProperty) {
+		hits, err := e.searchService.VectorQueryRelationships(ctx, vec, search.RelationshipVectorQuerySpec{
+			IndexName:  indexName,
+			Type:       targetRelType,
+			Property:   targetProperty,
+			Similarity: similarityFunc,
+			Limit:      limit,
+		})
+		if err == nil {
+			out := make([]vectorEdgeScore, 0, len(hits))
+			for _, hit := range hits {
+				edge, err := e.storage.GetEdge(storage.EdgeID(hit.ID))
+				if err != nil {
+					continue
+				}
+				out = append(out, vectorEdgeScore{edge: edge, score: hit.Score})
+			}
+			return out, true
+		}
+	}
 	edges, err := e.storage.AllEdges()
 	if err != nil {
 		return nil, false

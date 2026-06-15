@@ -482,6 +482,8 @@ type Service struct {
 	nodeNamedVector  map[string]map[string]string // nodeID -> vectorName -> vectorID
 	nodePropVector   map[string]map[string]string // nodeID -> propertyKey -> vectorID
 	nodeChunkVectors map[string][]string          // nodeID -> vectorIDs (main + chunks)
+	edgeTypes        map[string]string            // edgeID -> relationship type
+	edgePropVector   map[string]map[string][]float32
 
 	// HNSW index for approximate nearest neighbor search (optional, lazy-initialized)
 	hnswIndex           *HNSWIndex
@@ -759,6 +761,8 @@ func NewServiceWithDimensionsAndBM25Engine(engine storage.Engine, dimensions int
 		nodeNamedVector:            make(map[string]map[string]string, 1024),
 		nodePropVector:             make(map[string]map[string]string, 1024),
 		nodeChunkVectors:           make(map[string][]string, 1024),
+		edgeTypes:                  make(map[string]string, 1024),
+		edgePropVector:             make(map[string]map[string][]float32, 1024),
 		clusterLexicalProfiles:     make(map[int]map[string]float64),
 		resultCache:                newSearchResultCache(1000, 5*time.Minute), // same order as Cypher query cache
 	}
@@ -1907,6 +1911,19 @@ func firstVectorDimensions(node *storage.Node) int {
 	return 0
 }
 
+func firstEdgeVectorDimensions(edge *storage.Edge) int {
+	if edge == nil || edge.Properties == nil {
+		return 0
+	}
+	for _, value := range edge.Properties {
+		vec := toFloat32SliceAny(value)
+		if len(vec) > 0 {
+			return len(vec)
+		}
+	}
+	return 0
+}
+
 func (s *Service) maybeAutoSetVectorDimensions(dimensions int) {
 	if s == nil || dimensions <= 0 {
 		return
@@ -1991,6 +2008,8 @@ func (s *Service) ClearVectorIndex() {
 	clear(s.nodeNamedVector)
 	clear(s.nodePropVector)
 	clear(s.nodeChunkVectors)
+	clear(s.edgeTypes)
+	clear(s.edgePropVector)
 	s.mu.Unlock()
 
 	s.clusterHNSWMu.Lock()
@@ -2506,6 +2525,129 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	return nil
 }
 
+// IndexEdge adds vector-shaped relationship properties to in-memory search metadata.
+//
+// Relationship vector queries use this metadata to avoid scanning and decoding every
+// relationship from storage for each db.index.vector.queryRelationships call.
+func (s *Service) IndexEdge(edge *storage.Edge) error {
+	if s == nil || edge == nil || !s.vectorEnabled.Load() {
+		return nil
+	}
+	if !s.buildInProgress.Load() {
+		defer s.schedulePersist()
+		if s.resultCache != nil {
+			s.resultCache.Invalidate()
+		}
+	}
+	s.maybeAutoSetVectorDimensions(firstEdgeVectorDimensions(edge))
+
+	s.indexMu.Lock()
+	err := s.indexEdgeLocked(edge)
+	s.indexMu.Unlock()
+	if err == nil && !s.buildInProgress.Load() {
+		s.scheduleStrategyTransitionCheck()
+	}
+	return err
+}
+
+// indexEdgeLocked indexes vector-shaped relationship properties.
+// Caller must hold s.indexMu.
+func (s *Service) indexEdgeLocked(edge *storage.Edge) error {
+	if edge == nil || !s.vectorEnabled.Load() {
+		return nil
+	}
+	edgeIDStr := string(edge.ID)
+	if edgeIDStr == "" {
+		return nil
+	}
+
+	if edge.Properties == nil {
+		s.removeEdgeLocked(edgeIDStr)
+		return nil
+	}
+	if s.buildInProgress.Load() && s.persistEnabled.Load() && s.vectorIndexPath != "" {
+		s.ensureBuildVectorFileStore()
+	}
+
+	dim := s.vectorIndex.GetDimensions()
+	if s.vectorFileStore != nil {
+		dim = s.vectorFileStore.GetDimensions()
+	}
+	if dim <= 0 {
+		return nil
+	}
+
+	indexed := make(map[string][]float32, 2)
+	for key, value := range edge.Properties {
+		vec, ok := vectorFromPropertyValue(value, dim)
+		if !ok {
+			continue
+		}
+		copied := make([]float32, len(vec))
+		copy(copied, vec)
+		indexed[key] = copied
+	}
+
+	s.mu.Lock()
+	delete(s.edgePropVector, edgeIDStr)
+	delete(s.edgeTypes, edgeIDStr)
+	if len(indexed) > 0 {
+		s.edgePropVector[edgeIDStr] = indexed
+		s.edgeTypes[edgeIDStr] = edge.Type
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Service) removeEdgeLocked(edgeIDStr string) {
+	if edgeIDStr == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.edgePropVector, edgeIDStr)
+	delete(s.edgeTypes, edgeIDStr)
+	s.mu.Unlock()
+}
+
+// RemoveEdge removes a relationship from vector search metadata.
+func (s *Service) RemoveEdge(edgeID storage.EdgeID) error {
+	if s == nil {
+		return nil
+	}
+	if !s.buildInProgress.Load() {
+		defer s.schedulePersist()
+		if s.resultCache != nil {
+			s.resultCache.Invalidate()
+		}
+	}
+	s.indexMu.Lock()
+	s.removeEdgeLocked(string(edgeID))
+	s.indexMu.Unlock()
+	if !s.buildInProgress.Load() {
+		s.scheduleStrategyTransitionCheck()
+	}
+	return nil
+}
+
+// HasRelationshipVectorEntries reports whether relationship vector metadata exists
+// for a relationship type/property pair. Empty relationship type matches any type.
+func (s *Service) HasRelationshipVectorEntries(relType, propertyKey string) bool {
+	if s == nil || propertyKey == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for edgeID, props := range s.edgePropVector {
+		if relType != "" && s.edgeTypes[edgeID] != relType {
+			continue
+		}
+		if _, ok := props[propertyKey]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // CountPropertyVectorEntries reports the number of nodes that currently
 // have a tracked vector entry for the given property key. Exposed for
 // teardown / observability tests that need to assert DROP INDEX really
@@ -2567,6 +2709,22 @@ func (s *Service) RemovePropertyVectorIndex(propertyKey string) {
 			delete(s.nodePropVector, nodeID)
 		}
 	}
+}
+
+func (s *Service) buildRelationshipVectorIndexes(ctx context.Context) error {
+	if s == nil || !s.vectorEnabled.Load() {
+		return nil
+	}
+	return storage.StreamEdgesWithFallback(ctx, s.engine, 1000, func(edge *storage.Edge) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		s.maybeAutoSetVectorDimensions(firstEdgeVectorDimensions(edge))
+		s.indexMu.Lock()
+		_ = s.indexEdgeLocked(edge)
+		s.indexMu.Unlock()
+		return nil
+	})
 }
 
 // handleOrphanedEmbedding handles the case where a vector/index hit refers to a node
@@ -3055,6 +3213,10 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		}
 		fmt.Printf("📊 Indexed %d total nodes\n", count)
 		log.Printf("📇 BuildIndexes: base index iteration complete (processed=%d)", count)
+		s.setBuildPhase("iterating_relationship_vectors")
+		if err := s.buildRelationshipVectorIndexes(ctx); err != nil {
+			return err
+		}
 		// Persist BM25 + vector store before HNSW/k-means build so base indexes are durable.
 		s.setBuildPhase("persisting_base_indexes")
 		s.persistBaseIndexes()
@@ -3165,6 +3327,10 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	}
 	fmt.Printf("📊 Indexed %d total nodes\n", count)
 	log.Printf("📇 BuildIndexes: base index iteration complete (processed=%d)", count)
+	s.setBuildPhase("iterating_relationship_vectors")
+	if err := s.buildRelationshipVectorIndexes(ctx); err != nil {
+		return err
+	}
 	// Persist BM25 + vector store before HNSW/k-means build so base indexes are durable.
 	s.setBuildPhase("persisting_base_indexes")
 	s.persistBaseIndexes()

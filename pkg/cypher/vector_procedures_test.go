@@ -1418,6 +1418,53 @@ func TestCallDbIndexVectorQueryRelationships(t *testing.T) {
 	})
 }
 
+func TestCallDbIndexVectorQueryRelationships_UsesSearchServiceRelationshipVectors(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CALL db.index.vector.createRelationshipIndex('rel_idx_search', 'RELATES_TO', 'fact_embedding', 3, 'cosine')", nil)
+	require.NoError(t, err)
+
+	_, err = engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Entity"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Entity"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "c", Labels: []string{"Entity"}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&storage.Edge{
+		ID:        "rel-best",
+		Type:      "RELATES_TO",
+		StartNode: "a",
+		EndNode:   "b",
+		Properties: map[string]interface{}{
+			"fact_embedding": []float32{1, 0, 0},
+		},
+	}))
+	require.NoError(t, engine.CreateEdge(&storage.Edge{
+		ID:        "rel-other",
+		Type:      "RELATES_TO",
+		StartNode: "a",
+		EndNode:   "c",
+		Properties: map[string]interface{}{
+			"fact_embedding": []float32{0, 1, 0},
+		},
+	}))
+
+	searchSvc := search.NewServiceWithDimensions(engine, 3)
+	require.NoError(t, searchSvc.BuildIndexes(ctx))
+	require.True(t, searchSvc.HasRelationshipVectorEntries("RELATES_TO", "fact_embedding"))
+	exec.SetSearchService(searchSvc)
+
+	result, err := exec.Execute(ctx, "CALL db.index.vector.queryRelationships('rel_idx_search', 1, [1.0, 0.0, 0.0]) YIELD relationship, score", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	relationship := result.Rows[0][0].(map[string]interface{})
+	require.Equal(t, "rel-best", relationship["_id"])
+	require.Greater(t, result.Rows[0][1].(float64), 0.99)
+}
+
 func TestCallDbIndexFulltextQueryRelationships(t *testing.T) {
 	baseEngine := newTestMemoryEngine(t)
 

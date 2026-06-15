@@ -47,6 +47,32 @@ type VectorQueryHit struct {
 	Score float64
 }
 
+// RelationshipVectorQuerySpec describes a Cypher-style relationship vector query.
+type RelationshipVectorQuerySpec struct {
+	// IndexName is informational only (used for debugging/observability).
+	IndexName string
+
+	// Type optionally filters candidate relationships by relationship type.
+	Type string
+
+	// Property is the relationship vector property name.
+	Property string
+
+	// Similarity is the similarity function name. Supported values:
+	// "cosine" (default), "dot", "euclidean".
+	Similarity string
+
+	// Limit is the maximum number of results to return.
+	Limit int
+}
+
+// RelationshipVectorQueryHit is a lightweight result row for relationship vector queries.
+// ID is the relationship ID.
+type RelationshipVectorQueryHit struct {
+	ID    string
+	Score float64
+}
+
 // VectorQueryNodes executes a Cypher-style vector query.
 //
 // This method preserves Cypher semantics for per-node embedding selection:
@@ -93,6 +119,98 @@ func (s *Service) VectorQueryNodes(ctx context.Context, queryEmbedding []float32
 	// Exact (index-backed) path for dot/euclidean: compute per-node scores from in-memory vectors
 	// without scanning storage.
 	return s.vectorQueryNodesExact(ctx, queryEmbedding, spec, vectorName, strings.ToLower(similarity))
+}
+
+// VectorQueryRelationships executes a Cypher-style relationship vector query using
+// in-memory relationship-vector metadata. This avoids scanning storage.AllEdges()
+// on every fact-search call.
+func (s *Service) VectorQueryRelationships(ctx context.Context, queryEmbedding []float32, spec RelationshipVectorQuerySpec) ([]RelationshipVectorQueryHit, error) {
+	if s == nil || s.engine == nil {
+		return nil, fmt.Errorf("search service unavailable")
+	}
+	if len(queryEmbedding) == 0 {
+		return nil, fmt.Errorf("query embedding required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if spec.Limit <= 0 {
+		spec.Limit = 10
+	}
+	if spec.Property == "" {
+		return nil, nil
+	}
+	similarity := strings.ToLower(strings.TrimSpace(spec.Similarity))
+	if similarity == "" {
+		similarity = "cosine"
+	}
+
+	if !s.HasRelationshipVectorEntries(spec.Type, spec.Property) {
+		_ = s.BuildIndexes(ctx)
+	}
+
+	type edgeMeta struct {
+		id  string
+		vec []float32
+	}
+	candidates := make([]edgeMeta, 0, spec.Limit*2)
+	s.mu.RLock()
+	for edgeID, props := range s.edgePropVector {
+		if spec.Type != "" && s.edgeTypes[edgeID] != spec.Type {
+			continue
+		}
+		vec, ok := props[spec.Property]
+		if !ok || len(vec) != len(queryEmbedding) {
+			continue
+		}
+		copied := make([]float32, len(vec))
+		copy(copied, vec)
+		candidates = append(candidates, edgeMeta{id: edgeID, vec: copied})
+	}
+	s.mu.RUnlock()
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	type scoredEdge struct {
+		id    string
+		score float64
+	}
+	scored := make([]scoredEdge, 0, len(candidates))
+	var normalizedQuery []float32
+	if similarity == "cosine" {
+		normalizedQuery = vector.Normalize(queryEmbedding)
+	}
+	for _, cand := range candidates {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		var score float64
+		switch similarity {
+		case "cosine":
+			score = vector.DotProduct(normalizedQuery, vector.Normalize(cand.vec))
+			if score > 1.0 {
+				score = 1.0
+			} else if score < -1.0 {
+				score = -1.0
+			}
+		default:
+			score = cypherVectorSimilarity(similarity, queryEmbedding, cand.vec)
+		}
+		scored = append(scored, scoredEdge{id: cand.id, score: score})
+	}
+
+	sort.Slice(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
+	if len(scored) > spec.Limit {
+		scored = scored[:spec.Limit]
+	}
+	out := make([]RelationshipVectorQueryHit, 0, len(scored))
+	for _, r := range scored {
+		out = append(out, RelationshipVectorQueryHit{ID: r.id, Score: r.score})
+	}
+	return out, nil
 }
 
 func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []float32, spec VectorQuerySpec, vectorName string) ([]VectorQueryHit, error) {

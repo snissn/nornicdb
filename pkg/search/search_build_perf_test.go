@@ -2,8 +2,10 @@ package search
 
 import (
 	"context"
+	"sort"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -134,4 +136,175 @@ func TestBuildIndexes_IndexesNamedChunkAndPropertyVectors(t *testing.T) {
 	require.Contains(t, chunks, "nornic:doc-vectors")
 	require.Contains(t, chunks, "nornic:doc-vectors-chunk-0")
 	require.Contains(t, chunks, "nornic:doc-vectors-chunk-1")
+}
+
+func TestBuildIndexes_IndexesRelationshipPropertyVectors(t *testing.T) {
+	t.Parallel()
+
+	engine := storage.NewMemoryEngine()
+	svc := NewServiceWithDimensions(engine, 3)
+
+	_, err := engine.CreateNode(&storage.Node{ID: "nornic:a"})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "nornic:b"})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&storage.Edge{
+		ID:        "nornic:r1",
+		StartNode: "nornic:a",
+		EndNode:   "nornic:b",
+		Type:      "RELATES_TO",
+		Properties: map[string]any{
+			"fact_embedding": []float32{1, 0, 0},
+			"fact":           "alpha fact",
+		},
+	}))
+
+	require.NoError(t, svc.BuildIndexes(context.Background()))
+	require.True(t, svc.HasRelationshipVectorEntries("RELATES_TO", "fact_embedding"))
+
+	hits, err := svc.VectorQueryRelationships(context.Background(), []float32{1, 0, 0}, RelationshipVectorQuerySpec{
+		Type:       "RELATES_TO",
+		Property:   "fact_embedding",
+		Similarity: "cosine",
+		Limit:      5,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	require.Equal(t, "nornic:r1", hits[0].ID)
+	require.Greater(t, hits[0].Score, 0.99)
+}
+
+func TestIndexEdge_ReplacesExistingRelationshipVectors(t *testing.T) {
+	t.Parallel()
+
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	edge := &storage.Edge{
+		ID:        "r1",
+		StartNode: "a",
+		EndNode:   "b",
+		Type:      "RELATES_TO",
+		Properties: map[string]any{
+			"fact_embedding": []float32{1, 0},
+		},
+	}
+	require.NoError(t, svc.IndexEdge(edge))
+
+	edge.Properties["fact_embedding"] = []float32{0, 1}
+	require.NoError(t, svc.IndexEdge(edge))
+
+	hits, err := svc.VectorQueryRelationships(context.Background(), []float32{1, 0}, RelationshipVectorQuerySpec{
+		Type:       "RELATES_TO",
+		Property:   "fact_embedding",
+		Similarity: "cosine",
+		Limit:      5,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	require.Equal(t, "r1", hits[0].ID)
+	require.Less(t, hits[0].Score, 0.1)
+}
+
+func BenchmarkRelationshipVectorQueryIndexedVsStorageScan(b *testing.B) {
+	const (
+		dim       = 32
+		edgeCount = 8192
+		limit     = 50
+	)
+
+	engine, err := storage.NewBadgerEngineInMemory()
+	require.NoError(b, err)
+	b.Cleanup(func() { _ = engine.Close() })
+
+	_, err = engine.CreateNode(&storage.Node{ID: "nornic:a"})
+	require.NoError(b, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "nornic:b"})
+	require.NoError(b, err)
+	for i := 0; i < edgeCount; i++ {
+		require.NoError(b, engine.CreateEdge(&storage.Edge{
+			ID:        storage.EdgeID("nornic:rel-" + formatBenchID(i)),
+			StartNode: "nornic:a",
+			EndNode:   "nornic:b",
+			Type:      "RELATES_TO",
+			Properties: map[string]any{
+				"fact_embedding": benchmarkRelationshipVector(i, dim),
+				"fact":           "relationship vector benchmark",
+			},
+		}))
+	}
+
+	ctx := context.Background()
+	query := benchmarkRelationshipVector(0, dim)
+	svc := NewServiceWithDimensions(engine, dim)
+	require.NoError(b, svc.BuildIndexes(ctx))
+	require.True(b, svc.HasRelationshipVectorEntries("RELATES_TO", "fact_embedding"))
+
+	b.ReportAllocs()
+	b.Run("storage_scan_baseline", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			hits := benchmarkRelationshipStorageScan(b, ctx, engine, query, limit)
+			if len(hits) == 0 {
+				b.Fatal("expected relationship hits")
+			}
+		}
+	})
+
+	b.Run("indexed_relationship_vectors", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			hits, err := svc.VectorQueryRelationships(ctx, query, RelationshipVectorQuerySpec{
+				Type:       "RELATES_TO",
+				Property:   "fact_embedding",
+				Similarity: "cosine",
+				Limit:      limit,
+			})
+			require.NoError(b, err)
+			if len(hits) == 0 {
+				b.Fatal("expected relationship hits")
+			}
+		}
+	})
+}
+
+func benchmarkRelationshipStorageScan(tb testing.TB, ctx context.Context, engine storage.Engine, query []float32, limit int) []RelationshipVectorQueryHit {
+	tb.Helper()
+	hits := make([]RelationshipVectorQueryHit, 0, limit)
+	err := storage.StreamEdgesWithFallback(ctx, engine, 1000, func(edge *storage.Edge) error {
+		if edge.Type != "RELATES_TO" {
+			return nil
+		}
+		vec, ok := vectorFromPropertyValue(edge.Properties["fact_embedding"], len(query))
+		if !ok {
+			return nil
+		}
+		hits = append(hits, RelationshipVectorQueryHit{
+			ID:    string(edge.ID),
+			Score: vector.CosineSimilarity(query, vec),
+		})
+		return nil
+	})
+	require.NoError(tb, err)
+	sort.Slice(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	return hits
+}
+
+func benchmarkRelationshipVector(seed, dim int) []float32 {
+	vec := make([]float32, dim)
+	base := seed % dim
+	vec[base] = 1
+	vec[(base+3)%dim] = 0.35
+	vec[(base+7)%dim] = 0.2
+	vector.NormalizeInPlace(vec)
+	return vec
+}
+
+func formatBenchID(i int) string {
+	const width = 8
+	var buf [width]byte
+	for pos := width - 1; pos >= 0; pos-- {
+		buf[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	return string(buf[:])
 }
