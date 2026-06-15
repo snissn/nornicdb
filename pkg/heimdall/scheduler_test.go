@@ -901,6 +901,8 @@ func TestNewManager_BothLoadsFail(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, manager)
 	assert.Contains(t, err.Error(), "failed to load SLM model")
+	assert.Contains(t, err.Error(), "gpu load failed")
+	assert.Contains(t, err.Error(), "cpu fallback failed")
 }
 
 func TestNewManager_CPUOnlyMode(t *testing.T) {

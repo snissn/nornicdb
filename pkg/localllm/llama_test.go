@@ -49,6 +49,9 @@ func TestDefaultOptions(t *testing.T) {
 	if opts.GPULayers != -1 {
 		t.Errorf("GPULayers = %d, want -1 (auto)", opts.GPULayers)
 	}
+	if opts.Features.FlashAttn != 0 {
+		t.Errorf("Features.FlashAttn = %d, want 0 (disabled)", opts.Features.FlashAttn)
+	}
 }
 
 func TestResolveEmbeddingContextAndBatch(t *testing.T) {

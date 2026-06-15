@@ -139,7 +139,7 @@ type Config struct {
 	CtxType       int // Context type: 0=default, 1=MTP
 	PoolingType   int // Pooling: 1=mean, 2=cls, 3=last, 4=rank
 	AttentionType int // Attention: 0=causal, 1=non-causal
-	FlashAttn     int // Flash attn: -1=auto, 0=off, 1=on
+	FlashAttn     int // Flash attn: -1=auto, 0=off, 1=on (embedding default: off)
 }
 
 // DefaultOllamaConfig returns configuration for local Ollama with mxbai-embed-large.

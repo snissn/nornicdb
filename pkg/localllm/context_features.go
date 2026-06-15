@@ -22,16 +22,16 @@ type ContextFeatures struct {
 	// AttentionType controls attention masking. 0=causal (LLM default),
 	// 1=non-causal (BERT-style, default for embeddings).
 	AttentionType int
-	// FlashAttn controls flash attention. -1=auto (default), 0=disabled, 1=enabled.
+	// FlashAttn controls flash attention. -1=auto, 0=disabled (default), 1=enabled.
 	FlashAttn int
 }
 
 // DefaultContextFeatures returns defaults optimized for embedding models.
 func DefaultContextFeatures() ContextFeatures {
 	return ContextFeatures{
-		CtxType:       0,  // LLAMA_CONTEXT_TYPE_DEFAULT
-		PoolingType:   1,  // LLAMA_POOLING_TYPE_MEAN
-		AttentionType: 1,  // LLAMA_ATTENTION_TYPE_NON_CAUSAL
-		FlashAttn:     -1, // LLAMA_FLASH_ATTN_TYPE_AUTO
+		CtxType:       0, // LLAMA_CONTEXT_TYPE_DEFAULT
+		PoolingType:   1, // LLAMA_POOLING_TYPE_MEAN
+		AttentionType: 1, // LLAMA_ATTENTION_TYPE_NON_CAUSAL
+		FlashAttn:     0, // LLAMA_FLASH_ATTN_TYPE_DISABLED
 	}
 }

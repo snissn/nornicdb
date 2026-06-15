@@ -196,10 +196,11 @@ func loadLocalGenerator(cfg Config) (Generator, string, error) {
 
 	generator, err := loadGenerator(modelPath, gpuLayers, contextSize, batchSize)
 	if err != nil {
+		gpuErr := err
 		fmt.Printf("⚠️  GPU loading failed, trying CPU fallback: %v\n", err)
 		generator, err = loadGenerator(modelPath, 0, contextSize, batchSize)
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to load SLM model: %w", err)
+			return nil, "", fmt.Errorf("failed to load SLM model: gpu load failed: %v; cpu fallback failed: %w", gpuErr, err)
 		}
 		fmt.Printf("✅ SLM model loaded (gpu_layers=0)\n")
 	} else {

@@ -7,7 +7,7 @@
 // GPU acceleration (Metal on macOS, CUDA on Linux) and CPU fallback.
 //
 // Metal Optimizations (Apple Silicon):
-//   - Flash attention for faster inference
+//   - Configurable flash attention
 //   - Full model GPU offload by default
 //   - Unified memory utilization
 //   - SIMD-optimized CPU fallback
@@ -80,23 +80,24 @@ int get_n_layers(struct llama_model* model) {
     return llama_model_n_layer(model);
 }
 
-// Load model with optimal GPU settings
-// n_gpu_layers: -1 = all layers on GPU, 0 = CPU only, N = N layers on GPU
-struct llama_model* load_model(const char* path, int n_gpu_layers) {
+// Load model with optimal GPU settings.
+// n_gpu_layers: -1 = all layers on GPU, 0 = CPU only, N = N layers on GPU.
+// suppress_logs: 1 redirects stderr during llama_model_load_from_file.
+struct llama_model* load_model_with_options(const char* path, int n_gpu_layers, int suppress_logs) {
     init_backend();
 
-    // Suppress verbose tensor loading logs by redirecting stderr to /dev/null (or NUL on Windows)
-    // Save original stderr file descriptor
     int original_stderr = -1;
     FILE* dev_null = NULL;
-    #ifdef _WIN32
-        dev_null = fopen("NUL", "w");
-    #else
-        dev_null = fopen("/dev/null", "w");
-    #endif
-    if (dev_null) {
-        original_stderr = dup(2);
-        dup2(fileno(dev_null), 2);  // Redirect stderr (fd 2) to /dev/null or NUL
+    if (suppress_logs) {
+        #ifdef _WIN32
+            dev_null = fopen("NUL", "w");
+        #else
+            dev_null = fopen("/dev/null", "w");
+        #endif
+        if (dev_null) {
+            original_stderr = dup(2);
+            dup2(fileno(dev_null), 2);
+        }
     }
 
     struct llama_model_params params = llama_model_default_params();
@@ -127,6 +128,10 @@ struct llama_model* load_model(const char* path, int n_gpu_layers) {
     }
 
     return model;
+}
+
+struct llama_model* load_model(const char* path, int n_gpu_layers) {
+    return load_model_with_options(path, n_gpu_layers, 1);
 }
 
 // Create embedding context with configurable features.
@@ -167,7 +172,8 @@ struct llama_context* create_context(struct llama_model* model, int n_ctx, int n
     // Attention type for embedding models (non-causal = BERT-style bidirectional)
     params.attention_type = (enum llama_attention_type)attention_type;
 
-    // Flash attention — major speedup on Metal and CUDA
+    // Flash attention is configurable because some embedding models/backends
+    // fail health checks when llama.cpp auto-enables it.
     params.flash_attn_type = (enum llama_flash_attn_type)flash_attn;
 
     // logits_all removed in newer llama.cpp - controlled per-batch now
@@ -594,7 +600,6 @@ var modelLoadMu sync.Mutex
 // Set GPULayers to 0 to force CPU-only mode.
 //
 // For Apple Silicon, this enables full Metal GPU acceleration with:
-//   - Flash attention
 //   - Full model offload
 //   - Unified memory optimization
 //
@@ -667,7 +672,7 @@ func resolveEmbeddingContextAndBatch(opts Options, modelCtxTrain int) (ctxSize, 
 //
 // When running on Apple Silicon with Metal support compiled in:
 //   - All model layers are offloaded to GPU by default
-//   - Flash attention is enabled for faster inference
+//   - Flash attention defaults to disabled for embedding stability
 //   - Unified memory is utilized efficiently
 //   - Typical speedup: 5-10x over CPU-only
 //
@@ -734,7 +739,7 @@ func LoadModel(opts Options) (*Model, error) {
 //
 // On Apple Silicon with Metal, the embedding is computed on the GPU:
 //  1. Tokenization (CPU)
-//  2. Model inference (GPU - flash attention enabled)
+//  2. Model inference (GPU)
 //  3. Pooling (GPU)
 //  4. Normalization (CPU)
 //
@@ -1102,7 +1107,11 @@ func LoadGenerationModel(opts GenerationOptions) (*GenerationModel, error) {
 	cPath := C.CString(opts.ModelPath)
 	defer C.free(unsafe.Pointer(cPath))
 
-	model := C.load_model(cPath, C.int(opts.GPULayers))
+	suppressLogs := C.int(1)
+	if strings.EqualFold(os.Getenv("NORNICDB_LLAMA_VERBOSE_LOAD"), "true") || os.Getenv("NORNICDB_LLAMA_VERBOSE_LOAD") == "1" {
+		suppressLogs = 0
+	}
+	model := C.load_model_with_options(cPath, C.int(opts.GPULayers), suppressLogs)
 	if model == nil {
 		return nil, fmt.Errorf("failed to load generation model: %s", opts.ModelPath)
 	}

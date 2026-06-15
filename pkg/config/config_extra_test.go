@@ -39,6 +39,22 @@ func TestGetParserType_DefaultWhenParserValueUnset(t *testing.T) {
 	assert.Equal(t, ParserTypeNornic, GetParserType())
 }
 
+func TestApplyEnvVars_FlashAttentionAllowsZeroOverride(t *testing.T) {
+	t.Setenv("NORNICDB_EMBEDDING_FLASH_ATTN", "0")
+	t.Setenv("NORNICDB_HEIMDALL_FLASH_ATTN", "0")
+	t.Setenv("NORNICDB_RERANK_FLASH_ATTN", "0")
+
+	cfg := LoadDefaults()
+	cfg.Memory.EmbeddingFlashAttn = -1
+	cfg.Features.HeimdallFlashAttn = -1
+	cfg.Features.RerankFlashAttn = -1
+
+	require.NoError(t, applyEnvVars(cfg))
+	assert.Equal(t, 0, cfg.Memory.EmbeddingFlashAttn)
+	assert.Equal(t, 0, cfg.Features.HeimdallFlashAttn)
+	assert.Equal(t, 0, cfg.Features.RerankFlashAttn)
+}
+
 // ============================================================================
 // FeatureFlagsConfig Heimdall getters
 // ============================================================================

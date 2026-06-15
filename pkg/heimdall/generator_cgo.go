@@ -25,16 +25,16 @@ func cgoGeneratorLoader(modelPath string, gpuLayers, contextSize, batchSize int)
 	opts.BatchSize = batchSize
 
 	// Apply Heimdall-specific context features from env
-	if v := envInt("NORNICDB_HEIMDALL_CTX_TYPE"); v != 0 {
+	if v, ok := envInt("NORNICDB_HEIMDALL_CTX_TYPE"); ok && v != 0 {
 		opts.Features.CtxType = v
 	}
-	if v := envInt("NORNICDB_HEIMDALL_POOLING_TYPE"); v != 0 {
+	if v, ok := envInt("NORNICDB_HEIMDALL_POOLING_TYPE"); ok && v != 0 {
 		opts.Features.PoolingType = v
 	}
-	if v := envInt("NORNICDB_HEIMDALL_ATTENTION_TYPE"); v != 0 {
+	if v, ok := envInt("NORNICDB_HEIMDALL_ATTENTION_TYPE"); ok && v != 0 {
 		opts.Features.AttentionType = v
 	}
-	if v := envInt("NORNICDB_HEIMDALL_FLASH_ATTN"); v != 0 {
+	if v, ok := envInt("NORNICDB_HEIMDALL_FLASH_ATTN"); ok {
 		opts.Features.FlashAttn = v
 	}
 
@@ -46,14 +46,14 @@ func cgoGeneratorLoader(modelPath string, gpuLayers, contextSize, batchSize int)
 	return &cgoGenerator{model: model}, nil
 }
 
-// envInt reads an env var as int, returns 0 if unset or invalid.
-func envInt(key string) int {
-	if v := os.Getenv(key); v != "" {
-		if i, err := strconv.Atoi(v); err == nil {
-			return i
-		}
+// envInt reads an env var as int.
+func envInt(key string) (int, bool) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return 0, false
 	}
-	return 0
+	i, err := strconv.Atoi(v)
+	return i, err == nil
 }
 
 // cgoGenerator wraps localllm.GenerationModel to implement Generator interface.

@@ -25,16 +25,16 @@ func yzmaGeneratorLoader(modelPath string, gpuLayers, contextSize, batchSize int
 	opts.BatchSize = batchSize
 
 	// Apply Heimdall-specific context features from env
-	if v := yzmaEnvInt("NORNICDB_HEIMDALL_CTX_TYPE"); v != 0 {
+	if v, ok := yzmaEnvInt("NORNICDB_HEIMDALL_CTX_TYPE"); ok && v != 0 {
 		opts.Features.CtxType = v
 	}
-	if v := yzmaEnvInt("NORNICDB_HEIMDALL_POOLING_TYPE"); v != 0 {
+	if v, ok := yzmaEnvInt("NORNICDB_HEIMDALL_POOLING_TYPE"); ok && v != 0 {
 		opts.Features.PoolingType = v
 	}
-	if v := yzmaEnvInt("NORNICDB_HEIMDALL_ATTENTION_TYPE"); v != 0 {
+	if v, ok := yzmaEnvInt("NORNICDB_HEIMDALL_ATTENTION_TYPE"); ok && v != 0 {
 		opts.Features.AttentionType = v
 	}
-	if v := yzmaEnvInt("NORNICDB_HEIMDALL_FLASH_ATTN"); v != 0 {
+	if v, ok := yzmaEnvInt("NORNICDB_HEIMDALL_FLASH_ATTN"); ok {
 		opts.Features.FlashAttn = v
 	}
 
@@ -46,14 +46,14 @@ func yzmaGeneratorLoader(modelPath string, gpuLayers, contextSize, batchSize int
 	return &yzmaGenerator{model: model}, nil
 }
 
-// yzmaEnvInt reads an env var as int, returns 0 if unset or invalid.
-func yzmaEnvInt(key string) int {
-	if v := os.Getenv(key); v != "" {
-		if i, err := strconv.Atoi(v); err == nil {
-			return i
-		}
+// yzmaEnvInt reads an env var as int.
+func yzmaEnvInt(key string) (int, bool) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return 0, false
 	}
-	return 0
+	i, err := strconv.Atoi(v)
+	return i, err == nil
 }
 
 // yzmaGenerator wraps localllm.GenerationModel to implement Generator interface.

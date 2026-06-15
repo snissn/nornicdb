@@ -620,7 +620,7 @@ type MemoryConfig struct {
 	// Env: NORNICDB_EMBEDDING_ATTENTION_TYPE
 	EmbeddingAttentionType int
 	// EmbeddingFlashAttn controls flash attention for embedding model.
-	// -1=auto (default), 0=disabled, 1=enabled.
+	// -1=auto, 0=disabled (default), 1=enabled.
 	// Env: NORNICDB_EMBEDDING_FLASH_ATTN
 	EmbeddingFlashAttn int
 	// DefaultNodeLabel is the label applied to nodes when no label is specified.
@@ -2392,7 +2392,7 @@ func applyEnvVars(config *Config) error {
 	if v := getEnvInt("NORNICDB_EMBEDDING_ATTENTION_TYPE", 0); v != 0 {
 		config.Memory.EmbeddingAttentionType = v
 	}
-	if v := getEnvInt("NORNICDB_EMBEDDING_FLASH_ATTN", 0); v != 0 {
+	if v, ok := lookupEnvInt("NORNICDB_EMBEDDING_FLASH_ATTN"); ok {
 		config.Memory.EmbeddingFlashAttn = v
 	}
 	if v := getEnvInt("NORNICDB_KMEANS_MIN_EMBEDDINGS", 0); v > 0 {
@@ -2695,7 +2695,7 @@ func applyEnvVars(config *Config) error {
 	if v := getEnvInt("NORNICDB_HEIMDALL_ATTENTION_TYPE", 0); v != 0 {
 		config.Features.HeimdallAttentionType = v
 	}
-	if v := getEnvInt("NORNICDB_HEIMDALL_FLASH_ATTN", 0); v != 0 {
+	if v, ok := lookupEnvInt("NORNICDB_HEIMDALL_FLASH_ATTN"); ok {
 		config.Features.HeimdallFlashAttn = v
 	}
 	// MCP tools in agentic loop (NORNICDB_HEIMDALL_MCP_ENABLE, NORNICDB_HEIMDALL_MCP_TOOLS)
@@ -2740,7 +2740,7 @@ func applyEnvVars(config *Config) error {
 	if v := getEnvInt("NORNICDB_RERANK_ATTENTION_TYPE", 0); v != 0 {
 		config.Features.RerankAttentionType = v
 	}
-	if v := getEnvInt("NORNICDB_RERANK_FLASH_ATTN", 0); v != 0 {
+	if v, ok := lookupEnvInt("NORNICDB_RERANK_FLASH_ATTN"); ok {
 		config.Features.RerankFlashAttn = v
 	}
 	if v := getEnvInt("NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS", 0); v > 0 {
@@ -3692,6 +3692,15 @@ func getEnv(key, defaultVal string) string {
 
 func getEnvInt(key string, defaultVal int) int {
 	return envutil.GetInt(key, defaultVal)
+}
+
+func lookupEnvInt(key string) (int, bool) {
+	val, ok := os.LookupEnv(key)
+	if !ok || val == "" {
+		return 0, false
+	}
+	i, err := strconv.Atoi(val)
+	return i, err == nil
 }
 
 func getEnvFloat(key string, defaultVal float64) float64 {
