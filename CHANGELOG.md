@@ -5,6 +5,12 @@ All notable changes to NornicDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- **Parameter-map property access correctness fixed across direct and `WITH` projection forms**:
+  - `$map.key` and `$map['key']` now resolve to typed values in `RETURN`/expression evaluation instead of being returned as literal source text.
+  - `WITH $map AS m RETURN m.key` / `m['key']` now evaluate correctly (no token corruption from scalar substitution).
+
 ## [v1.1.6] - 2026-06-12
 
 Release focused on Neo4j/Graphiti compatibility hardening, vector-search performance correctness, and a new offline admin import/export workflow.
