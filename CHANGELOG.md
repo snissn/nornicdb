@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **llama.cpp bundle/build refresh** for the upcoming `v1.1.7` line:
+  - Updated bundled llama.cpp artifacts and synchronized build surfaces (Makefile, Windows batch scripts, shell/PowerShell build scripts, and Docker llama images) to the current pinned integration version.
+- **Embedding model defaults hardened for local GGUF stability**:
+  - Embedding context features now default `flash_attn` to disabled (`0`) instead of auto for safer startup across Metal/CUDA backends.
+  - `NORNICDB_EMBEDDING_FLASH_ATTN=0` is treated as an explicit override (not silently ignored).
+
+### Added
+
+- **`NORNICDB_LLAMA_VERBOSE_LOAD` generation-load diagnostics toggle**:
+  - Set to `true`/`1` to expose native llama.cpp model-load diagnostics for Heimdall generation model loading.
+
+### Fixed
+
+- **Heimdall local-model fallback error reporting now preserves both attempts**:
+  - When GPU load fails and CPU fallback also fails, the returned error now includes both failure paths instead of only the final fallback error.
+- **Flash-attention override semantics corrected for Heimdall and rerank paths**:
+  - `NORNICDB_HEIMDALL_FLASH_ATTN=0` and `NORNICDB_RERANK_FLASH_ATTN=0` are now honored as explicit values.
 - **Parameter-map property access correctness fixed across direct and `WITH` projection forms**:
   - `$map.key` and `$map['key']` now resolve to typed values in `RETURN`/expression evaluation instead of being returned as literal source text.
   - `WITH $map AS m RETURN m.key` / `m['key']` now evaluate correctly (no token corruption from scalar substitution).
