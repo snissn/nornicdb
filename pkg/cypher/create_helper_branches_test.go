@@ -28,6 +28,14 @@ func TestResolveSetMergeSourceFromParams_Branches(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "x", v)
 
+	v, ok = resolveSetMergeSourceFromParams(params, "row['props']")
+	require.True(t, ok)
+	require.Equal(t, map[string]interface{}{"a": int64(1)}, v)
+
+	v, ok = resolveSetMergeSourceFromParams(params, "row[\"props\"].a")
+	require.True(t, ok)
+	require.EqualValues(t, int64(1), v)
+
 	_, ok = resolveSetMergeSourceFromParams(nil, "row")
 	require.False(t, ok)
 	_, ok = resolveSetMergeSourceFromParams(params, "")
@@ -37,6 +45,10 @@ func TestResolveSetMergeSourceFromParams_Branches(t *testing.T) {
 	_, ok = resolveSetMergeSourceFromParams(params, "row.props.missing")
 	require.False(t, ok)
 	_, ok = resolveSetMergeSourceFromParams(params, "row.bad-char")
+	require.False(t, ok)
+	_, ok = resolveSetMergeSourceFromParams(params, "row['props'")
+	require.False(t, ok)
+	_, ok = resolveSetMergeSourceFromParams(params, "row[props]")
 	require.False(t, ok)
 }
 

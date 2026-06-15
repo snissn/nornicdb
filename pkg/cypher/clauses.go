@@ -260,30 +260,17 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 				// treatment; node/edge bindings flow through the typed
 				// maps above so the evaluator handles them natively.
 				for varName, varVal := range scalarBindings {
-					if !strings.Contains(expr, varName) {
-						continue
-					}
-					var replacement string
 					switch v := varVal.(type) {
-					case []interface{}:
-						parts := make([]string, len(v))
-						for j, elem := range v {
-							switch e := elem.(type) {
-							case string:
-								parts[j] = fmt.Sprintf("'%s'", e)
-							default:
-								parts[j] = fmt.Sprintf("%v", e)
-							}
-						}
-						replacement = "[" + strings.Join(parts, ", ") + "]"
-					case string:
-						replacement = fmt.Sprintf("'%s'", v)
-					case nil:
-						replacement = "null"
+					case map[string]interface{}:
+						expr = expandMapMemberAccess(expr, varName, v)
+						expr = replaceIdentifierOutsideQuotes(expr, varName, mapToCypherLiteral(v))
+					case map[interface{}]interface{}:
+						norm := normalizeInterfaceMap(v)
+						expr = expandMapMemberAccess(expr, varName, norm)
+						expr = replaceIdentifierOutsideQuotes(expr, varName, mapToCypherLiteral(norm))
 					default:
-						replacement = fmt.Sprintf("%v", v)
+						expr = replaceIdentifierOutsideQuotes(expr, varName, valueToCypherLiteral(varVal))
 					}
-					expr = strings.ReplaceAll(expr, varName, replacement)
 				}
 				returnValues[i] = e.evaluateExpressionWithContext(ctx, expr, nodes, rels)
 			}
@@ -345,17 +332,17 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 					}
 				}
 				replacement := "[" + strings.Join(parts, ", ") + "]"
-				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, replacement)
+				substitutedRemainder = replaceIdentifierOutsideQuotes(substitutedRemainder, varName, replacement)
 			case string:
-				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, fmt.Sprintf("'%s'", v))
+				substitutedRemainder = replaceIdentifierOutsideQuotes(substitutedRemainder, varName, fmt.Sprintf("'%s'", v))
 			case map[string]interface{}:
-				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, mapToCypherLiteral(v))
+				substitutedRemainder = replaceIdentifierOutsideQuotes(substitutedRemainder, varName, mapToCypherLiteral(v))
 			case map[interface{}]interface{}:
-				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, mapToCypherLiteral(normalizeInterfaceMap(v)))
+				substitutedRemainder = replaceIdentifierOutsideQuotes(substitutedRemainder, varName, mapToCypherLiteral(normalizeInterfaceMap(v)))
 			case nil:
-				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, "null")
+				substitutedRemainder = replaceIdentifierOutsideQuotes(substitutedRemainder, varName, "null")
 			default:
-				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, fmt.Sprintf("%v", v))
+				substitutedRemainder = replaceIdentifierOutsideQuotes(substitutedRemainder, varName, fmt.Sprintf("%v", v))
 			}
 		}
 		return e.executeInternal(ctx, substitutedRemainder, nil)
@@ -406,8 +393,17 @@ func (e *StorageExecutor) evaluateWithWhere(ctx context.Context, whereExpr strin
 				rels[varName] = v
 			}
 		default:
-			rep := valueToCypherLiteral(varVal)
-			expr = strings.ReplaceAll(expr, varName, rep)
+			switch v := varVal.(type) {
+			case map[string]interface{}:
+				expr = expandMapMemberAccess(expr, varName, v)
+				expr = replaceIdentifierOutsideQuotes(expr, varName, mapToCypherLiteral(v))
+			case map[interface{}]interface{}:
+				norm := normalizeInterfaceMap(v)
+				expr = expandMapMemberAccess(expr, varName, norm)
+				expr = replaceIdentifierOutsideQuotes(expr, varName, mapToCypherLiteral(norm))
+			default:
+				expr = replaceIdentifierOutsideQuotes(expr, varName, valueToCypherLiteral(varVal))
+			}
 		}
 	}
 

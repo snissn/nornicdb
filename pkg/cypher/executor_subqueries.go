@@ -2165,7 +2165,7 @@ func (e *StorageExecutor) executeCorrelatedCallWithSeedRows(ctx context.Context,
 				continue
 			}
 			params[varName] = seedVal
-			correlatedBody = replaceStandaloneCypherIdentifier(correlatedBody, varName, "$"+varName)
+			correlatedBody = replaceIdentifierOutsideQuotes(correlatedBody, varName, "$"+varName)
 		}
 		if len(nodeBindClauses) > 0 {
 			prefix := strings.Join(nodeBindClauses, " ")
@@ -2827,7 +2827,7 @@ func containsStandaloneIdentifier(expr, ident string) bool {
 	return false
 }
 
-// replaceStandaloneCypherIdentifier replaces identifier tokens that are not part of
+// replaceIdentifierOutsideQuotes replaces identifier tokens that are not part of
 // a dotted access chain (e.g. preserves tt.translationId when replacing translationId).
 // expandMapMemberAccess rewrites every occurrence of `<ident>.<key>`
 // inside query into the Cypher literal of mapVal[key], leaving every
@@ -2862,26 +2862,67 @@ func expandMapMemberAccess(query, ident string, mapVal map[string]interface{}) s
 		k := j + len(ident)
 
 		prevWord := j > 0 && (isWord(query[j-1]) || query[j-1] == '.')
-		// Must be followed by '.' for a member-access; otherwise leave to
-		// the standalone-identifier replacer.
-		if prevWord || k >= len(query) || query[k] != '.' {
+		if prevWord || k >= len(query) {
 			out.WriteString(query[i:k])
 			i = k
 			continue
 		}
-		// Read the property key (longest run of word characters after `.`).
-		keyStart := k + 1
-		keyEnd := keyStart
-		for keyEnd < len(query) && isWord(query[keyEnd]) {
-			keyEnd++
-		}
-		if keyEnd == keyStart {
-			// `.` followed by non-word: not a property access, skip.
+		var key string
+		nextPos := k
+		if query[k] == '.' {
+			// Read the property key (longest run of word characters after `.`).
+			keyStart := k + 1
+			keyEnd := keyStart
+			for keyEnd < len(query) && isWord(query[keyEnd]) {
+				keyEnd++
+			}
+			if keyEnd == keyStart {
+				// `.` followed by non-word: not a property access, skip.
+				out.WriteString(query[i:k])
+				i = k
+				continue
+			}
+			key = query[keyStart:keyEnd]
+			nextPos = keyEnd
+		} else if query[k] == '[' {
+			// Bracket form: ident['key'] or ident["key"].
+			pos := k + 1
+			for pos < len(query) && isWhitespace(query[pos]) {
+				pos++
+			}
+			if pos >= len(query) || (query[pos] != '\'' && query[pos] != '"') {
+				out.WriteString(query[i:k])
+				i = k
+				continue
+			}
+			quote := query[pos]
+			pos++
+			keyStart := pos
+			for pos < len(query) && query[pos] != quote {
+				pos++
+			}
+			if pos >= len(query) {
+				out.WriteString(query[i:k])
+				i = k
+				continue
+			}
+			key = query[keyStart:pos]
+			pos++ // close quote
+			for pos < len(query) && isWhitespace(query[pos]) {
+				pos++
+			}
+			if pos >= len(query) || query[pos] != ']' {
+				out.WriteString(query[i:k])
+				i = k
+				continue
+			}
+			nextPos = pos + 1
+		} else {
+			// Not a member-access; leave for standalone replacement.
 			out.WriteString(query[i:k])
 			i = k
 			continue
 		}
-		key := query[keyStart:keyEnd]
 		out.WriteString(query[i:j])
 		propVal, ok := mapVal[key]
 		if !ok {
@@ -2889,44 +2930,7 @@ func expandMapMemberAccess(query, ident string, mapVal map[string]interface{}) s
 		} else {
 			out.WriteString(valueToCypherLiteral(propVal))
 		}
-		i = keyEnd
-	}
-
-	return out.String()
-}
-
-func replaceStandaloneCypherIdentifier(query, ident, replacement string) string {
-	if ident == "" || query == "" || ident == replacement {
-		return query
-	}
-
-	isWord := func(b byte) bool {
-		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
-	}
-
-	var out strings.Builder
-	out.Grow(len(query))
-	i := 0
-	for i < len(query) {
-		j := strings.Index(query[i:], ident)
-		if j < 0 {
-			out.WriteString(query[i:])
-			break
-		}
-		j += i
-		k := j + len(ident)
-
-		prevWord := j > 0 && isWord(query[j-1])
-		nextWord := k < len(query) && isWord(query[k])
-		dotted := j > 0 && query[j-1] == '.'
-
-		out.WriteString(query[i:j])
-		if !prevWord && !nextWord && !dotted {
-			out.WriteString(replacement)
-		} else {
-			out.WriteString(query[j:k])
-		}
-		i = k
+		i = nextPos
 	}
 
 	return out.String()

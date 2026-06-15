@@ -2829,14 +2829,9 @@ func resolveSetMergeSourceFromParams(params map[string]interface{}, source strin
 	if source == "" {
 		return nil, false
 	}
-	parts := strings.Split(source, ".")
-	if len(parts) == 0 {
+	parts, ok := parseParamPathParts(source)
+	if !ok || len(parts) == 0 {
 		return nil, false
-	}
-	for _, part := range parts {
-		if !isValidIdentifier(strings.TrimSpace(part)) {
-			return nil, false
-		}
 	}
 
 	current, ok := params[parts[0]]
@@ -2862,6 +2857,97 @@ func resolveSetMergeSourceFromParams(params map[string]interface{}, source strin
 		}
 	}
 	return current, true
+}
+
+// parseParamPathParts parses dotted and bracketed map access paths.
+// Supported forms:
+//   - row
+//   - row.props
+//   - row['props']
+//   - row["props"]
+//   - row.meta['inner'].value
+func parseParamPathParts(source string) ([]string, bool) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return nil, false
+	}
+
+	parts := make([]string, 0, 4)
+	i := 0
+	readIdent := func(start int) (string, int, bool) {
+		if start >= len(source) {
+			return "", start, false
+		}
+		ch := source[start]
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_') {
+			return "", start, false
+		}
+		j := start + 1
+		for j < len(source) {
+			c := source[j]
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+				break
+			}
+			j++
+		}
+		return source[start:j], j, true
+	}
+
+	root, next, ok := readIdent(i)
+	if !ok {
+		return nil, false
+	}
+	parts = append(parts, root)
+	i = next
+
+	for i < len(source) {
+		switch source[i] {
+		case '.':
+			i++
+			part, j, ok := readIdent(i)
+			if !ok {
+				return nil, false
+			}
+			parts = append(parts, part)
+			i = j
+		case '[':
+			i++
+			for i < len(source) && isWhitespace(source[i]) {
+				i++
+			}
+			if i >= len(source) {
+				return nil, false
+			}
+			quote := source[i]
+			if quote != '\'' && quote != '"' {
+				return nil, false
+			}
+			i++
+			start := i
+			for i < len(source) && source[i] != quote {
+				i++
+			}
+			if i >= len(source) {
+				return nil, false
+			}
+			key := source[start:i]
+			i++ // close quote
+			for i < len(source) && isWhitespace(source[i]) {
+				i++
+			}
+			if i >= len(source) || source[i] != ']' {
+				return nil, false
+			}
+			i++ // close bracket
+			if key == "" {
+				return nil, false
+			}
+			parts = append(parts, key)
+		default:
+			return nil, false
+		}
+	}
+	return parts, true
 }
 
 // executeMultipleCreates handles queries with multiple CREATE statements.

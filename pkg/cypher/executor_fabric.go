@@ -581,7 +581,7 @@ func stripLeadingWithImportsForFabricRecord(query string, recordBindings map[str
 	rewritten := rest
 	for _, item := range imports {
 		name := strings.TrimSpace(item)
-		rewritten = replaceStandaloneCypherIdentifier(rewritten, name, "$"+name)
+		rewritten = replaceIdentifierOutsideQuotes(rewritten, name, "$"+name)
 	}
 	return rewritten
 }

@@ -207,9 +207,9 @@ func (e *StorageExecutor) substituteParams(cypher string, params map[string]inte
 		match := cypher[dollarIdx:end]
 		paramName := cypher[start:end]
 
-		// Preserve dotted parameter paths like $node.url so downstream parsers can
-		// resolve the full path from the params context as one expression.
-		if end < len(cypher) && cypher[end] == '.' {
+		// Preserve parameter path expressions like $node.url and
+		// $node['url'] so downstream evaluators can resolve them from params.
+		if end < len(cypher) && (cypher[end] == '.' || cypher[end] == '[') {
 			result.WriteString(match)
 			i = end
 			continue

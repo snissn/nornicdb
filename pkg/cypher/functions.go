@@ -49,5 +49,10 @@ func (e *StorageExecutor) evaluateExpressionWithContextFull(ctx context.Context,
 	if v, ok := resolveDirectParamRef(ctx, expr); ok {
 		return v
 	}
+	// Resolve dotted/bracketed parameter map paths like $d.uuid and
+	// $d['uuid'] as typed values.
+	if v, ok := resolveParamPathRef(ctx, expr); ok {
+		return normalizePropValue(v)
+	}
 	return e.evaluateExpressionWithContextFullFunctions(ctx, expr, nodes, rels, paths, allPathEdges, allPathNodes, pathLength)
 }
