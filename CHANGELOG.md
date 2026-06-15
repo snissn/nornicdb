@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Embedding model defaults hardened for local GGUF stability**:
   - Embedding context features now default `flash_attn` to disabled (`0`) instead of auto for safer startup across Metal/CUDA backends.
   - `NORNICDB_EMBEDDING_FLASH_ATTN=0` is treated as an explicit override (not silently ignored).
+- **GPU-assisted HNSW construction path retuned for lower latency and lower allocation pressure**:
+  - Build-time candidate generation now uses a Metal batched matrix/top-k primitive plus graph-beam expansion instead of per-query GPU search calls.
+  - Hot-path build code now reuses graph snapshot scratch state and batch flattening buffers, avoiding repeated per-batch/per-iteration map/slice churn.
+  - Default GPU graph-beam knobs were tightened to reduce candidate work without changing persistence format:
+    - `NORNICDB_HNSW_BUILD_GPU_BEAM_WIDTH` default now effectively `min(candidate_k, 64)`.
+    - `NORNICDB_HNSW_BUILD_GPU_BEAM_UNION_MAX` default now `4096`.
+  - On the internal `BenchmarkHNSWBuildCPUVsAcceleratedCandidatesLarge1024D` reference case (8k vectors, 1024 dimensions, Apple M3 Max), observed build latency moved from ~`1.45s` CPU to ~`0.93s` Metal graph-beam (~1.55x faster), with significantly reduced GPU-build heap growth versus earlier GPU prototypes.
 
 ### Added
 

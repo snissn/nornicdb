@@ -593,11 +593,12 @@ make cross-all             # All platforms
 - [x] Data Explorer UI (Browser query editor, semantic search, node details)
 - [x] GDPR Compliance
 - [x] per-DB Search Index Overrides for BM2 and HNSW as independently levers for deferred or skipped construction (`docs/plans/nornicdb-admin-import-plan.md`)
+- [*] GPU-assisted HNSW construction - Metal: [f8f09fdc]
 
 ### Planned (from `docs/plans`)
 
 - [ ] Bulk Import Tool
-- [ ] GPU-assisted HNSW construction with CPU-serving persistence parity (`docs/plans/gpu-hnsw-construction-plan.md`)
+- [*] GPU-assisted HNSW construction with CPU-serving persistence parity (`docs/plans/gpu-hnsw-construction-plan.md`) - Cuda/Vulkan TBD
 - [ ] Neo4j-compatible end-to-end streaming execution + wrapper driver/ORM (`docs/plans/neo4j-compatible-streaming-driver-and-server-plan.md`)
 - [ ] UI enhancement backlog (search/config/admin UX improvements) (`docs/plans/ui-enhancements.md`)
 
