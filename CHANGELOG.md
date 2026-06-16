@@ -5,11 +5,11 @@ All notable changes to NornicDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v1.1.7]
 
 ### Changed
 
-- **llama.cpp bundle/build refresh** for the upcoming `v1.1.7` line:
+- **llama.cpp bundle/build refresh**
   - Updated bundled llama.cpp artifacts and synchronized build surfaces (Makefile, Windows batch scripts, shell/PowerShell build scripts, and Docker llama images) to the current pinned integration version.
 - **Embedding model defaults hardened for local GGUF stability**:
   - Embedding context features now default `flash_attn` to disabled (`0`) instead of auto for safer startup across Metal/CUDA backends.
