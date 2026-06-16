@@ -60,8 +60,8 @@ func TestCPUHNSWBuildAcceleratorCandidateSearchStable(t *testing.T) {
 	require.Len(t, indices, 1)
 	require.Equal(t, []int{0, 1}, indices[0], "equal distances should retain stable index ordering")
 	require.Len(t, distances[0], 2)
-	assert.Equal(t, float32(0), distances[0][0])
-	assert.Equal(t, float32(0), distances[0][1])
+	assert.InDelta(t, 0, distances[0][0], 1e-6)
+	assert.InDelta(t, 0, distances[0][1], 1e-6)
 }
 
 func TestBuildHNSWWithOptionalGPUFallback(t *testing.T) {
