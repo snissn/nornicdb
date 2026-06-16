@@ -139,4 +139,4 @@ If import fails, remove or reset the target database directory before retrying. 
 
 - [CLI Commands](cli-commands.md)
 - [Data Import/Export Guide](../user-guides/data-import-export.md)
-- [Admin Import Plan](../plans/nornicdb-admin-import-plan.md)
+- [OKF Admin Import/Export Plan](../plans/okf-admin-import-export-plan.md)
