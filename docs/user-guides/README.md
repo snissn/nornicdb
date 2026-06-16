@@ -27,6 +27,7 @@ Use this section for task-oriented product workflows and examples.
 - Model canonical truth + mutation log: [canonical-graph-ledger.md](canonical-graph-ledger.md)
 - Use Qdrant-compatible gRPC: [qdrant-grpc.md](qdrant-grpc.md)
 - Add NornicSearch gRPC client path: [nornic-search-grpc.md](nornic-search-grpc.md)
+- Use Open Knowledge Format bundles: [open-knowledge-format-interchange.md](open-knowledge-format-interchange.md)
 
 ## AI/Heimdall Guides
 
@@ -41,6 +42,7 @@ Use this section for task-oriented product workflows and examples.
 
 - End-to-end examples: [complete-examples.md](complete-examples.md)
 - Data import/export patterns: [data-import-export.md](data-import-export.md)
+- Open Knowledge Format interchange: [open-knowledge-format-interchange.md](open-knowledge-format-interchange.md)
 - Property type reference: [property-data-types.md](property-data-types.md)
 
 ## Knowledge Policy Guides

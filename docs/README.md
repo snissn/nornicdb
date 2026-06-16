@@ -22,6 +22,7 @@ If you know your goal, start in **"Find by task"**. If you are debugging, start 
 - Learn Cypher usage patterns: [Cypher Queries](user-guides/cypher-queries.md)
 - Manage NornicDB-specific schema constraints and contracts: [Managing Constraints](user-guides/managing-constraints.md)
 - Use vector/hybrid search: [Vector Search](user-guides/vector-search.md), [Hybrid Search](user-guides/hybrid-search.md)
+- Exchange Markdown/YAML knowledge bundles: [Open Knowledge Format Interchange](user-guides/open-knowledge-format-interchange.md)
 - Configure retention enforcement: [Retention Policies](user-guides/retention-policies.md)
 - Prepare for audit review of background workers and version history: [Background Workers, MVCC, and Audit Evidence](compliance/background-workers-mvcc-audit-guide.md)
 - Configure deployment/runtime: [Configuration](operations/configuration.md), [Environment Variables](operations/environment-variables.md)
