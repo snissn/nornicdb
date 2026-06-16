@@ -25,6 +25,7 @@ jobs:
     name: Build macOS Release Assets
     runs-on: macos-latest
     outputs:
+      checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
       release_tag: ${{ steps.meta.outputs.release_tag }}
     steps:
       - id: meta
@@ -80,16 +81,84 @@ jobs:
             dist/*.dmg
           if-no-files-found: error
 
+  build-homebrew-release-assets:
+    name: Build Homebrew ${{ matrix.goarch }} Tarball
+    runs-on: ${{ matrix.runner }}
+    needs: build-macos-release-assets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: arm64
+            runner: macos-latest
+          - goarch: amd64
+            runner: macos-13
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.build-macos-release-assets.outputs.checkout_ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.4"
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build llama.cpp static library
+        run: |
+          LLAMA_VERSION="$(sed -n 's/^LLAMA_VERSION ?= //p' Makefile | head -n1)"
+          ./scripts/build-llama.sh "$LLAMA_VERSION"
+
+      - name: Build Homebrew tarball
+        run: |
+          VERSION="${{ needs.build-macos-release-assets.outputs.release_tag }}"
+          VERSION="${VERSION#v}"
+          HOMEBREW_TARGETS="darwin/${{ matrix.goarch }}" VERSION="$VERSION" make homebrew-artifacts
+
+      - name: Upload Homebrew tarball
+        uses: actions/upload-artifact@v7
+        with:
+          name: homebrew-release-assets-${{ needs.build-macos-release-assets.outputs.release_tag }}-${{ matrix.goarch }}
+          path: dist/homebrew/nornicdb-darwin-${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
   publish-github-release-assets:
     name: Publish GitHub Release Assets
     runs-on: ubuntu-latest
-    needs: build-macos-release-assets
+    needs:
+      - build-macos-release-assets
+      - build-homebrew-release-assets
     steps:
       - name: Download macOS release artifacts
         uses: actions/download-artifact@v8
         with:
           name: macos-release-assets-${{ needs.build-macos-release-assets.outputs.release_tag }}
           path: dist
+
+      - name: Download Homebrew release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: homebrew-release-assets-${{ needs.build-macos-release-assets.outputs.release_tag }}-*
+          path: dist/homebrew
+          merge-multiple: true
+
+      - name: Generate Homebrew SHA256SUMS
+        run: |
+          cd dist/homebrew
+          shasum -a 256 nornicdb-darwin-*.tar.gz | sort -k2 > SHA256SUMS
 
       - name: Create or update release with pkg/dmg assets
         uses: softprops/action-gh-release@v3
@@ -100,3 +169,19 @@ jobs:
           files: |
             dist/*.pkg
             dist/*.dmg
+            dist/homebrew/*.tar.gz
+            dist/homebrew/SHA256SUMS
+
+      - name: Open Homebrew tap update PR
+        if: ${{ vars.HOMEBREW_TAP_REPOSITORY != '' }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: ${{ vars.HOMEBREW_TAP_REPOSITORY }}
+          event-type: nornicdb-release
+          client-payload: |
+            {
+              "tag": "${{ needs.build-macos-release-assets.outputs.release_tag }}",
+              "repository": "${{ github.repository }}",
+              "sha256s_url": "https://github.com/${{ github.repository }}/releases/download/${{ needs.build-macos-release-assets.outputs.release_tag }}/SHA256SUMS"
+            }

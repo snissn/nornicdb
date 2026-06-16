@@ -37,8 +37,9 @@ Implementation: `Makefile` `cross-linux-amd64`, `cross-linux-arm64`, `cross-rpi`
 This is a real shipping artifact today. The gap versus the macOS packaging doc is:
 
 - **No notarized release flow.** The current pkg is not codesigned with a Developer ID Application certificate or notarized through `notarytool`. End users will hit Gatekeeper.
-- **No Homebrew tap.** There is no `homebrew-nornicdb` repo, no formula, and no automation that bumps it on release.
-- **No signed darwin tarballs.** Homebrew installs from `*.tar.gz` GitHub release assets, not `.pkg` files.
+- **Homebrew tap scaffold exists.** `homebrew/` is structured as the future `orneryd/homebrew-nornicdb` repo with `Formula/nornicdb.rb`, tap CI, formula update automation, and README instructions.
+- **Darwin Homebrew tarballs are wired.** `make homebrew-artifacts` and `.github/workflows/release-macos.yml` publish `nornicdb-darwin-arm64.tar.gz`, `nornicdb-darwin-amd64.tar.gz`, and `SHA256SUMS` for Homebrew.
+- **Homebrew tarballs are not notarized.** Codesigning is supported by `scripts/build-homebrew-artifacts.sh` when `MACOS_CODESIGN_IDENTITY` is configured, but release notarization for tarball contents is still not complete.
 
 ### Windows builds (IN-PROGRESS)
 
@@ -71,18 +72,19 @@ Cross-compiled binaries (`rpi64`, `rpi32`, `rpi-zero`) exist. The [Raspberry Pi 
 
 Goal: turn `make cross-all` + `make macos-package` into a release that downstream installers can consume.
 
-1. **Add a `release` Make target** that:
+1. **Complete the broader release target** that:
     - Runs `make cross-all`.
     - Strips and codesigns the macOS binary with a Developer ID Application certificate (`codesign --sign "$DEV_ID" --options runtime`).
-    - Tars each darwin binary into `dist/release/nornicdb-darwin-arm64.tar.gz` and `nornicdb-darwin-amd64.tar.gz` (binary at top of archive so Homebrew's `bin.install "nornicdb"` works).
+    - Reuses `make homebrew-artifacts` for darwin Homebrew tarballs.
     - Tars each linux binary into `nornicdb-linux-amd64.tar.gz` and `nornicdb-linux-arm64.tar.gz`.
     - Tars each Pi binary into `nornicdb-rpi{64,32,zero}.tar.gz`.
-    - Computes SHA256 for every tarball and writes `dist/release/SHA256SUMS`.
+    - Computes SHA256 for every non-Homebrew tarball and writes `dist/release/SHA256SUMS`.
     - Notarizes the macOS .pkg via `notarytool submit ... --wait` and staples the ticket.
 
-2. **Add a GitHub Actions release workflow** triggered on `v*` tags that:
-    - Runs `make release`.
-    - Uses `softprops/action-gh-release` to attach `dist/release/*.tar.gz`, the notarized `.pkg`, and `SHA256SUMS` to the GitHub Release.
+2. **Extend the existing GitHub Actions release workflow** triggered on `v*` tags that:
+    - Already builds macOS pkg/dmg assets.
+    - Already builds and attaches Homebrew tarballs plus `SHA256SUMS`.
+    - Still needs notarized `.pkg` publishing and broader Linux/Pi release tarballs.
     - Surfaces the SHA256s in the action output for downstream consumers.
 
 3. **Document the release contract** so other tap/manifest pipelines can rely on stable artifact names and locations.
@@ -93,17 +95,20 @@ Acceptance: `git tag v1.2.0 && git push --tags` produces a GitHub Release with s
 
 Depends on Phase 1.
 
-1. **Create the `orneryd/homebrew-nornicdb` repo** (separate from the main repo, per Homebrew convention).
+1. **Create the `orneryd/homebrew-nornicdb` repo** from the tracked `homebrew/` scaffold.
 
-2. **Author `Formula/nornicdb.rb`** matching the macOS packaging doc but using:
+2. **Maintain `Formula/nornicdb.rb`** matching the macOS packaging doc but using:
     - `service do ... end` (not the deprecated `plist do`) for `brew services start/stop nornicdb` LaunchAgent integration.
     - Architecture-split `on_macos do on_arm do ... on_intel do ... end end` blocks.
-    - SHA256s pulled from `dist/release/SHA256SUMS`.
+    - SHA256s pulled from release `SHA256SUMS`.
     - A `test do` block that runs `bin/nornicdb version`.
+    - A Homebrew `post_install` first-run setup wizard that writes `etc/nornicdb/config.yaml`.
 
-3. **Add a tap-bump action** to the release workflow using `mislav/bump-homebrew-formula-action` (or equivalent), which on a successful tagged release:
-    - Updates `version`, `url`, and `sha256` in the tap repo.
-    - Opens a PR against the tap.
+3. **Configure the tap-bump handoff**:
+    - Main repo variable: `HOMEBREW_TAP_REPOSITORY=orneryd/homebrew-nornicdb`.
+    - Main repo secret: `HOMEBREW_TAP_TOKEN`.
+    - The main release workflow sends a `nornicdb-release` repository dispatch.
+    - The tap workflow downloads `SHA256SUMS`, runs `scripts/update-formula.sh`, and opens a PR.
 
 4. **Smoke test**: `brew tap orneryd/nornicdb && brew install nornicdb && brew services start nornicdb && curl http://localhost:7474/health`.
 

@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Homebrew distribution release plumbing**:
+  - Added a Homebrew tap scaffold under `homebrew/` with formula, tap CI, formula-update workflow, and release maintenance docs.
+  - Added `make homebrew-artifacts` and `scripts/build-homebrew-artifacts.sh` to publish `nornicdb-darwin-arm64.tar.gz`, `nornicdb-darwin-amd64.tar.gz`, and `SHA256SUMS` for Homebrew installs.
+  - Extended the macOS release workflow to attach Homebrew tarballs and dispatch tap formula update PRs when `HOMEBREW_TAP_REPOSITORY` and `HOMEBREW_TAP_TOKEN` are configured.
 - **`NORNICDB_LLAMA_VERBOSE_LOAD` generation-load diagnostics toggle**:
   - Set to `true`/`1` to expose native llama.cpp model-load diagnostics for Heimdall generation model loading.
 

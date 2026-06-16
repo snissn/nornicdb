@@ -107,7 +107,7 @@ BGE_RERANKER_URL := https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/reso
 .PHONY: deploy-all deploy-arm64-all deploy-amd64-all
 .PHONY: build-llama-cpu push-llama-cpu deploy-llama-cpu ensure-llama-cpu
 .PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda ensure-llama-cuda
-.PHONY: build build-ui build-binary build-admin build-localllm build-headless build-localllm-headless sync-version test lint-slog install-hooks clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed
+.PHONY: build build-ui build-binary build-admin build-localllm build-headless build-localllm-headless sync-version test lint-slog install-hooks clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed homebrew-artifacts
 .PHONY: download-models download-bge download-qwen download-bge-reranker check-models
 .PHONY: antlr-generate antlr-clean antlr-test antlr-test-full test-parsers
 
@@ -1072,6 +1072,14 @@ cross-all: cross-linux-amd64 cross-linux-arm64 cross-rpi cross-rpi32 cross-rpi-z
 	@echo "║ Cross-compilation complete! Binaries in bin/                 ║"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	@ls -lh bin/nornicdb*
+
+homebrew-artifacts:
+ifeq ($(HOST_OS),darwin)
+	VERSION="$(MACOS_APP_VERSION)" ./scripts/build-homebrew-artifacts.sh
+else
+	@echo "Homebrew artifacts must be built on macOS"
+	@exit 2
+endif
 
 # ==============================================================================
 # Utilities
