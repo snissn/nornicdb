@@ -126,7 +126,7 @@ jobs:
         run: |
           VERSION="${{ needs.build-macos-release-assets.outputs.release_tag }}"
           VERSION="${VERSION#v}"
-          HOMEBREW_TARGETS="darwin/${{ matrix.goarch }}" VERSION="$VERSION" make homebrew-artifacts
+          HOMEBREW_TARGETS="darwin/${{ matrix.goarch }}" VERSION="$VERSION" ./scripts/build-homebrew-artifacts.sh
 
       - name: Upload Homebrew tarball
         uses: actions/upload-artifact@v7
