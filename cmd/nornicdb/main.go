@@ -606,9 +606,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// Setup authentication
 	var authenticator *auth.Authenticator
-	// Keep auth bootstrap behavior explicit: auth is enabled unless --no-auth is set.
-	// Wizard configs may provide username/password without auth.enabled.
-	authEnabled := !noAuth
+	authEnabled := serveAuthEnabled(cfg, noAuth)
 	if authEnabled {
 		fmt.Println("🔐 Setting up authentication...")
 		authConfig := auth.DefaultAuthConfig()
@@ -1854,4 +1852,11 @@ func getEnvBool(key string, defaultVal bool) bool {
 		}
 	}
 	return defaultVal
+}
+
+func serveAuthEnabled(cfg *config.Config, noAuth bool) bool {
+	if noAuth || cfg == nil {
+		return false
+	}
+	return cfg.Auth.Enabled
 }

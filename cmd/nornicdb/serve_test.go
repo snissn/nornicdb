@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/lifecycle"
 	"github.com/orneryd/nornicdb/pkg/observability"
 )
@@ -123,6 +124,44 @@ func runComponentsInBackground(parent context.Context, components ...lifecycle.C
 		done <- lifecycle.Run(ctx, components...)
 	}()
 	return cancel, done
+}
+
+func TestServeAuthEnabledUsesLoadedConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		cfg    *config.Config
+		noAuth bool
+		want   bool
+	}{
+		{
+			name: "homebrew auth disabled config stays disabled",
+			cfg:  &config.Config{Auth: config.AuthConfig{Enabled: false}},
+			want: false,
+		},
+		{
+			name: "enabled config enables auth",
+			cfg:  &config.Config{Auth: config.AuthConfig{Enabled: true}},
+			want: true,
+		},
+		{
+			name:   "no auth flag overrides enabled config",
+			cfg:    &config.Config{Auth: config.AuthConfig{Enabled: true}},
+			noAuth: true,
+			want:   false,
+		},
+		{
+			name: "nil config is disabled",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serveAuthEnabled(tt.cfg, tt.noAuth); got != tt.want {
+				t.Fatalf("serveAuthEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 // ----------------------------------------------------------------------
