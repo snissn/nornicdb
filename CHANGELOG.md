@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `NORNICDB_HNSW_BUILD_GPU_BEAM_WIDTH` default now effectively `min(candidate_k, 64)`.
     - `NORNICDB_HNSW_BUILD_GPU_BEAM_UNION_MAX` default now `4096`.
   - On the internal `BenchmarkHNSWBuildCPUVsAcceleratedCandidatesLarge1024D` reference case (8k vectors, 1024 dimensions, Apple M3 Max), observed build latency moved from ~`1.45s` CPU to ~`0.93s` Metal graph-beam (~1.55x faster), with significantly reduced GPU-build heap growth versus earlier GPU prototypes.
+- **Relationship vector-search fast paths expanded**:
+  - Relationship vector query specs and fast-path execution now use relationship vector indexes where applicable instead of scanning relationships and decoding vectors in the query path.
+  - This reduces latency and allocation pressure for Graphiti fact-search shapes backed by relationship embeddings.
+- **macOS/Homebrew release automation tightened**:
+  - Intel Homebrew tarballs now build on `macos-15-intel`.
+  - The macOS release workflow now invokes the Homebrew artifact script through the restored `make homebrew-artifacts` target, preventing release jobs from failing after the main macOS assets upload succeeds.
 
 ### Added
 
@@ -33,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Configuration-driven auth disabling is now honored by server startup**:
+  - `auth.enabled: false` and `server.auth: none` from the loaded configuration no longer get overridden by serve startup defaults.
+  - `--no-auth` remains a hard disable override, which keeps Homebrew first-run configurations that choose no authentication aligned with runtime behavior.
 - **Heimdall local-model fallback error reporting now preserves both attempts**:
   - When GPU load fails and CPU fallback also fails, the returned error now includes both failure paths instead of only the final fallback error.
 - **Flash-attention override semantics corrected for Heimdall and rerank paths**:
