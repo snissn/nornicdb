@@ -558,7 +558,7 @@ jobs:
             lib: libllama_linux_amd64.a
           - os: macos-14
             lib: libllama_darwin_arm64.a
-          - os: macos-13  
+          - os: macos-15-intel
             lib: libllama_darwin_amd64.a
     runs-on: ${{ matrix.os }}
     steps:
