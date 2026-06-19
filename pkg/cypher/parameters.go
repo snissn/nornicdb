@@ -408,6 +408,15 @@ func (e *StorageExecutor) valueToLiteral(v interface{}) string {
 		}
 		return "false"
 
+	case time.Time:
+		return fmt.Sprintf("datetime('%s')", val.Format(time.RFC3339Nano))
+
+	case *time.Time:
+		if val == nil {
+			return "null"
+		}
+		return fmt.Sprintf("datetime('%s')", val.Format(time.RFC3339Nano))
+
 	case []interface{}:
 		// Convert array to Cypher list literal: [val1, val2, ...]
 		parts := make([]string, len(val))

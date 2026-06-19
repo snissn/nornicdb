@@ -43,3 +43,126 @@ func TestTemporalParam_CreateAndReadBackAsTime(t *testing.T) {
 	require.True(t, ok, "expected time.Time, got %T", result.Rows[0][0])
 	require.Equal(t, dt.UTC(), got.UTC())
 }
+
+func TestTemporalParam_UnwindNestedRowDatetimeRoundTripsAsTime(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "temporal_unwind_nested"))
+	ctx := context.Background()
+	dt := time.Date(2026, 6, 19, 12, 0, 0, 123456000, time.UTC)
+
+	rows := []map[string]interface{}{
+		{"uuid": "1", "created_at": dt},
+	}
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (n:X {uuid: row.uuid})
+SET n.created_at = row.created_at
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, "MATCH (n:X {uuid:'1'}) RETURN n.created_at", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	got, ok := result.Rows[0][0].(time.Time)
+	require.True(t, ok, "expected time.Time, got %T (%v)", result.Rows[0][0], result.Rows[0][0])
+	require.Equal(t, dt.UTC(), got.UTC())
+}
+
+func TestTemporalParam_UnwindNestedRowDatetimeInMapLiteralRoundTripsAsTime(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "temporal_unwind_nested_map"))
+	ctx := context.Background()
+	dt := time.Date(2026, 6, 19, 12, 0, 0, 123456000, time.UTC)
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (n:X {uuid: row.uuid})
+SET n = {uuid: row.uuid, created_at: row.created_at}
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{"uuid": "1", "created_at": dt},
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, "MATCH (n:X {uuid:'1'}) RETURN n.created_at", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	got, ok := result.Rows[0][0].(time.Time)
+	require.True(t, ok, "expected time.Time, got %T (%v)", result.Rows[0][0], result.Rows[0][0])
+	require.Equal(t, dt.UTC(), got.UTC())
+}
+
+func TestTemporalParam_UnwindNestedRowDatetimeOnRelationshipRoundTripsAsTime(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "temporal_unwind_nested_rel"))
+	ctx := context.Background()
+	dt := time.Date(2026, 6, 19, 12, 0, 0, 123456000, time.UTC)
+
+	_, err := exec.Execute(ctx, "CREATE (:X {uuid:'a'}), (:X {uuid:'b'})", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+UNWIND $rows AS row
+MATCH (a:X {uuid:'a'})
+MATCH (b:X {uuid:'b'})
+MERGE (a)-[r:MENTIONS {uuid: row.uuid}]->(b)
+SET r.created_at = row.created_at
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{"uuid": "m1", "created_at": dt},
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, "MATCH (:X)-[r:MENTIONS {uuid:'m1'}]->(:X) RETURN r.created_at", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	got, ok := result.Rows[0][0].(time.Time)
+	require.True(t, ok, "expected time.Time, got %T (%v)", result.Rows[0][0], result.Rows[0][0])
+	require.Equal(t, dt.UTC(), got.UTC())
+}
+
+func TestTemporalParam_UnwindNestedRowDatetimeInWholeRowMapsRoundTripsAsTime(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "temporal_unwind_nested_whole_row"))
+	ctx := context.Background()
+	dt := time.Date(2026, 6, 19, 12, 0, 0, 123456000, time.UTC)
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (n:X {uuid: row.uuid})
+SET n = row
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{"uuid": "1", "created_at": dt},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "CREATE (:X {uuid:'a'}), (:X {uuid:'b'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `
+UNWIND $rows AS row
+MATCH (a:X {uuid:'a'})
+MATCH (b:X {uuid:'b'})
+MERGE (a)-[r:MENTIONS {uuid: row.uuid}]->(b)
+SET r += row
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{"uuid": "m1", "created_at": dt},
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, "MATCH (n:X {uuid:'1'}) RETURN n.created_at", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	nodeTime, ok := result.Rows[0][0].(time.Time)
+	require.True(t, ok, "expected node time.Time, got %T (%v)", result.Rows[0][0], result.Rows[0][0])
+	require.Equal(t, dt.UTC(), nodeTime.UTC())
+
+	result, err = exec.Execute(ctx, "MATCH (:X)-[r:MENTIONS {uuid:'m1'}]->(:X) RETURN r.created_at", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	relTime, ok := result.Rows[0][0].(time.Time)
+	require.True(t, ok, "expected relationship time.Time, got %T (%v)", result.Rows[0][0], result.Rows[0][0])
+	require.Equal(t, dt.UTC(), relTime.UTC())
+}
