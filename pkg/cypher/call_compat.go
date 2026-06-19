@@ -101,9 +101,8 @@ func (e *StorageExecutor) callDbIndexFulltextListAvailableAnalyzers() (*ExecuteR
 //     matching pre-PR behavior so legacy databases keep working).
 //   - When the query is the Lucene match-all wildcard ("*" or "*:*"),
 //     return every in-scope edge with score 1.0.
-//   - Otherwise, substring-match the query against the index's
-//     declared Properties (or, when no properties are declared, every
-//     property — the legacy behavior).
+//   - Otherwise, score indexed relationship text with the same
+//     tokenized BM25-like matching used by queryNodes.
 //
 // Returns one row per matching edge with columns [relationship, score].
 func (e *StorageExecutor) callDbIndexFulltextQueryRelationships(cypher string) (*ExecuteResult, error) {
@@ -138,7 +137,6 @@ func (e *StorageExecutor) callDbIndexFulltextQueryRelationships(cypher string) (
 		return nil, err
 	}
 
-	lowerQuery := strings.ToLower(query)
 	wildcard := isFulltextWildcard(query)
 	presenceProp, isPresenceQuery := fulltextFieldPresenceQuery(query)
 
@@ -148,23 +146,104 @@ func (e *StorageExecutor) callDbIndexFulltextQueryRelationships(cypher string) (
 		return result, nil
 	}
 
+	if wildcard || isPresenceQuery {
+		for _, edge := range edges {
+			if !matchesRelationshipTypes(edge, targetTypes) {
+				continue
+			}
+			if wildcard {
+				result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
+				continue
+			}
+			if edgeHasNonEmptyProperty(edge, presenceProp) {
+				result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
+			}
+		}
+		applyFulltextOptions(result, opts)
+		return result, nil
+	}
+
+	queryTerms, excludeTerms, mustHaveTerms := parseFulltextQuery(query)
+	if len(queryTerms) == 0 && len(mustHaveTerms) == 0 {
+		return result, nil
+	}
+
+	type relationshipFulltextDoc struct {
+		edge         *storage.Edge
+		contentLower string
+		score        float64
+	}
+	docs := make([]relationshipFulltextDoc, 0, len(edges))
+	docFreq := make(map[string]int)
 	for _, edge := range edges {
 		if !matchesRelationshipTypes(edge, targetTypes) {
 			continue
 		}
-		if wildcard {
-			result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
+		content := extractEdgeTextContent(edge, targetProperties)
+		if content == "" {
 			continue
 		}
-		if isPresenceQuery {
-			if edgeHasNonEmptyProperty(edge, presenceProp) {
-				result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
+		contentLower := strings.ToLower(content)
+		docs = append(docs, relationshipFulltextDoc{edge: edge, contentLower: contentLower})
+		for _, term := range queryTerms {
+			if strings.Contains(contentLower, term) {
+				docFreq[term]++
 			}
+		}
+		for _, term := range mustHaveTerms {
+			if strings.Contains(contentLower, term) {
+				docFreq[term]++
+			}
+		}
+	}
+	totalDocs := len(docs)
+
+	scoredDocs := docs[:0]
+	for i := range docs {
+		doc := &docs[i]
+		excluded := false
+		for _, term := range excludeTerms {
+			if strings.Contains(doc.contentLower, term) {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
 			continue
 		}
-		if edgePropertiesContain(edge, targetProperties, lowerQuery) {
-			result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
+
+		hasMustHave := true
+		for _, term := range mustHaveTerms {
+			if !strings.Contains(doc.contentLower, term) {
+				hasMustHave = false
+				break
+			}
 		}
+		if !hasMustHave {
+			continue
+		}
+
+		score := calculateBM25Score(doc.contentLower, queryTerms, docFreq, totalDocs)
+		for _, term := range mustHaveTerms {
+			if strings.Contains(doc.contentLower, term) {
+				score += 2.0
+			}
+		}
+		if score > 0 {
+			doc.score = score
+			scoredDocs = append(scoredDocs, *doc)
+		}
+	}
+
+	sort.Slice(scoredDocs, func(i, j int) bool {
+		if scoredDocs[i].score == scoredDocs[j].score {
+			return scoredDocs[i].edge.ID < scoredDocs[j].edge.ID
+		}
+		return scoredDocs[i].score > scoredDocs[j].score
+	})
+	result.Rows = make([][]interface{}, 0, len(scoredDocs))
+	for _, doc := range scoredDocs {
+		result.Rows = append(result.Rows, []interface{}{edgeToMap(doc.edge), doc.score})
 	}
 	applyFulltextOptions(result, opts)
 
@@ -229,6 +308,38 @@ func edgePropertiesContain(edge *storage.Edge, targetProperties []string, lowerQ
 		}
 	}
 	return false
+}
+
+func extractEdgeTextContent(edge *storage.Edge, properties []string) string {
+	if edge == nil {
+		return ""
+	}
+	var content strings.Builder
+	if len(properties) > 0 {
+		for _, propName := range properties {
+			if val, ok := edge.Properties[propName]; ok {
+				writeFulltextValue(&content, val)
+			}
+		}
+		return strings.TrimSpace(content.String())
+	}
+	for _, val := range edge.Properties {
+		writeFulltextValue(&content, val)
+	}
+	return strings.TrimSpace(content.String())
+}
+
+func writeFulltextValue(content *strings.Builder, val interface{}) {
+	if content == nil || val == nil {
+		return
+	}
+	if s, ok := val.(string); ok {
+		content.WriteString(s)
+		content.WriteByte(' ')
+		return
+	}
+	content.WriteString(fmt.Sprint(val))
+	content.WriteByte(' ')
 }
 
 // edgeToMap returns the result-row map representation of an edge. Held

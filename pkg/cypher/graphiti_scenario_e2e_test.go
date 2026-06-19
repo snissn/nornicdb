@@ -173,6 +173,156 @@ func TestGraphitiScenarioE2E_LargePayloads(t *testing.T) {
 	require.LessOrEqual(t, len(res.Rows), 10)
 }
 
+func TestGraphitiScenarioE2E_RelationshipFulltextMultiTokenFacts(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE FULLTEXT INDEX rel_ft IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON EACH [e.fact, e.name]", nil)
+	require.NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Entity {uuid:'n-%02d'})", i), nil)
+		require.NoError(t, err)
+	}
+
+	facts := []string{
+		"NSQ topic migration regression requires an idempotent backfill worker",
+		"Backfill replay found an NSQ consumer regression during migration validation",
+		"The sftp_migration service publishes NSQ topic events for backfill progress",
+		"Regression tests cover NSQ migration retries and delayed backfill batches",
+		"NSQ queue lag increased when the migration backfill job retried facts",
+		"Graphiti facts document the NSQ topic migration and backfill ordering",
+		"Backfill checkpoints prevented migration regression for the NSQ consumer",
+		"NSQ migration incident notes explain regression triage and backfill repair",
+	}
+	for i, fact := range facts {
+		_, err = exec.Execute(ctx, `
+MATCH (a:Entity {uuid:$a})
+MATCH (b:Entity {uuid:$b})
+CREATE (a)-[:RELATES_TO {uuid:$uuid, name:$name, fact:$fact}]->(b)
+`, map[string]interface{}{
+			"a":    fmt.Sprintf("n-%02d", i),
+			"b":    fmt.Sprintf("n-%02d", i+1),
+			"uuid": fmt.Sprintf("nsq-%02d", i),
+			"name": "NSQ migration fact",
+			"fact": fact,
+		})
+		require.NoError(t, err)
+	}
+	for i, fact := range []string{
+		"OAuth token rotation completed without data replay",
+		"Invoice import observed a timezone normalization warning",
+		"Feature flag cleanup removed obsolete email experiments",
+	} {
+		_, err = exec.Execute(ctx, `
+MATCH (a:Entity {uuid:'n-00'})
+MATCH (b:Entity {uuid:'n-09'})
+CREATE (a)-[:RELATES_TO {uuid:$uuid, name:'unrelated', fact:$fact}]->(b)
+`, map[string]interface{}{
+			"uuid": fmt.Sprintf("other-%02d", i),
+			"fact": fact,
+		})
+		require.NoError(t, err)
+	}
+
+	res, err := exec.Execute(ctx, `
+CALL db.index.fulltext.queryRelationships('rel_ft', 'NSQ migration regression and backfill') YIELD relationship, score
+RETURN relationship.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT 15
+`, nil)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(res.Rows), 5)
+	for _, row := range res.Rows {
+		require.Contains(t, row[0], "nsq-", "multi-token fact search should not return unrelated relationship %v", row[0])
+	}
+
+	short, err := exec.Execute(ctx, `
+CALL db.index.fulltext.queryRelationships('rel_ft', 'sftp_migration NSQ topic') YIELD relationship, score
+RETURN relationship.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT 5
+`, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, short.Rows)
+}
+
+func BenchmarkGraphitiRelationshipFulltextMultiTokenFacts(b *testing.B) {
+	base := newTestMemoryEngine(b)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	exec.cache = nil
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE FULLTEXT INDEX rel_ft IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON EACH [e.fact, e.name]", nil)
+	require.NoError(b, err)
+
+	for i := 0; i < 32; i++ {
+		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Entity {uuid:'bench-n-%02d'})", i), nil)
+		require.NoError(b, err)
+	}
+
+	relevantFacts := []string{
+		"NSQ topic migration regression requires an idempotent backfill worker",
+		"Backfill replay found an NSQ consumer regression during migration validation",
+		"The sftp_migration service publishes NSQ topic events for backfill progress",
+		"Regression tests cover NSQ migration retries and delayed backfill batches",
+		"NSQ queue lag increased when the migration backfill job retried facts",
+		"Graphiti facts document the NSQ topic migration and backfill ordering",
+		"Backfill checkpoints prevented migration regression for the NSQ consumer",
+		"NSQ migration incident notes explain regression triage and backfill repair",
+	}
+	unrelatedFacts := []string{
+		"OAuth token rotation completed without data replay",
+		"Invoice import observed a timezone normalization warning",
+		"Feature flag cleanup removed obsolete email experiments",
+		"Calendar sync retries converged after a provider throttle",
+	}
+	for i := 0; i < 128; i++ {
+		_, err = exec.Execute(ctx, `
+MATCH (a:Entity {uuid:$a})
+MATCH (b:Entity {uuid:$b})
+CREATE (a)-[:RELATES_TO {uuid:$uuid, name:$name, fact:$fact}]->(b)
+`, map[string]interface{}{
+			"a":    fmt.Sprintf("bench-n-%02d", i%31),
+			"b":    fmt.Sprintf("bench-n-%02d", (i%31)+1),
+			"uuid": fmt.Sprintf("bench-nsq-%03d", i),
+			"name": "NSQ migration fact",
+			"fact": relevantFacts[i%len(relevantFacts)],
+		})
+		require.NoError(b, err)
+	}
+	for i := 0; i < 128; i++ {
+		_, err = exec.Execute(ctx, `
+MATCH (a:Entity {uuid:$a})
+MATCH (b:Entity {uuid:$b})
+CREATE (a)-[:RELATES_TO {uuid:$uuid, name:'unrelated', fact:$fact}]->(b)
+`, map[string]interface{}{
+			"a":    fmt.Sprintf("bench-n-%02d", i%31),
+			"b":    fmt.Sprintf("bench-n-%02d", (i%31)+1),
+			"uuid": fmt.Sprintf("bench-other-%03d", i),
+			"fact": unrelatedFacts[i%len(unrelatedFacts)],
+		})
+		require.NoError(b, err)
+	}
+
+	query := `
+CALL db.index.fulltext.queryRelationships('rel_ft', 'NSQ migration regression and backfill') YIELD relationship, score
+RETURN relationship.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT 15
+`
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := exec.Execute(ctx, query, nil)
+		require.NoError(b, err)
+		require.GreaterOrEqual(b, len(res.Rows), 15)
+	}
+}
+
 func BenchmarkGraphitiScenarioHotspots(b *testing.B) {
 	base := newTestMemoryEngine(b)
 	ns := storage.NewNamespacedEngine(base, "test")

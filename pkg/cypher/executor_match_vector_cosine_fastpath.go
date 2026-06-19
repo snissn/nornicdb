@@ -172,12 +172,28 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 		}
 	}
 
-	matchPart := preWithSegment
-	varName, labels, ok := parseSimpleMatchSingleNodePattern(matchPart)
-	if !ok || len(labels) != 1 {
+	if strings.Count(preWithSegment, "(") != 1 || strings.Count(preWithSegment, ")") != 1 || strings.Contains(preWithSegment, "-") || strings.Contains(preWithSegment, ",") {
 		return nil, false
 	}
-	label := labels[0]
+	var varName string
+	var label string
+	var matchProps map[string]interface{}
+	if strings.Contains(preWithSegment, "{") {
+		nodePattern := e.parseNodePattern(ctx, preWithSegment)
+		varName = strings.TrimSpace(nodePattern.variable)
+		if varName == "" || len(nodePattern.labels) != 1 {
+			return nil, false
+		}
+		label = nodePattern.labels[0]
+		matchProps = nodePattern.properties
+	} else {
+		parsedVar, labels, ok := parseSimpleMatchSingleNodePattern(preWithSegment)
+		if !ok || len(labels) != 1 {
+			return nil, false
+		}
+		varName = parsedVar
+		label = labels[0]
+	}
 
 	withToReturn := strings.TrimSpace(trimmed[withIdx+len("WITH") : returnIdx])
 	postWhereClause := ""
@@ -220,6 +236,12 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 		scoreOp = op
 		scoreCmp = cmp
 	}
+	preWhereNotNullProp := ""
+	if preWhereClause != "" {
+		if prop, ok := parseFastPathPropertyNotNullPredicate(preWhereClause, varName); ok {
+			preWhereNotNullProp = prop
+		}
+	}
 
 	returnPart := strings.TrimSpace(trimmed[returnIdx+len("RETURN") : orderIdx])
 	returnItems := e.parseReturnItems(returnPart)
@@ -257,21 +279,31 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 		return nil, false
 	}
 
-	candidateLimit := chooseVectorCandidateLimit(limit, preWhereClause != "" || scoreOp != "")
+	candidateLimit := chooseVectorCandidateLimit(limit, preWhereClause != "" || len(matchProps) > 0 || scoreOp != "")
 	nodeScores, ok := e.fetchCosineNodeScores(ctx, indexName, candidateLimit, queryExpr, orderDesc)
 	if !ok {
 		return nil, false
 	}
 
-	rows := make([][]interface{}, 0, len(nodeScores))
+	rows := make([][]interface{}, 0, min(limit, len(nodeScores)))
 	nodeCtx := map[string]*storage.Node{varName: nil}
 	scoreExprIsAlias := make([]bool, len(returnItems))
+	hasMatchProps := len(matchProps) > 0
 	for i := range returnItems {
 		scoreExprIsAlias[i] = strings.EqualFold(strings.TrimSpace(returnItems[i].expr), scoreRef)
 	}
 	for _, hit := range nodeScores {
-		if preWhereClause != "" && !e.evaluateWhere(ctx, hit.node, varName, preWhereClause) {
+		if hasMatchProps && !e.nodeMatchesProps(hit.node, matchProps) {
 			continue
+		}
+		if preWhereClause != "" {
+			if preWhereNotNullProp != "" {
+				if val, exists := hit.node.Properties[preWhereNotNullProp]; !exists || val == nil {
+					continue
+				}
+			} else if !e.evaluateWhere(ctx, hit.node, varName, preWhereClause) {
+				continue
+			}
 		}
 		if scoreOp != "" && !compareScore(hit.score, scoreOp, scoreCmp) {
 			continue
@@ -1223,6 +1255,21 @@ func withProjectionContainsVariable(items []returnItem, variable string) bool {
 		}
 	}
 	return false
+}
+
+func parseFastPathPropertyNotNullPredicate(whereClause string, variable string) (string, bool) {
+	fields := strings.Fields(strings.TrimSpace(whereClause))
+	if len(fields) != 4 {
+		return "", false
+	}
+	if !strings.EqualFold(fields[1], "IS") || !strings.EqualFold(fields[2], "NOT") || !strings.EqualFold(fields[3], "NULL") {
+		return "", false
+	}
+	refVar, prop, ok := parseVarPropertyRef(fields[0])
+	if !ok || !strings.EqualFold(refVar, variable) {
+		return "", false
+	}
+	return prop, true
 }
 
 func (e *StorageExecutor) parseScoreComparisonPredicate(ctx context.Context, whereClause string, scoreAlias string) (string, float64, bool) {

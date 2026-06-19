@@ -125,6 +125,99 @@ func TestE2E_VectorCosine_QueryShape_ExplicitTransactionUsesIndexedPath(t *testi
 	require.NoError(t, err)
 }
 
+func TestE2E_VectorCosine_TinyChunkPropertyPatternUsesIndexedPath(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	const dim = 1024
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX tiny_chunk_idx FOR (c:Chunk) ON (c.emb) OPTIONS {indexConfig: {`vector.dimensions`: 1024, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	for i := 0; i < 21; i++ {
+		vec := make([]float64, dim)
+		vec[i%dim] = 1.0
+		if i == 1 {
+			vec[0] = 0.8
+			vec[1] = 0.6
+		}
+		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Chunk {uuid:'c-%02d', group_id:'kg', emb:%s})", i, formatInlineFloat64Vector(vec)), nil)
+		require.NoError(t, err)
+	}
+
+	q := make([]float64, dim)
+	q[0] = 1.0
+
+	_, err = exec.Execute(ctx, "CALL db.index.vector.queryNodes('tiny_chunk_idx', 1, $q) YIELD node, score RETURN node.uuid AS uuid, score", map[string]interface{}{"q": q})
+	require.NoError(t, err)
+
+	counting.allNodesCalls = 0
+	counting.labelCalls = 0
+	counting.streamNodesCalls = 0
+
+	res, err := exec.Execute(ctx, `
+MATCH (c:Chunk {group_id:'kg'}) WHERE c.emb IS NOT NULL
+WITH c, vector.similarity.cosine(c.emb, $q) AS sim
+RETURN c.uuid AS uuid, sim
+ORDER BY sim DESC
+LIMIT 3
+`, map[string]interface{}{"q": q})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 3)
+	require.Equal(t, "c-00", res.Rows[0][0])
+	require.Equal(t, "c-01", res.Rows[1][0])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath, "inline property pattern should still route through cosine vector-index fast path")
+	require.Zero(t, counting.allNodesCalls, "indexed cosine path should not full-scan all nodes")
+	require.Zero(t, counting.labelCalls, "indexed cosine path should not label-scan nodes")
+	require.Zero(t, counting.streamNodesCalls, "indexed cosine path should not stream-scan nodes")
+}
+
+func BenchmarkE2E_VectorCosine_TinyChunkPropertyPattern(b *testing.B) {
+	base := newTestMemoryEngine(b)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	exec.cache = nil
+	ctx := context.Background()
+
+	const dim = 1024
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX tiny_chunk_idx FOR (c:Chunk) ON (c.emb) OPTIONS {indexConfig: {`vector.dimensions`: 1024, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(b, err)
+
+	for i := 0; i < 21; i++ {
+		vec := make([]float64, dim)
+		vec[i%dim] = 1.0
+		if i == 1 {
+			vec[0] = 0.8
+			vec[1] = 0.6
+		}
+		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Chunk {uuid:'c-%02d', group_id:'kg', emb:%s})", i, formatInlineFloat64Vector(vec)), nil)
+		require.NoError(b, err)
+	}
+
+	q := make([]float64, dim)
+	q[0] = 1.0
+	params := map[string]interface{}{"q": q}
+	_, err = exec.Execute(ctx, "CALL db.index.vector.queryNodes('tiny_chunk_idx', 1, $q) YIELD node, score RETURN node.uuid AS uuid, score", params)
+	require.NoError(b, err)
+
+	query := `
+MATCH (c:Chunk {group_id:'kg'}) WHERE c.emb IS NOT NULL
+WITH c, vector.similarity.cosine(c.emb, $q) AS sim
+RETURN c.uuid AS uuid, sim
+ORDER BY sim DESC
+LIMIT 3
+`
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := exec.Execute(ctx, query, params)
+		require.NoError(b, err)
+		require.Len(b, res.Rows, 3)
+	}
+}
+
 func formatInlineFloat64Vector(vec []float64) string {
 	if len(vec) == 0 {
 		return "[]"
