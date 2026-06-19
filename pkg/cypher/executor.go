@@ -907,9 +907,16 @@ func (e *StorageExecutor) GetDefaultEmbeddingDimensions() int {
 	return e.defaultEmbeddingDimensions
 }
 
-// notifyNodeMutated calls the onNodeMutated callback if set.
-// Call after any node creation or mutation (CREATE, MERGE, SET, REMOVE) so the embed queue can re-process.
+// notifyNodeMutated updates live search metadata and calls the onNodeMutated
+// callback if set. Call after any node creation or mutation (CREATE, MERGE,
+// SET, REMOVE) so search sees client-supplied vectors immediately and the
+// embed queue can re-process.
 func (e *StorageExecutor) notifyNodeMutated(nodeID string) {
+	if e.searchService != nil && nodeID != "" {
+		if node, err := e.storage.GetNode(storage.NodeID(nodeID)); err == nil && node != nil {
+			_ = e.searchService.IndexNode(node)
+		}
+	}
 	if e.onNodeMutated != nil {
 		e.onNodeMutated(nodeID)
 	}

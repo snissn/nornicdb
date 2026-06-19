@@ -98,6 +98,50 @@ func TestMatchVectorCosineFastPath_WriteThenSearchLoop_NoScanRegression(t *testi
 	require.Equal(t, 0, counting.streamNodesCalls, "write-then-search loop should not use stream-scan fallback")
 }
 
+func TestMatchVectorCosineFastPath_SetNodeVectorPropertyAfterWarmupIsSearchable(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX sn_emb_idx FOR (n:SN) ON (n.emb) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:SN {uuid:'seed0'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "MATCH (n:SN {uuid:'seed0'}) WITH n CALL db.create.setNodeVectorProperty(n,'emb',[0.0,0.0,1.0,0.0]) RETURN n", nil)
+	require.NoError(t, err)
+
+	rankQuery := `
+MATCH (n:SN)
+WHERE n.emb IS NOT NULL
+WITH n, vector.similarity.cosine(n.emb, $q) AS s
+RETURN n.uuid AS u, s
+ORDER BY s DESC
+LIMIT 1`
+	res, err := exec.Execute(ctx, rankQuery, map[string]interface{}{"q": []float64{0.0, 0.0, 1.0, 0.0}})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "seed0", res.Rows[0][0])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+
+	_, err = exec.Execute(ctx, "CREATE (:SN {uuid:'sentinel'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "MATCH (n:SN {uuid:'sentinel'}) WITH n CALL db.create.setNodeVectorProperty(n,'emb',[1.0,0.0,0.0,0.0]) RETURN n", nil)
+	require.NoError(t, err)
+
+	direct, err := exec.Execute(ctx, "MATCH (n:SN {uuid:'sentinel'}) RETURN vector.similarity.cosine(n.emb,[1.0,0.0,0.0,0.0]) AS s", nil)
+	require.NoError(t, err)
+	require.Len(t, direct.Rows, 1)
+	require.EqualValues(t, 1.0, direct.Rows[0][0])
+
+	res, err = exec.Execute(ctx, rankQuery, map[string]interface{}{"q": []float64{1.0, 0.0, 0.0, 0.0}})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "sentinel", res.Rows[0][0])
+	require.EqualValues(t, 1.0, res.Rows[0][1])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+}
+
 func TestTryFastPathMatchVectorCosine_HandlesAscendingOrder(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")
