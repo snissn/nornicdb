@@ -1440,14 +1440,14 @@ func TestCypherHelpers_SubstituteBoundVariablesInCall(t *testing.T) {
 	ctxNodes := map[string]*storage.Node{"n": node}
 
 	// Regular property replacement.
-	out := exec.substituteBoundVariablesInCall("CALL proc(n.id, n.score, n.intScore, n.published)", ctxNodes)
+	out := exec.substituteBoundVariablesInCall("CALL proc(n.id, n.score, n.intScore, n.published)", ctxNodes, nil)
 	assert.Contains(t, out, "'doc-1'")
 	assert.Contains(t, out, "1.5")
 	assert.Contains(t, out, "7")
 	assert.Contains(t, out, "true")
 
 	// Embedding from Properties (stored as regular property, no special routing).
-	out = exec.substituteBoundVariablesInCall("CALL db.index.vector.queryNodes('idx', 5, n.embedding)", ctxNodes)
+	out = exec.substituteBoundVariablesInCall("CALL db.index.vector.queryNodes('idx', 5, n.embedding)", ctxNodes, nil)
 	assert.Contains(t, out, "[1, 2, 3]")
 
 	// Embedding from []float64 property.
@@ -1461,6 +1461,7 @@ func TestCypherHelpers_SubstituteBoundVariablesInCall(t *testing.T) {
 	out = exec.substituteBoundVariablesInCall(
 		"CALL db.index.vector.queryNodes('idx', 5, n.embedding)",
 		map[string]*storage.Node{"n": nodeFloat64},
+		nil,
 	)
 	assert.Contains(t, out, "[0.3, 0.4]")
 
@@ -1475,17 +1476,18 @@ func TestCypherHelpers_SubstituteBoundVariablesInCall(t *testing.T) {
 	out = exec.substituteBoundVariablesInCall(
 		"CALL db.index.vector.queryNodes('idx', 5, n.embedding)",
 		map[string]*storage.Node{"n": nodeIface},
+		nil,
 	)
 	assert.Contains(t, out, "[1, 2, 3]")
 
 	// Unknown variable/property should remain unchanged.
 	orig := "CALL proc(missing.value)"
-	out = exec.substituteBoundVariablesInCall(orig, ctxNodes)
+	out = exec.substituteBoundVariablesInCall(orig, ctxNodes, nil)
 	assert.Equal(t, orig, out)
 
 	// Patterns inside quoted strings should not be replaced.
 	inQuoted := "CALL proc('n.id', \"n.score\")"
-	out = exec.substituteBoundVariablesInCall(inQuoted, ctxNodes)
+	out = exec.substituteBoundVariablesInCall(inQuoted, ctxNodes, nil)
 	assert.Equal(t, inQuoted, out)
 }
 

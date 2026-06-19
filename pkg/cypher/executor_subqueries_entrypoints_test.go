@@ -45,7 +45,7 @@ func TestSubstituteBoundVariablesInCall_MoreValueTypes(t *testing.T) {
 	}
 
 	call := "CALL p.demo(n.embedding, n.title, n.age, n.active, n.arr, 'n.title')"
-	out := exec.substituteBoundVariablesInCall(call, map[string]*storage.Node{"n": node})
+	out := exec.substituteBoundVariablesInCall(call, map[string]*storage.Node{"n": node}, nil)
 
 	require.True(t, strings.Contains(out, "[0.1, 0.2]"))
 	require.True(t, strings.Contains(out, "'hello'"))

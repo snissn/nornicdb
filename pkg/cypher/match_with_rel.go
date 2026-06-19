@@ -122,6 +122,11 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 
 	// Extract WITH clause section
 	withSection := strings.TrimSpace(withAndReturn[4:returnIdx]) // Skip "WITH"
+	callSection := ""
+	if callIdx := findKeywordIndex(withSection, "CALL"); callIdx > 0 {
+		callSection = strings.TrimSpace(withSection[callIdx:])
+		withSection = strings.TrimSpace(withSection[:callIdx])
+	}
 
 	// Extract LIMIT/SKIP from WITH section (e.g., "WITH path, connected LIMIT 10")
 	var withLimitVal, withSkipVal int
@@ -506,6 +511,29 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 			}
 		}
 		computedRows = distinctRows
+	}
+
+	if callSection != "" {
+		for _, row := range computedRows {
+			nodeScope := make(map[string]*storage.Node)
+			relScope := make(map[string]*storage.Edge)
+			for alias, value := range row.values {
+				switch v := value.(type) {
+				case *storage.Node:
+					if v != nil {
+						nodeScope[alias] = v
+					}
+				case *storage.Edge:
+					if v != nil {
+						relScope[alias] = v
+					}
+				}
+			}
+			evaluatedCall := e.substituteBoundVariablesInCall(callSection, nodeScope, relScope)
+			if _, err := e.executeCall(ctx, evaluatedCall); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// Apply WITH SKIP

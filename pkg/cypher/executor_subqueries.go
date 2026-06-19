@@ -145,7 +145,7 @@ func (e *StorageExecutor) executeMatchWithCallProcedure(ctx context.Context, cyp
 
 		// Evaluate variable references in the CALL statement
 		// Replace patterns like "n.embedding" with actual values
-		evaluatedCall := e.substituteBoundVariablesInCall(callPart, nodeContext)
+		evaluatedCall := e.substituteBoundVariablesInCall(callPart, nodeContext, nil)
 
 		// Execute the CALL with evaluated values
 		result, err := e.executeCall(ctx, evaluatedCall)
@@ -196,10 +196,20 @@ func (e *StorageExecutor) executeMatchWithCallProcedure(ctx context.Context, cyp
 	return combined, nil
 }
 
-// substituteBoundVariablesInCall replaces variable references in CALL statements with actual values
-// Example: "CALL db.index.vector.queryNodes('idx', 10, n.embedding)" -> "CALL db.index.vector.queryNodes('idx', 10, [0.1, 0.2, ...])"
-// This handles variable.property patterns like n.embedding, n.id, etc.
-func (e *StorageExecutor) substituteBoundVariablesInCall(callPart string, nodeContext map[string]*storage.Node) string {
+// substituteBoundVariablesInCall replaces node variable references in CALL
+// statements with actual values.
+//
+// Example:
+//
+//	CALL db.index.vector.queryNodes('idx', 10, n.embedding)
+//
+// becomes:
+//
+//	CALL db.index.vector.queryNodes('idx', 10, [0.1, 0.2, ...])
+//
+// substituteBoundVariablesInCall is the relationship-aware
+// variant used by MATCH ... WITH r CALL ... pipelines.
+func (e *StorageExecutor) substituteBoundVariablesInCall(callPart string, nodeContext map[string]*storage.Node, relContext map[string]*storage.Edge) string {
 	result := callPart
 
 	// Find all variable.property patterns in the CALL
@@ -226,69 +236,32 @@ func (e *StorageExecutor) substituteBoundVariablesInCall(callPart string, nodeCo
 		}
 
 		// Check if this variable is in our context
+		var value interface{}
+		found := false
 		if node, exists := nodeContext[varName]; exists {
 			// Evaluate the property access
-			var value interface{}
 			{
 				// Regular property access — no special-casing for any property name.
 				// Users can store embeddings in any property and create a vector index for it.
 				if val, ok := node.Properties[propName]; ok {
 					value = val
+					found = true
 				}
 			}
+		}
+		if !found {
+			if rel, exists := relContext[varName]; exists && rel != nil {
+				if val, ok := rel.Properties[propName]; ok {
+					value = val
+					found = true
+				}
+			}
+		}
 
+		if found {
 			// Replace the variable.property with the actual value
 			if value != nil {
-				var replacement string
-				switch v := value.(type) {
-				case []float32:
-					// Format as vector array
-					parts := make([]string, len(v))
-					for i, f := range v {
-						parts[i] = fmt.Sprintf("%g", f)
-					}
-					replacement = "[" + strings.Join(parts, ", ") + "]"
-				case []float64:
-					// Format as vector array
-					parts := make([]string, len(v))
-					for i, f := range v {
-						parts[i] = fmt.Sprintf("%g", f)
-					}
-					replacement = "[" + strings.Join(parts, ", ") + "]"
-				case string:
-					replacement = fmt.Sprintf("'%s'", v)
-				case int, int64:
-					replacement = fmt.Sprintf("%d", v)
-				case float32, float64:
-					replacement = fmt.Sprintf("%g", v)
-				case []interface{}:
-					// Format as array (common for embedding vectors from Cypher parameters)
-					parts := make([]string, len(v))
-					for i, item := range v {
-						switch iv := item.(type) {
-						case float64:
-							parts[i] = fmt.Sprintf("%g", iv)
-						case float32:
-							parts[i] = fmt.Sprintf("%g", iv)
-						case int:
-							parts[i] = fmt.Sprintf("%d", iv)
-						case int64:
-							parts[i] = fmt.Sprintf("%d", iv)
-						default:
-							parts[i] = fmt.Sprintf("%v", iv)
-						}
-					}
-					replacement = "[" + strings.Join(parts, ", ") + "]"
-				case bool:
-					if v {
-						replacement = "true"
-					} else {
-						replacement = "false"
-					}
-				default:
-					// For complex types, try to convert to string representation
-					replacement = fmt.Sprintf("%v", v)
-				}
+				replacement := callLiteralForBoundValue(value)
 				// Replace from end to start to maintain indices
 				result = result[:startIdx] + replacement + result[endIdx:]
 			}
@@ -320,7 +293,66 @@ func (e *StorageExecutor) substituteBoundVariablesInCall(callPart string, nodeCo
 		}
 	}
 
+	procIdx = strings.Index(upper, "DB.CREATE.SETRELATIONSHIPVECTORPROPERTY")
+	if procIdx >= 0 {
+		openParen := strings.Index(result[procIdx:], "(")
+		if openParen >= 0 {
+			openParen += procIdx
+			closeParen := findMatchingCallParen(result, openParen)
+			if closeParen > openParen {
+				args := splitProcedureTopLevelComma(result[openParen+1 : closeParen])
+				if len(args) > 0 {
+					firstArg := strings.TrimSpace(args[0])
+					if rel, ok := relContext[firstArg]; ok && rel != nil {
+						args[0] = fmt.Sprintf("'%s'", rel.ID)
+						result = result[:openParen+1] + strings.Join(args, ", ") + result[closeParen:]
+					}
+				}
+			}
+		}
+	}
+
 	return result
+}
+
+func callLiteralForBoundValue(value interface{}) string {
+	switch v := value.(type) {
+	case []float32:
+		parts := make([]string, len(v))
+		for i, f := range v {
+			parts[i] = fmt.Sprintf("%g", f)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case []float64:
+		parts := make([]string, len(v))
+		for i, f := range v {
+			parts[i] = fmt.Sprintf("%g", f)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case string:
+		return fmt.Sprintf("'%s'", v)
+	case int:
+		return fmt.Sprintf("%d", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case float32:
+		return fmt.Sprintf("%g", v)
+	case float64:
+		return fmt.Sprintf("%g", v)
+	case []interface{}:
+		parts := make([]string, len(v))
+		for i, item := range v {
+			parts[i] = callLiteralForBoundValue(item)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 // executeMatchWithCallSubquery handles MATCH ... WHERE ... CALL { WITH var ... } ... RETURN queries

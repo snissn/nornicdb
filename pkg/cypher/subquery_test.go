@@ -3394,6 +3394,7 @@ func TestSubqueryHelpers_SubstituteBoundVariablesInCall_Branches(t *testing.T) {
 	got := exec.substituteBoundVariablesInCall(
 		"CALL x(n.s, n.i, n.f, n.b, n.embedding, n.obj)",
 		ctxMap,
+		nil,
 	)
 	assert.Contains(t, got, "'alice'")
 	assert.Contains(t, got, "7")
@@ -3403,18 +3404,18 @@ func TestSubqueryHelpers_SubstituteBoundVariablesInCall_Branches(t *testing.T) {
 	assert.Contains(t, got, "map[x:1]")
 
 	// Quoted references should not be replaced.
-	quoted := exec.substituteBoundVariablesInCall("CALL x('n.s', \"n.i\")", ctxMap)
+	quoted := exec.substituteBoundVariablesInCall("CALL x('n.s', \"n.i\")", ctxMap, nil)
 	assert.Equal(t, "CALL x('n.s', \"n.i\")", quoted)
 
 	// embedding reads from Properties like any other property (no ChunkEmbeddings routing).
 	// []float64 embedding conversion path.
 	node.Properties["embedding"] = []float64{0.4, 0.5}
-	got = exec.substituteBoundVariablesInCall("CALL x(n.embedding)", ctxMap)
+	got = exec.substituteBoundVariablesInCall("CALL x(n.embedding)", ctxMap, nil)
 	assert.Contains(t, got, "[0.4, 0.5]")
 
 	// []float32 embedding conversion path.
 	node.Properties["embedding"] = []float32{0.6, 0.7}
-	got = exec.substituteBoundVariablesInCall("CALL x(n.embedding)", ctxMap)
+	got = exec.substituteBoundVariablesInCall("CALL x(n.embedding)", ctxMap, nil)
 	assert.Contains(t, got, "[0.6, 0.7]")
 }
 
