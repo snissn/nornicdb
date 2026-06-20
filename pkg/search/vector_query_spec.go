@@ -145,10 +145,6 @@ func (s *Service) VectorQueryRelationships(ctx context.Context, queryEmbedding [
 		similarity = "cosine"
 	}
 
-	if !s.HasRelationshipVectorEntries(spec.Type, spec.Property) {
-		_ = s.BuildIndexes(ctx)
-	}
-
 	type edgeMeta struct {
 		id  string
 		vec []float32

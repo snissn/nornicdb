@@ -1170,6 +1170,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 							return nil, fmt.Errorf("SET %s =: %w", variable, err)
 						}
 						result.Stats.PropertiesSet++
+						e.notifyEdgeMutated(string(entity.ID))
 					}
 				}
 			}
@@ -1208,6 +1209,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 						return nil, fmt.Errorf("SET %s.%s: %w", variable, propName, err)
 					}
 					result.Stats.PropertiesSet++
+					e.notifyEdgeMutated(string(entity.ID))
 				}
 			}
 		}

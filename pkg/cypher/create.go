@@ -247,6 +247,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 			if err := store.CreateEdge(edge); err != nil {
 				return nil, fmt.Errorf("failed to create relationship: %w", err)
 			}
+			e.notifyEdgeMutated(string(edge.ID))
 			if relVar != "" {
 				createdEdges[relVar] = edge
 			}
@@ -575,6 +576,7 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 			if err := store.CreateEdge(edge); err != nil {
 				return nil, nil, nil, fmt.Errorf("failed to create relationship: %w", err)
 			}
+			e.notifyEdgeMutated(string(edge.ID))
 
 			if relVar != "" {
 				createdEdges[relVar] = edge
@@ -1858,6 +1860,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 							return nil, fmt.Errorf("failed to replace edge properties: %w", err)
 						}
 						result.Stats.PropertiesSet++
+						e.notifyEdgeMutated(string(edge.ID))
 					} else {
 						return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
 					}
@@ -1885,6 +1888,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 						return nil, fmt.Errorf("failed to update edge property: %w", err)
 					}
 					result.Stats.PropertiesSet++
+					e.notifyEdgeMutated(string(edge.ID))
 				} else {
 					return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
 				}
@@ -2495,6 +2499,7 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 					return nil, fmt.Errorf("failed to replace edge properties: %w", err)
 				}
 				result.Stats.PropertiesSet++
+				e.notifyEdgeMutated(string(edge.ID))
 			} else {
 				return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
 			}
@@ -2524,6 +2529,7 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 				return nil, fmt.Errorf("failed to update edge property: %w", err)
 			}
 			result.Stats.PropertiesSet++
+			e.notifyEdgeMutated(string(edge.ID))
 		} else {
 			return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
 		}
@@ -2810,6 +2816,7 @@ func (e *StorageExecutor) applySetMergeToCreated(ctx context.Context, setPart st
 		if err := store.UpdateEdge(edge); err != nil {
 			return fmt.Errorf("failed to update edge: %w", err)
 		}
+		e.notifyEdgeMutated(string(edge.ID))
 	} else {
 		return fmt.Errorf("unknown variable in SET +=: %s", varName)
 	}

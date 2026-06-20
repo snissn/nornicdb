@@ -3,13 +3,37 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
+
+type blockingNodeIteratorEngine struct {
+	storage.Engine
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+}
+
+func (e *blockingNodeIteratorEngine) IterateNodes(fn func(*storage.Node) bool) error {
+	e.enteredOnce.Do(func() { close(e.entered) })
+	<-e.release
+	nodes, err := e.Engine.AllNodes()
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		if !fn(node) {
+			break
+		}
+	}
+	return nil
+}
 
 func TestMatchVectorCosineFastPath_UsesVectorIndex(t *testing.T) {
 	base := newTestMemoryEngine(t)
@@ -169,7 +193,7 @@ func TestMatchVectorCosineFastPath_WriteThenSearchLoop_NoScanRegression(t *testi
 	require.Equal(t, 0, counting.streamNodesCalls, "write-then-search loop should not use stream-scan fallback")
 }
 
-func TestMatchVectorCosineFastPath_LazyWiredServiceWarmsBeforeIndexedQuery(t *testing.T) {
+func TestMatchVectorCosineFastPath_LazyWiredServiceUsesLiveIndexWithoutWarmup(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")
 	counting := &countingStreamingEngine{Engine: ns}
@@ -181,12 +205,9 @@ func TestMatchVectorCosineFastPath_LazyWiredServiceWarmsBeforeIndexedQuery(t *te
 
 	searchSvc := search.NewServiceWithDimensions(ns, 4)
 	var warmCalls int32
-	var warmErr atomic.Value
 	searchSvc.SetLazyWarming(true, search.WarmFunc(func() {
 		atomic.AddInt32(&warmCalls, 1)
-		if err := searchSvc.BuildIndexes(context.Background()); err != nil {
-			warmErr.Store(err)
-		}
+		_ = searchSvc.BuildIndexes(context.Background())
 	}))
 	exec.SetSearchService(searchSvc)
 
@@ -195,7 +216,7 @@ func TestMatchVectorCosineFastPath_LazyWiredServiceWarmsBeforeIndexedQuery(t *te
 	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'other', group_id:'g', name_embedding:[0.0,1.0,0.0,0.0]})", nil)
 	require.NoError(t, err)
 	require.False(t, searchSvc.IsReady(), "live-indexed vector properties must not be reported as full warmup readiness")
-	require.True(t, searchSvc.CanServeVectorQueries(), "live-indexed vector properties make indexed queries service-backed before full warmup")
+	require.Equal(t, 2, searchSvc.CountPropertyVectorEntries("name_embedding"), "live-indexed vector properties make indexed queries service-backed before full warmup")
 
 	counting.allNodesCalls = 0
 	counting.labelCalls = 0
@@ -218,14 +239,88 @@ LIMIT $limit
 	require.Len(t, res.Rows, 1)
 	require.Equal(t, "best", res.Rows[0][0])
 	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
-	if errValue := warmErr.Load(); errValue != nil {
-		require.NoError(t, errValue.(error))
-	}
-	require.True(t, searchSvc.IsReady())
-	require.Equal(t, int32(1), atomic.LoadInt32(&warmCalls))
+	require.False(t, searchSvc.IsReady(), "scalar cosine fast path should not force full warmup when live indexed vectors can answer")
+	require.Equal(t, int32(0), atomic.LoadInt32(&warmCalls), "Graphiti-style scalar cosine reads must not trigger lazy BuildIndexes/k-means warmup")
 	require.Equal(t, 0, counting.allNodesCalls)
 	require.Equal(t, 0, counting.labelCalls)
 	require.Equal(t, 0, counting.streamNodesCalls)
+}
+
+func TestMatchVectorCosineFastPath_UsesLiveIndexDuringBackgroundWarmup(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	blocking := &blockingNodeIteratorEngine{
+		Engine:  counting,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX entity_name_idx FOR (n:Entity) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	searchSvc := search.NewServiceWithDimensions(blocking, 4)
+	exec.SetSearchService(searchSvc)
+
+	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'best', group_id:'g', name_embedding:[1.0,0.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'other', group_id:'g', name_embedding:[0.0,1.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, searchSvc.CountPropertyVectorEntries("name_embedding"))
+
+	buildErr := make(chan error, 1)
+	go func() {
+		buildErr <- searchSvc.BuildIndexes(context.Background())
+	}()
+	releaseBuild := func() {
+		select {
+		case <-blocking.release:
+		default:
+			close(blocking.release)
+		}
+	}
+	defer releaseBuild()
+	select {
+	case <-blocking.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for BuildIndexes to enter node iteration")
+	}
+	require.True(t, searchSvc.BuildInProgress())
+
+	counting.allNodesCalls = 0
+	counting.labelCalls = 0
+	counting.streamNodesCalls = 0
+
+	query := `
+MATCH (n:Entity)
+WHERE n.group_id = $group_id
+WITH n, vector.similarity.cosine(n.name_embedding, $search_vector) AS score
+RETURN n.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT $limit
+`
+	res, err := exec.Execute(ctx, query, map[string]interface{}{
+		"group_id":      "g",
+		"search_vector": []float64{1, 0, 0, 0},
+		"limit":         1,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "best", res.Rows[0][0])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+	require.Equal(t, 0, counting.allNodesCalls, "background warmup must not force exact full-scan fallback")
+	require.Equal(t, 0, counting.labelCalls, "background warmup must not force exact label-scan fallback")
+	require.Equal(t, 0, counting.streamNodesCalls, "background warmup must not force stream-scan fallback")
+
+	releaseBuild()
+	select {
+	case err := <-buildErr:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for BuildIndexes to finish")
+	}
 }
 
 func TestMatchVectorCosineFastPath_ExternalEmbeddingsUseLiveIndexBeforeReady(t *testing.T) {
@@ -249,7 +344,6 @@ func TestMatchVectorCosineFastPath_ExternalEmbeddingsUseLiveIndexBeforeReady(t *
 	}
 	require.Equal(t, 16, searchSvc.CountPropertyVectorEntries("name_embedding"))
 	require.False(t, searchSvc.IsReady(), "live-indexed vector properties must not be reported as full warmup readiness")
-	require.True(t, searchSvc.CanServeVectorQueries(), "live-indexed vector properties should not need a full BuildIndexes warmup before querying")
 
 	counting.allNodesCalls = 0
 	counting.labelCalls = 0

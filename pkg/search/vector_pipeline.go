@@ -202,8 +202,13 @@ func NewHNSWCandidateGen(hnswIndex *HNSWIndex) *HNSWCandidateGen {
 func (h *HNSWCandidateGen) SearchCandidates(ctx context.Context, query []float32, k int, minSimilarity float64) ([]Candidate, error) {
 	// For HNSW, we generate more candidates than k for exact reranking
 	candidateLimit := calculateCandidateLimit(k)
+	resultLimit := candidateLimit
+	searchBeam := h.hnswIndex.config.EfSearch
+	if searchBeam < resultLimit {
+		searchBeam = resultLimit
+	}
 
-	results, err := h.hnswIndex.Search(ctx, query, candidateLimit, minSimilarity)
+	results, err := h.hnswIndex.SearchWithEf(ctx, query, resultLimit, minSimilarity, searchBeam)
 	if err != nil {
 		return nil, err
 	}

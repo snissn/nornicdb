@@ -659,8 +659,7 @@ func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName s
 		return []vectorNodeScore{}, true
 	}
 	svc := e.searchService
-	useService, err := prepareWiredNodeVectorService(ctx, svc, wantDims)
-	if err != nil || !useService {
+	if svc == nil || svc.VectorIndexDimensions() != wantDims || (!svc.IsReady() && (targetProperty == "" || svc.CountPropertyVectorEntries(targetProperty) == 0)) {
 		return e.fetchCosineNodeScoresExact(ctx, targetLabel, targetProperty, similarityFunc, limit, queryVector, orderDesc, wantDims)
 	}
 	if !svc.VectorEnabled() {
@@ -699,7 +698,7 @@ func prepareWiredNodeVectorService(ctx context.Context, svc *search.Service, wan
 	if err := svc.EnsureWarm(ctx); err != nil {
 		return false, err
 	}
-	if !svc.CanServeVectorQueries() {
+	if !svc.IsReady() {
 		return false, nil
 	}
 	return true, nil

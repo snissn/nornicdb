@@ -1024,9 +1024,7 @@ func (e *StorageExecutor) callDbCreateSetRelationshipVectorProperty(ctx context.
 	if err != nil {
 		return nil, fmt.Errorf("failed to update relationship: %w", err)
 	}
-	if e.searchService != nil {
-		_ = e.searchService.IndexEdge(rel)
-	}
+	e.notifyEdgeMutated(string(rel.ID))
 
 	return &ExecuteResult{
 		Columns: []string{"relationship"},

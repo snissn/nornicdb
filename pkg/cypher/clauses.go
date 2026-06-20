@@ -2400,6 +2400,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				relationshipChanged = true
 			}
 			if relationshipChanged {
+				e.notifyEdgeMutated(string(edge.ID))
 				notifyOnce(fromNode.ID)
 				notifyOnce(toNode.ID)
 			}
@@ -2849,6 +2850,7 @@ func (e *StorageExecutor) executeUnwindFixedChainLinkBatch(ctx context.Context, 
 			}
 		} else {
 			result.Stats.RelationshipsCreated++
+			e.notifyEdgeMutated(string(edge.ID))
 			notifyOnce(from.ID)
 			notifyOnce(to.ID)
 		}

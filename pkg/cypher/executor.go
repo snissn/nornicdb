@@ -922,6 +922,18 @@ func (e *StorageExecutor) notifyNodeMutated(nodeID string) {
 	}
 }
 
+// notifyEdgeMutated updates live search metadata after a relationship create or
+// mutation so relationship vector queries can use client-supplied vectors before
+// a full search warmup/build has run.
+func (e *StorageExecutor) notifyEdgeMutated(edgeID string) {
+	if e.searchService == nil || edgeID == "" {
+		return
+	}
+	if edge, err := e.storage.GetEdge(storage.EdgeID(edgeID)); err == nil && edge != nil {
+		_ = e.searchService.IndexEdge(edge)
+	}
+}
+
 // removeNodeFromSearch removes a node from the search service (vector/fulltext indexes).
 // Call after successfully deleting a node via Cypher so embeddings are not left orphaned.
 // nodeID may be prefixed (e.g. "nornic:xyz") or local ("xyz"); the search service expects local ID.

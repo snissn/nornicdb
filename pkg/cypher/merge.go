@@ -1958,6 +1958,7 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 			}
 		} else {
 			result.Stats.RelationshipsCreated = 1
+			e.notifyEdgeMutated(string(edge.ID))
 		}
 	}
 
@@ -1989,6 +1990,7 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 				return nil, fmt.Errorf("failed to update edge property: %w", err)
 			}
 			result.Stats.PropertiesSet += propertiesSet
+			e.notifyEdgeMutated(string(edge.ID))
 		}
 	}
 
@@ -3182,7 +3184,11 @@ func (e *StorageExecutor) executeMergeRelSegment(ctx context.Context, pattern st
 		Properties: relProps,
 	}
 
-	return store.CreateEdge(edge)
+	if err := store.CreateEdge(edge); err != nil {
+		return err
+	}
+	e.notifyEdgeMutated(string(edge.ID))
+	return nil
 }
 
 // executeMultipleMerges handles queries with multiple MERGE statements without WITH:

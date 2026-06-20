@@ -477,7 +477,7 @@ func TestCallDbIndexVectorQueryNodes_LazyWiredServiceWarmsBeforeQuery(t *testing
 	_, err = exec.Execute(ctx, "CREATE (:Doc {uuid:'doc-other', embedding:[0.0,1.0,0.0,0.0]})", nil)
 	require.NoError(t, err)
 	require.False(t, searchSvc.IsReady(), "live-indexed vector properties must not be reported as full warmup readiness")
-	require.True(t, searchSvc.CanServeVectorQueries(), "live-indexed vector properties make indexed queries service-backed before full warmup")
+	require.Equal(t, 2, searchSvc.CountPropertyVectorEntries("embedding"), "live-indexed vector properties are present before full warmup")
 
 	counting.allNodesCalls = 0
 	counting.labelCalls = 0

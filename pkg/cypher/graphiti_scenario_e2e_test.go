@@ -206,8 +206,8 @@ func TestGraphitiScenarioE2E_ExternalVectorIngestDoesNotUseExactScanFallbackBefo
 		require.Len(t, res.Rows, len(payload.edges))
 
 		require.False(t, searchSvc.IsReady(), "test must cover pre-warmup ingest, not fully built search readiness")
-		require.True(t, searchSvc.CanServeVectorQueries(), "live indexed external vectors should be queryable before full warmup")
 		require.Equal(t, (episode+1)*nodesPerEpisode, searchSvc.CountPropertyVectorEntries("name_embedding"))
+		require.True(t, searchSvc.HasRelationshipVectorEntries("RELATES_TO", "fact_embedding"))
 
 		counting.allNodesCalls = 0
 		counting.allEdgesCalls = 0
@@ -226,9 +226,19 @@ func TestGraphitiScenarioE2E_ExternalVectorIngestDoesNotUseExactScanFallbackBefo
 			require.NoError(t, err)
 			require.NotEmpty(t, nodeRes.Rows)
 			require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath, "episode %d node search %d should use vector-index fast path", episode, searchIdx)
+
+			edgeQuery := fmt.Sprintf("%s\n/* graphiti_edge_fact_episode_%d_search_%d */", graphitiEdgeSimilarityQuery, episode, searchIdx)
+			edgeRes, err := exec.Execute(ctx, edgeQuery, map[string]interface{}{
+				"search_vector": queryVec,
+				"min_score":     -1.0,
+				"limit":         8,
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, edgeRes.Rows)
 		}
 
 		require.Equal(t, 0, counting.allNodesCalls, "episode %d must not use node exact full-scan fallback", episode)
+		require.Equal(t, 0, counting.allEdgesCalls, "episode %d must not use edge exact full-scan fallback", episode)
 		require.Equal(t, 0, counting.labelCalls, "episode %d must not use node exact label-scan fallback", episode)
 		require.Equal(t, 0, counting.streamNodesCalls, "episode %d must not stream-scan nodes for cosine resolution", episode)
 	}

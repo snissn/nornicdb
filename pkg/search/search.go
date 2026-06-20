@@ -920,17 +920,6 @@ func (s *Service) IsReady() bool {
 	return s.ready.Load()
 }
 
-// CanServeVectorQueries reports whether vector queries can be served by the
-// in-memory vector substrate without falling back to primary storage scans.
-//
-// A full BuildIndexes warmup makes the service ready. Separately, live writes
-// can populate vector entries before warmup completes; those entries are safe to
-// query through the vector pipeline, but they should not be conflated with the
-// Neo4j-style ONLINE/readiness state exposed by IsReady.
-func (s *Service) CanServeVectorQueries() bool {
-	return s.ready.Load() || s.EmbeddingCount() > 0
-}
-
 // BM25Engine returns the configured BM25 engine for this service ("v1" or "v2").
 func (s *Service) BM25Engine() string {
 	return normalizeBM25Engine(s.bm25Engine)
