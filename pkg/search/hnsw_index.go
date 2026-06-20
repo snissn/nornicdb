@@ -520,10 +520,17 @@ func (h *HNSWIndex) searchWithEf(ctx context.Context, query []float32, k int, mi
 	ep := h.entryPoint
 
 	for l := h.maxLevel; l > 0; l-- {
-		ep = h.searchLayerSingle(normalized, ep, l)
+		var err error
+		ep, err = h.searchLayerSingleWithContext(ctx, normalized, ep, l)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	candidates := h.searchLayerHeapPooled(normalized, ep, ef, 0)
+	candidates, err := h.searchLayerHeapPooledWithContext(ctx, normalized, ep, ef, 0)
+	if err != nil {
+		return nil, err
+	}
 	defer h.itemsPool.Put(candidates[:0])
 
 	if err := ctx.Err(); err != nil {
@@ -770,8 +777,18 @@ func LoadHNSWIndex(path string, vectorLookup VectorLookup) (*HNSWIndex, error) {
 // hnswPath is the full path to the single HNSW file (e.g. data/search/dbname/hnsw); per-cluster
 // files are written to hnsw_ivf/0, 1, 2, ... (no extension). Each cluster is saved as graph-only.
 func SaveIVFHNSW(hnswPath string, clusterHNSW map[int]*HNSWIndex) error {
+	return SaveIVFHNSWWithContext(context.Background(), hnswPath, clusterHNSW)
+}
+
+func SaveIVFHNSWWithContext(ctx context.Context, hnswPath string, clusterHNSW map[int]*HNSWIndex) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if hnswPath == "" || len(clusterHNSW) == 0 {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	baseDir := filepath.Dir(hnswPath)
 	ivfDir := filepath.Join(baseDir, "hnsw_ivf")
@@ -779,6 +796,9 @@ func SaveIVFHNSW(hnswPath string, clusterHNSW map[int]*HNSWIndex) error {
 		return err
 	}
 	for cid, idx := range clusterHNSW {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if idx == nil {
 			continue
 		}
@@ -981,10 +1001,21 @@ func (h *HNSWIndex) reselectEntryPointLocked() {
 }
 
 func (h *HNSWIndex) searchLayerSingle(query []float32, entryID uint32, level int) uint32 {
+	out, _ := h.searchLayerSingleWithContext(context.Background(), query, entryID, level)
+	return out
+}
+
+func (h *HNSWIndex) searchLayerSingleWithContext(ctx context.Context, query []float32, entryID uint32, level int) (uint32, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	current := entryID
 	currentDist := float32(1.0) - vector.DotProductSIMD(query, h.vectorAtLocked(current))
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return current, err
+		}
 		changed := false
 		neighbors, ok := h.neighborsAtLevelLocked(current, level)
 		if !ok {
@@ -993,6 +1024,11 @@ func (h *HNSWIndex) searchLayerSingle(query []float32, entryID uint32, level int
 
 		// Reverse iteration: order doesn't matter when finding closest neighbor
 		for i := len(neighbors) - 1; i >= 0; i-- {
+			if i&31 == 0 {
+				if err := ctx.Err(); err != nil {
+					return current, err
+				}
+			}
 			neighborID := neighbors[i]
 			if int(neighborID) >= len(h.nodeLevel) {
 				continue
@@ -1010,7 +1046,7 @@ func (h *HNSWIndex) searchLayerSingle(query []float32, entryID uint32, level int
 		}
 	}
 
-	return current
+	return current, nil
 }
 
 func (h *HNSWIndex) searchLayer(query []float32, entryID uint32, ef int, level int) []uint32 {
@@ -1107,6 +1143,14 @@ func (h *HNSWIndex) searchLayerHeap(query []float32, entryID uint32, ef int, lev
 }
 
 func (h *HNSWIndex) searchLayerHeapPooled(query []float32, entryID uint32, ef int, level int) []hnswDistItem {
+	out, _ := h.searchLayerHeapPooledWithContext(context.Background(), query, entryID, ef, level)
+	return out
+}
+
+func (h *HNSWIndex) searchLayerHeapPooledWithContext(ctx context.Context, query []float32, entryID uint32, ef int, level int) ([]hnswDistItem, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	visited := h.visitedPool.Get().(*visitedGenState)
 	defer h.visitedPool.Put(visited)
 	if len(visited.gen) < len(h.nodeLevel) {
@@ -1141,6 +1185,9 @@ func (h *HNSWIndex) searchLayerHeapPooled(query []float32, entryID uint32, ef in
 	results.Push(hnswDistItem{id: entryID, dist: entryDist})
 
 	for candidates.Len() > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		closest := candidates.Pop()
 
 		if results.Len() >= ef {
@@ -1161,6 +1208,11 @@ func (h *HNSWIndex) searchLayerHeapPooled(query []float32, entryID uint32, ef in
 
 		// Reverse iteration: order doesn't matter when checking all neighbors
 		for i := len(neighbors) - 1; i >= 0; i-- {
+			if i&31 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			neighborID := neighbors[i]
 			if int(neighborID) >= len(h.nodeLevel) || h.deleted[neighborID] {
 				continue
@@ -1195,7 +1247,7 @@ func (h *HNSWIndex) searchLayerHeapPooled(query []float32, entryID uint32, ef in
 		item := results.Pop() // furthest first
 		buf[i] = item         // closest ends up at index 0
 	}
-	return buf
+	return buf, nil
 }
 
 func (h *HNSWIndex) selectNeighbors(query []float32, candidates []uint32, m int) []uint32 {

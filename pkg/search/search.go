@@ -490,6 +490,8 @@ type Service struct {
 	hnswMu              sync.RWMutex
 	hnswMaintOnce       sync.Once
 	hnswMaintStop       chan struct{}
+	hnswMaintCancel     context.CancelFunc
+	hnswMaintDone       chan struct{}
 	hnswRebuildInFlight atomic.Bool
 	hnswLastRebuildUnix atomic.Int64
 	// hnswDeferredMutations counts vector add/remove mutations that skipped live HNSW updates
@@ -607,6 +609,9 @@ type Service struct {
 	metrics            *observability.SearchMetrics
 	boundDurationIndex observability.BoundLatencyObserver
 	boundDurationFuse  observability.BoundLatencyObserver
+
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
 }
 
 type strategyMode int
@@ -751,6 +756,7 @@ func NewServiceWithDimensions(engine storage.Engine, dimensions int) *Service {
 // bm25Engine values: "v1", "v2" (invalid values default to "v1").
 func NewServiceWithDimensionsAndBM25Engine(engine storage.Engine, dimensions int, bm25Engine string) *Service {
 	fulltextIndex, selectedBM25Engine := newBM25Index(bm25Engine)
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	svc := &Service{
 		engine:                     engine,
 		vectorIndex:                NewVectorIndex(dimensions),
@@ -766,6 +772,8 @@ func NewServiceWithDimensionsAndBM25Engine(engine storage.Engine, dimensions int
 		edgePropVector:             make(map[string]map[string][]float32, 1024),
 		clusterLexicalProfiles:     make(map[int]map[string]float64),
 		resultCache:                newSearchResultCache(1000, 5*time.Minute), // same order as Cypher query cache
+		lifecycleCtx:               lifecycleCtx,
+		lifecycleCancel:            lifecycleCancel,
 	}
 	svc.ready.Store(false)
 	svc.persistEnabled.Store(false)
@@ -1524,6 +1532,44 @@ func (s *Service) SetPersistenceEnabled(enabled bool) {
 	s.persistRunMu.Unlock()
 }
 
+// Close stops search-service background workers and releases file-backed vector resources.
+// It is safe to call more than once. PersistIndexesToDisk should be called by owners before
+// Close when shutdown persistence is desired.
+func (s *Service) Close() error {
+	if s == nil {
+		return nil
+	}
+	if s.lifecycleCancel != nil {
+		s.lifecycleCancel()
+	}
+	s.stopHNSWMaintenance()
+
+	s.persistMu.Lock()
+	if s.persistTimer != nil {
+		s.persistTimer.Stop()
+		s.persistTimer = nil
+	}
+	s.persistMu.Unlock()
+
+	s.strategyTransitionMu.Lock()
+	if s.strategyTransitionTimer != nil {
+		s.strategyTransitionTimer.Stop()
+		s.strategyTransitionTimer = nil
+	}
+	s.strategyTransitionPending = strategyModeUnknown
+	s.strategyTransitionMu.Unlock()
+
+	s.persistRunMu.Lock()
+	s.indexMu.Lock()
+	if s.vectorFileStore != nil {
+		_ = s.vectorFileStore.Close()
+		s.vectorFileStore = nil
+	}
+	s.indexMu.Unlock()
+	s.persistRunMu.Unlock()
+	return nil
+}
+
 // schedulePersist schedules a write of BM25 and vector indexes to disk after an idle delay.
 // Called after IndexNode/RemoveNode when paths are set; resets the timer on each mutation
 // so we only write after activity settles. No-ops during BuildIndexes (we save at end there).
@@ -1558,7 +1604,7 @@ func (s *Service) schedulePersist() {
 		s.persistMu.Lock()
 		s.persistTimer = nil
 		s.persistMu.Unlock()
-		s.runPersist()
+		s.runPersistWithContext(s.lifecycleCtx)
 	})
 }
 
@@ -1627,12 +1673,25 @@ func (s *Service) persistBaseIndexes() {
 }
 
 func (s *Service) runPersist() {
+	s.runPersistWithContext(context.Background())
+}
+
+func (s *Service) runPersistWithContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !s.persistEnabled.Load() {
+		return
+	}
+	if err := ctx.Err(); err != nil {
 		return
 	}
 	s.persistRunMu.Lock()
 	defer s.persistRunMu.Unlock()
 	if !s.persistEnabled.Load() {
+		return
+	}
+	if err := ctx.Err(); err != nil {
 		return
 	}
 	s.mu.RLock()
@@ -1645,45 +1704,48 @@ func (s *Service) runPersist() {
 		return
 	}
 	for _, writer := range s.persistWriters(ftPath, vPath, hnswPath, vfs) {
-		writer.run()
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		writer.run(ctx)
 	}
 	s.persistSearchBuildSettings(ftPath, vPath, hnswPath)
 }
 
 type persistWriter struct {
 	name string
-	run  func()
+	run  func(context.Context)
 }
 
 func (s *Service) persistWriters(fulltextPath, vectorPath, hnswPath string, vfs *VectorFileStore) []persistWriter {
 	return []persistWriter{
 		{
 			name: "bm25",
-			run: func() {
+			run: func(context.Context) {
 				s.persistBM25Background(fulltextPath)
 			},
 		},
 		{
 			name: "vector_store",
-			run: func() {
+			run: func(context.Context) {
 				s.persistVectorStoreBackground(vectorPath, vfs)
 			},
 		},
 		{
 			name: "hnsw",
-			run: func() {
+			run: func(context.Context) {
 				s.persistHNSWBackground(hnswPath)
 			},
 		},
 		{
 			name: "ivf_hnsw",
-			run: func() {
-				s.persistIVFHNSWBackground(hnswPath)
+			run: func(ctx context.Context) {
+				s.persistIVFHNSWBackground(ctx, hnswPath)
 			},
 		},
 		{
 			name: "ivfpq",
-			run: func() {
+			run: func(context.Context) {
 				s.persistIVFPQBackground(vectorPath, hnswPath)
 			},
 		},
@@ -1750,9 +1812,15 @@ func (s *Service) persistHNSWBackground(hnswPath string) {
 	log.Printf("📇 Background persist: HNSW index saved to %s", hnswPath)
 }
 
-func (s *Service) persistIVFHNSWBackground(hnswPath string) {
+func (s *Service) persistIVFHNSWBackground(ctx context.Context, hnswPath string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// When IVF-HNSW is the strategy, persist per-cluster HNSW and centroids (same dir as hnsw, in hnsw_ivf/).
 	if hnswPath == "" {
+		return
+	}
+	if err := ctx.Err(); err != nil {
 		return
 	}
 	s.clusterHNSWMu.RLock()
@@ -1761,7 +1829,7 @@ func (s *Service) persistIVFHNSWBackground(hnswPath string) {
 	if len(clusterHNSW) == 0 {
 		return
 	}
-	if err := SaveIVFHNSW(hnswPath, clusterHNSW); err != nil {
+	if err := SaveIVFHNSWWithContext(ctx, hnswPath, clusterHNSW); err != nil {
 		log.Printf("⚠️ Background persist: failed to save IVF-HNSW clusters to %s: %v", hnswPath, err)
 		return
 	}
@@ -1791,7 +1859,7 @@ func (s *Service) PersistIndexesToDisk() {
 		s.persistTimer = nil
 	}
 	s.persistMu.Unlock()
-	s.runPersist()
+	s.runPersistWithContext(context.Background())
 }
 
 // resolveMinSimilarity returns the MinSimilarity to use for a search.
@@ -3114,7 +3182,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		s.setBuildPhase("warmup_hnsw_or_kmeans")
 		log.Printf("📇 BuildIndexes: starting vector pipeline warmup (k-means may run)...")
 		s.warmupVectorPipeline(ctx)
-		go s.runPersist()
+		go s.runPersistWithContext(s.lifecycleCtx)
 		s.ready.Store(true)
 		s.setBuildPhase("ready")
 		return nil
@@ -3255,7 +3323,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			_ = s.fulltextIndex.Load(fulltextPath)
 			log.Printf("📇 BuildIndexes: reloaded BM25 from disk after warmup")
 		}
-		go s.runPersist()
+		go s.runPersistWithContext(s.lifecycleCtx)
 		s.ready.Store(true)
 		s.setBuildPhase("ready")
 		return nil
@@ -3369,7 +3437,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		_ = s.fulltextIndex.Load(fulltextPath)
 		log.Printf("📇 BuildIndexes: reloaded BM25 from disk after warmup")
 	}
-	go s.runPersist()
+	go s.runPersistWithContext(s.lifecycleCtx)
 	s.ready.Store(true)
 	s.setBuildPhase("ready")
 	return nil
@@ -4066,7 +4134,7 @@ func (s *Service) runStrategyTransition(target strategyMode) {
 	)
 	if target == strategyModeHNSW {
 		dim := s.VectorIndexDimensions()
-		targetHNSW, err = s.buildHNSWForTransition(context.Background(), dim, vi, vfs)
+		targetHNSW, err = s.buildHNSWForTransition(s.lifecycleCtx, dim, vi, vfs)
 		if err != nil {
 			log.Printf("⚠️ Runtime strategy transition build failed: %v", err)
 			return
@@ -4721,6 +4789,13 @@ func vectorIDInSeedNodeSet(vectorID string, seedNodeIDs map[string]struct{}) boo
 func (s *Service) ensureHNSWMaintenance() {
 	s.hnswMaintOnce.Do(func() {
 		s.hnswMaintStop = make(chan struct{})
+		ctx := s.lifecycleCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ctx, cancel := context.WithCancel(ctx)
+		s.hnswMaintCancel = cancel
+		s.hnswMaintDone = make(chan struct{})
 
 		interval := envDurationMs("NORNICDB_HNSW_MAINT_INTERVAL_MS", 30_000)
 		minRebuildInterval := envDurationSec("NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC", 60)
@@ -4731,19 +4806,45 @@ func (s *Service) ensureHNSWMaintenance() {
 		ticker := time.NewTicker(interval)
 		go func() {
 			defer ticker.Stop()
+			defer close(s.hnswMaintDone)
 			for {
 				select {
 				case <-ticker.C:
 					if !enabled {
 						continue
 					}
-					_ = s.maybeRebuildHNSW(context.Background(), rebuildRatio, maxOverhead, minRebuildInterval)
+					if s.buildInProgress.Load() {
+						continue
+					}
+					_ = s.maybeRebuildHNSW(ctx, rebuildRatio, maxOverhead, minRebuildInterval)
 				case <-s.hnswMaintStop:
+					cancel()
+					return
+				case <-ctx.Done():
 					return
 				}
 			}
 		}()
 	})
+}
+
+func (s *Service) stopHNSWMaintenance() {
+	if s == nil {
+		return
+	}
+	if s.hnswMaintCancel != nil {
+		s.hnswMaintCancel()
+	}
+	if s.hnswMaintStop != nil {
+		select {
+		case <-s.hnswMaintStop:
+		default:
+			close(s.hnswMaintStop)
+		}
+	}
+	if s.hnswMaintDone != nil {
+		<-s.hnswMaintDone
+	}
 }
 
 func (s *Service) maybeRebuildHNSW(ctx context.Context, tombstoneRatioThreshold, maxOverheadFactor float64, minInterval time.Duration) error {

@@ -1946,6 +1946,16 @@ func (db *DB) closeInternal() error {
 		db.searchServicesMu.RUnlock()
 	}
 
+	db.searchServicesMu.RLock()
+	for _, entry := range db.searchServices {
+		if entry != nil && entry.svc != nil {
+			if err := entry.svc.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	db.searchServicesMu.RUnlock()
+
 	if db.accessFlusher != nil {
 		db.accessFlusher.Stop()
 	}

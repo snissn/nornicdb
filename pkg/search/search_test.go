@@ -298,7 +298,7 @@ func TestServicePersistenceAndTimingHelpers(t *testing.T) {
 	svc.clusterHNSWMu.Lock()
 	svc.clusterHNSW = map[int]*HNSWIndex{0: clusterIdx}
 	svc.clusterHNSWMu.Unlock()
-	svc.persistIVFHNSWBackground(hnswPath)
+	svc.persistIVFHNSWBackground(context.Background(), hnswPath)
 	_, err = os.Stat(filepath.Join(filepath.Dir(hnswPath), "hnsw_ivf", "0"))
 	require.NoError(t, err)
 
@@ -2562,6 +2562,28 @@ func TestSearchHelpers_HNSWUpdateLive_Branches(t *testing.T) {
 	size := svc.hnswIndex.Size()
 	svc.hnswMu.RUnlock()
 	require.Equal(t, 2, size)
+}
+
+func TestSearchService_CloseStopsHNSWMaintenance(t *testing.T) {
+	t.Setenv("NORNICDB_HNSW_MAINT_INTERVAL_MS", "1")
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	idx := NewHNSWIndex(2, DefaultHNSWConfig())
+	require.NoError(t, idx.Add("doc-a", []float32{1, 0}))
+	svc.hnswMu.Lock()
+	svc.hnswIndex = idx
+	svc.hnswMu.Unlock()
+
+	svc.ensureHNSWMaintenance()
+	require.NotNil(t, svc.hnswMaintDone)
+	require.NoError(t, svc.Close())
+
+	select {
+	case <-svc.hnswMaintDone:
+	case <-time.After(time.Second):
+		t.Fatal("HNSW maintenance did not stop after Close")
+	}
+
+	require.NoError(t, svc.Close())
 }
 
 func TestSearchHelpers_TryRestoreClusteredWarmupFromDisk_Success(t *testing.T) {

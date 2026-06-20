@@ -315,7 +315,7 @@ func (ci *ClusterIndex) ClusterWithContext(ctx context.Context) error {
 	var centroids [][]float32
 	var err error
 	if initMethod == "kmeans++" {
-		centroids, err = initCentroidsKMeansPlusPlusSeededFromVectors(vectorsCopy, n, dims, k, preferredSeeds)
+		centroids, err = initCentroidsKMeansPlusPlusSeededFromVectorsWithContext(ctx, vectorsCopy, n, dims, k, preferredSeeds)
 	} else {
 		centroids, err = initCentroidsRandomFromVectors(vectorsCopy, n, dims, k)
 	}
@@ -407,6 +407,13 @@ func initCentroidsKMeansPlusPlusFromVectors(vectors []float32, n, dims, k int) (
 // initCentroidsKMeansPlusPlusSeededFromVectors initializes centroids using k-means++.
 // If preferredSeeds is non-empty, the first centroid is chosen from that subset.
 func initCentroidsKMeansPlusPlusSeededFromVectors(vectors []float32, n, dims, k int, preferredSeeds []int) ([][]float32, error) {
+	return initCentroidsKMeansPlusPlusSeededFromVectorsWithContext(context.Background(), vectors, n, dims, k, preferredSeeds)
+}
+
+func initCentroidsKMeansPlusPlusSeededFromVectorsWithContext(ctx context.Context, vectors []float32, n, dims, k int, preferredSeeds []int) ([][]float32, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	centroids := make([][]float32, k)
 	firstIdx := rand.Intn(n)
 	if len(preferredSeeds) > 0 {
@@ -426,19 +433,37 @@ func initCentroidsKMeansPlusPlusSeededFromVectors(vectors []float32, n, dims, k 
 
 	minDistances := make([]float64, n)
 	for i := 0; i < n; i++ {
+		if i&63 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		embStart := i * dims
 		minDistances[i] = squaredEuclidean(vectors[embStart:embStart+dims], centroids[0])
 	}
 
 	for c := 1; c < k; c++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		totalWeight := 0.0
 		for i := 0; i < n; i++ {
+			if i&63 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			totalWeight += minDistances[i]
 		}
 		target := rand.Float64() * totalWeight
 		cumWeight := 0.0
 		selectedIdx := n - 1
 		for i := 0; i < n; i++ {
+			if i&63 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			cumWeight += minDistances[i]
 			if cumWeight >= target {
 				selectedIdx = i
@@ -449,6 +474,11 @@ func initCentroidsKMeansPlusPlusSeededFromVectors(vectors []float32, n, dims, k 
 		start := selectedIdx * dims
 		copy(centroids[c], vectors[start:start+dims])
 		for i := 0; i < n; i++ {
+			if i&63 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			embStart := i * dims
 			distToNew := squaredEuclidean(vectors[embStart:embStart+dims], centroids[c])
 			if distToNew < minDistances[i] {
