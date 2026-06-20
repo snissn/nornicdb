@@ -185,13 +185,19 @@ func (e *StorageExecutor) callDbIndexVectorQueryNodes(ctx context.Context, cyphe
 	}
 
 	svc := e.searchService
-	if svc == nil || svc.VectorIndexDimensions() != wantDims {
-		svc = search.NewServiceWithDimensions(e.storage, wantDims)
-		e.searchService = svc
+	if !canUseWiredNodeVectorService(svc, wantDims, targetProperty) {
+		nodeScores, ok := e.fetchCosineNodeScoresExact(ctx, targetLabel, targetProperty, similarityFunc, k, queryVector, true, wantDims)
+		if !ok {
+			return nil, fmt.Errorf("vector query failed")
+		}
+		for _, hit := range nodeScores {
+			result.Rows = append(result.Rows, []interface{}{hit.node, hit.score})
+		}
+		return result, nil
 	}
 
-	// Belt-and-braces: if anyone else flipped the flag on the (possibly
-	// freshly-created) service since we entered this function, still bail.
+	// Belt-and-braces: if anyone else flipped the flag on the wired service
+	// since we entered this function, still bail.
 	if !svc.VectorEnabled() {
 		e.logger().Warn("db.index.vector.queryNodes called against vector-disabled database — returning empty result",
 			"subsystem", "vector_search",

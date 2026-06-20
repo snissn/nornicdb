@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -38,6 +39,69 @@ func TestMatchVectorCosineFastPath_UsesVectorIndex(t *testing.T) {
 	require.True(t, trace.CosineVectorIndexFastPath)
 }
 
+func TestMatchVectorCosineFastPath_DoesNotCreateSearchServiceWhenUnwired(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX entity_name_idx FOR (n:Entity) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	for i := 0; i < 12; i++ {
+		vec := []float64{0, 0, 0, 0}
+		vec[i%4] = 1
+		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Entity {uuid:'e-%02d', group_id:'g', name_embedding:%s})", i, formatInlineFloat64Vector(vec)), nil)
+		require.NoError(t, err)
+	}
+
+	query := `
+MATCH (n:Entity)
+WHERE n.group_id = $group_id
+WITH n, vector.similarity.cosine(n.name_embedding, $search_vector) AS score
+WHERE score > $min_score
+RETURN n.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT $limit
+`
+	params := map[string]interface{}{
+		"group_id":      "g",
+		"search_vector": []float64{1, 0, 0, 0},
+		"min_score":     -1.0,
+		"limit":         5,
+	}
+
+	for i := 0; i < 5; i++ {
+		res, err := exec.Execute(ctx, fmt.Sprintf("%s /* query_%d */", query, i), params)
+		require.NoError(t, err)
+		require.Len(t, res.Rows, 5)
+		require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+		require.Nil(t, exec.searchService, "query-time vector cosine fast path must not allocate a throwaway search service")
+	}
+}
+
+func TestMatchVectorCosineFastPath_DoesNotReplaceMismatchedSearchService(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	attached := search.NewServiceWithDimensions(ns, 3)
+	exec.SetSearchService(attached)
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX entity_name_idx FOR (n:Entity) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'e-1', name_embedding:[1.0,0.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+
+	query := "MATCH (n:Entity) WITH n, vector.similarity.cosine(n.name_embedding, $q) AS score RETURN n.uuid AS uuid, score ORDER BY score DESC LIMIT 1"
+	res, err := exec.Execute(ctx, query, map[string]interface{}{"q": []float64{1, 0, 0, 0}})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "e-1", res.Rows[0][0])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+	require.Same(t, attached, exec.searchService, "dimension mismatch should fall back to exact scoring, not replace the DB-owned search service")
+}
+
 func TestMatchVectorCosineFastPath_RequiresMatchingIndex(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")
@@ -68,13 +132,17 @@ func TestMatchVectorCosineFastPath_WriteThenSearchLoop_NoScanRegression(t *testi
 	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX item_emb_idx FOR (n:Item) ON (n.emb) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
 	require.NoError(t, err)
 
+	searchSvc := search.NewServiceWithDimensions(ns, 3)
+	exec.SetSearchService(searchSvc)
+
 	_, err = exec.Execute(ctx, "CREATE (:Item {uuid:'seed', emb:[1.0,0.0,0.0]})", nil)
 	require.NoError(t, err)
+	require.Equal(t, 1, searchSvc.CountPropertyVectorEntries("emb"))
 
 	query := "MATCH (n:Item) RETURN n.uuid AS uuid, vector.similarity.cosine(n.emb, $q) AS score ORDER BY score DESC LIMIT $k"
 	params := map[string]interface{}{"q": []float64{1.0, 0.0, 0.0}, "k": 3}
 
-	// Warm the vector query pipeline once, then assert write+search loops stay off scan paths.
+	// Warm the owned vector query pipeline once, then assert write+search loops stay off scan paths.
 	_, err = exec.Execute(ctx, query+" /* warmup */", params)
 	require.NoError(t, err)
 	counting.allNodesCalls = 0
@@ -247,8 +315,13 @@ func TestMatchVectorCosineFastPath_WithProjection_WriteThenSearchLoop_NoScanRegr
 
 	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX chunk_emb_idx FOR (c:Chunk) ON (c.emb) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
 	require.NoError(t, err)
+
+	searchSvc := search.NewServiceWithDimensions(ns, 3)
+	exec.SetSearchService(searchSvc)
+
 	_, err = exec.Execute(ctx, "CREATE (:Chunk {uuid:'seed', emb:[1.0,0.0,0.0], group_id:'g'})", nil)
 	require.NoError(t, err)
+	require.Equal(t, 1, searchSvc.CountPropertyVectorEntries("emb"))
 
 	query := `MATCH (c:Chunk)
 WITH c, vector.similarity.cosine(c.emb, $q) AS score

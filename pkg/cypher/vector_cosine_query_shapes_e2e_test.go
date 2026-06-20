@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -136,6 +137,9 @@ func TestE2E_VectorCosine_TinyChunkPropertyPatternUsesIndexedPath(t *testing.T) 
 	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX tiny_chunk_idx FOR (c:Chunk) ON (c.emb) OPTIONS {indexConfig: {`vector.dimensions`: 1024, `vector.similarity_function`: 'cosine'}}", nil)
 	require.NoError(t, err)
 
+	searchSvc := search.NewServiceWithDimensions(ns, dim)
+	exec.SetSearchService(searchSvc)
+
 	for i := 0; i < 21; i++ {
 		vec := make([]float64, dim)
 		vec[i%dim] = 1.0
@@ -146,6 +150,7 @@ func TestE2E_VectorCosine_TinyChunkPropertyPatternUsesIndexedPath(t *testing.T) 
 		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Chunk {uuid:'c-%02d', group_id:'kg', emb:%s})", i, formatInlineFloat64Vector(vec)), nil)
 		require.NoError(t, err)
 	}
+	require.Equal(t, 21, searchSvc.CountPropertyVectorEntries("emb"))
 
 	q := make([]float64, dim)
 	q[0] = 1.0
@@ -184,6 +189,9 @@ func BenchmarkE2E_VectorCosine_TinyChunkPropertyPattern(b *testing.B) {
 	const dim = 1024
 	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX tiny_chunk_idx FOR (c:Chunk) ON (c.emb) OPTIONS {indexConfig: {`vector.dimensions`: 1024, `vector.similarity_function`: 'cosine'}}", nil)
 	require.NoError(b, err)
+
+	searchSvc := search.NewServiceWithDimensions(ns, dim)
+	exec.SetSearchService(searchSvc)
 
 	for i := 0; i < 21; i++ {
 		vec := make([]float64, dim)

@@ -659,9 +659,8 @@ func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName s
 		return []vectorNodeScore{}, true
 	}
 	svc := e.searchService
-	if svc == nil || svc.VectorIndexDimensions() != wantDims {
-		svc = search.NewServiceWithDimensions(e.storage, wantDims)
-		e.searchService = svc
+	if !canUseWiredNodeVectorService(svc, wantDims, targetProperty) {
+		return e.fetchCosineNodeScoresExact(ctx, targetLabel, targetProperty, similarityFunc, limit, queryVector, orderDesc, wantDims)
 	}
 	if !svc.VectorEnabled() {
 		return []vectorNodeScore{}, true
@@ -692,6 +691,16 @@ func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName s
 	return out, true
 }
 
+func canUseWiredNodeVectorService(svc *search.Service, wantDims int, targetProperty string) bool {
+	if svc == nil || svc.VectorIndexDimensions() != wantDims || svc.EmbeddingCount() == 0 {
+		return false
+	}
+	if targetProperty != "" && svc.CountPropertyVectorEntries(targetProperty) == 0 {
+		return false
+	}
+	return true
+}
+
 func (e *StorageExecutor) fetchCosineNodeScoresExact(ctx context.Context, label string, property string, similarity string, limit int, queryVector []float32, orderDesc bool, wantDims int) ([]vectorNodeScore, bool) {
 	if limit <= 0 {
 		return []vectorNodeScore{}, true
@@ -699,7 +708,13 @@ func (e *StorageExecutor) fetchCosineNodeScoresExact(ctx context.Context, label 
 	if wantDims > 0 && len(queryVector) != wantDims {
 		return []vectorNodeScore{}, true
 	}
-	nodes, err := e.storage.GetNodesByLabel(label)
+	var nodes []*storage.Node
+	var err error
+	if label == "" {
+		nodes, err = e.storage.AllNodes()
+	} else {
+		nodes, err = e.storage.GetNodesByLabel(label)
+	}
 	if err != nil {
 		return nil, false
 	}

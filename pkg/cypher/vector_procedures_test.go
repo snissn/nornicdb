@@ -423,6 +423,33 @@ func TestVectorIndexQueryNodesWithProcedure(t *testing.T) {
 	})
 }
 
+func TestCallDbIndexVectorQueryNodes_DoesNotCreateSearchServiceWhenUnwired(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX doc_emb_idx FOR (n:Doc) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	for i := 0; i < 10; i++ {
+		vec := []float64{0, 1, 0, 0}
+		if i == 0 {
+			vec = []float64{1, 0, 0, 0}
+		}
+		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Doc {uuid:'doc-%02d', embedding:%s})", i, formatInlineFloat64Vector(vec)), nil)
+		require.NoError(t, err)
+	}
+
+	params := map[string]interface{}{"q": []float64{1, 0, 0, 0}}
+	for i := 0; i < 5; i++ {
+		res, err := exec.Execute(ctx, fmt.Sprintf("CALL db.index.vector.queryNodes('doc_emb_idx', 3, $q) YIELD node, score RETURN node.uuid AS uuid, score /* query_%d */", i), params)
+		require.NoError(t, err)
+		require.Len(t, res.Rows, 3)
+		require.Equal(t, "doc-00", res.Rows[0][0])
+		require.Nil(t, exec.searchService, "queryNodes must use exact fallback when no DB-owned service is wired, not allocate a throwaway service")
+	}
+}
+
 // mockQueryEmbedder is a test embedder for string queries
 type mockQueryEmbedder struct {
 	embedding []float32
