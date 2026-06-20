@@ -565,7 +565,7 @@ Vector search chooses a strategy automatically based on dataset size and feature
 Runtime transition behavior:
 
 - Strategy checks run on index mutations (`IndexNode` / `RemoveNode`).
-- The service switches among `CPU brute-force`, `GPU brute-force`, and `global HNSW` using threshold crossings.
+- The service switches among `CPU brute-force`, `GPU brute-force`, and `global HNSW` using configured threshold crossings.
 - Brute-force CPU/GPU switches do not rebuild ANN graphs.
 - Brute-force/HNSW transitions run with debounced scheduling and background build/swap so query serving continues.
 - Writes during transition are replayed before cutover to keep the target index current.
@@ -573,15 +573,16 @@ Runtime transition behavior:
 **Strategy selection (order of precedence):**
 
 1. **GPU brute-force** – when GPU is enabled and vector count is in `[NORNICDB_VECTOR_GPU_BRUTE_MIN_N, NORNICDB_VECTOR_GPU_BRUTE_MAX_N]`.
-2. **CPU brute-force** – when vector count is under 5000 (fixed constant `NSmallMax`; no env override).
+2. **CPU brute-force** – only when `NORNICDB_VECTOR_CPU_BRUTE_MAX_N` is greater than 0 and vector count is below that value.
 3. **Cluster-based** (IVF-HNSW or k-means) – when clustering is enabled and built.
-4. **Global HNSW** – when vector count is 5000 or more and neither GPU nor clustering is chosen.
+4. **Global HNSW** – default strategy when neither GPU brute-force, CPU brute-force opt-in, nor clustering is chosen.
 
-So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you see slow search with more than 5k vectors, ensure the HNSW index is being used (e.g. check logs for `HNSW index created`) and consider the HNSW quality/efSearch settings below.
+By default, `NORNICDB_VECTOR_CPU_BRUTE_MAX_N=0`, so CPU brute-force is opt-in and HNSW is active regardless of dataset size. To opt into exact CPU brute-force below a threshold, set `NORNICDB_VECTOR_CPU_BRUTE_MAX_N` to that vector count.
 
 | Variable                                       | Default  | Description                                                                                                                                       |
 | ---------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Strategy thresholds**                        |          |                                                                                                                                                   |
+| `NORNICDB_VECTOR_CPU_BRUTE_MAX_N`              | `0`      | Max vector count to use CPU brute-force exact search. `0` disables automatic CPU brute-force so HNSW is the default.                              |
 | `NORNICDB_VECTOR_GPU_BRUTE_MIN_N`              | `5000`   | Min vector count to use GPU brute-force (exact search).                                                                                           |
 | `NORNICDB_VECTOR_GPU_BRUTE_MAX_N`              | `15000`  | Max vector count for GPU brute-force; above this, HNSW is preferred by default.                                                                   |
 | `NORNICDB_VECTOR_IVF_HNSW_ENABLED`             | `false`  | When clustered, use IVF-HNSW (per-cluster HNSW) when available. Disabled by default.                                                              |
@@ -612,7 +613,7 @@ So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you s
 | **HNSW build acceleration**                    |          |                                                                                                                                                   |
 | `NORNICDB_HNSW_BUILD_GPU_ENABLED`              | `true`   | Attempt GPU-assisted HNSW construction on supported hosts. Falls back to CPU if the accelerator is unavailable or fails.                          |
 | `NORNICDB_HNSW_BUILD_GPU_BATCH_SIZE`           | `2048`   | Number of vectors processed per construction batch.                                                                                               |
-| `NORNICDB_HNSW_BUILD_GPU_CANDIDATE_K`          | `128`    | Number of nearest candidates requested from the accelerator per vector before CPU graph linking.                                                   |
+| `NORNICDB_HNSW_BUILD_GPU_CANDIDATE_K`          | `128`    | Number of nearest candidates requested from the accelerator per vector before CPU graph linking.                                                  |
 | `NORNICDB_HNSW_BUILD_GPU_DISTANCE_PRECISION`   | `fp32`   | Distance precision for GPU build candidate search.                                                                                                |
 | `NORNICDB_HNSW_BUILD_GPU_BEAM_WIDTH`           | `64`     | Metal graph-beam width for approximate layer-0 construction candidate search.                                                                     |
 | `NORNICDB_HNSW_BUILD_GPU_BEAM_ITERS`           | `2`      | Metal graph-beam expansion rounds before CPU graph linking.                                                                                       |
@@ -635,7 +636,7 @@ So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you s
 | `balanced` | 16  | 200            | 100      | Good balance.                 |
 | `accurate` | 32  | 400            | 200      | Higher recall, slower search. |
 
-To reduce latency (e.g. if search is ~4s), try `NORNICDB_VECTOR_ANN_QUALITY=fast` or lower `NORNICDB_VECTOR_HNSW_EF_SEARCH` (e.g. `50`). Ensure you have ≥ 5000 vectors so the pipeline uses HNSW instead of CPU brute-force.
+To reduce latency (e.g. if search is ~4s), try `NORNICDB_VECTOR_ANN_QUALITY=fast` or lower `NORNICDB_VECTOR_HNSW_EF_SEARCH` (e.g. `50`). Keep `NORNICDB_VECTOR_CPU_BRUTE_MAX_N=0` unless you explicitly want exact CPU brute-force below a chosen vector count.
 
 ### Compressed ANN mode (IVFPQ)
 
@@ -824,12 +825,12 @@ Heimdall is the cognitive guardian and AI chat assistant. It supports **local** 
 
 **Advanced llama.cpp context features** (local provider only, most models work with defaults):
 
-| Variable                            | Default | Description                                          |
-| ----------------------------------- | ------- | ---------------------------------------------------- |
-| `NORNICDB_HEIMDALL_CTX_TYPE`        | `0`     | Context type: 0=default, 1=MTP                       |
-| `NORNICDB_HEIMDALL_POOLING_TYPE`    | `-1`    | Pooling: -1=none, 1=mean, 2=cls, 3=last             |
-| `NORNICDB_HEIMDALL_ATTENTION_TYPE`  | `0`     | Attention: 0=causal, 1=non-causal                    |
-| `NORNICDB_HEIMDALL_FLASH_ATTN`      | `-1`    | Flash attention: -1=auto, 0=disabled, 1=enabled      |
+| Variable                           | Default | Description                                     |
+| ---------------------------------- | ------- | ----------------------------------------------- |
+| `NORNICDB_HEIMDALL_CTX_TYPE`       | `0`     | Context type: 0=default, 1=MTP                  |
+| `NORNICDB_HEIMDALL_POOLING_TYPE`   | `-1`    | Pooling: -1=none, 1=mean, 2=cls, 3=last         |
+| `NORNICDB_HEIMDALL_ATTENTION_TYPE` | `0`     | Attention: 0=causal, 1=non-causal               |
+| `NORNICDB_HEIMDALL_FLASH_ATTN`     | `-1`    | Flash attention: -1=auto, 0=disabled, 1=enabled |
 
 Streaming (SSE) is supported for chat completions when the client requests it; the OpenAI and Ollama providers stream tokens as they are generated.
 
@@ -849,12 +850,12 @@ Stage-2 reranking improves vector/hybrid search by re-scoring top candidates wit
 
 **Advanced llama.cpp context features** (local provider only, most models work with defaults):
 
-| Variable                          | Default | Description                                          |
-| --------------------------------- | ------- | ---------------------------------------------------- |
-| `NORNICDB_RERANK_CTX_TYPE`        | `0`     | Context type: 0=default, 1=MTP                       |
-| `NORNICDB_RERANK_POOLING_TYPE`    | `1`     | Pooling: 1=mean, 2=cls, 3=last, 4=rank              |
-| `NORNICDB_RERANK_ATTENTION_TYPE`  | `1`     | Attention: 0=causal, 1=non-causal                    |
-| `NORNICDB_RERANK_FLASH_ATTN`      | `-1`    | Flash attention: -1=auto, 0=disabled, 1=enabled      |
+| Variable                         | Default | Description                                     |
+| -------------------------------- | ------- | ----------------------------------------------- |
+| `NORNICDB_RERANK_CTX_TYPE`       | `0`     | Context type: 0=default, 1=MTP                  |
+| `NORNICDB_RERANK_POOLING_TYPE`   | `1`     | Pooling: 1=mean, 2=cls, 3=last, 4=rank          |
+| `NORNICDB_RERANK_ATTENTION_TYPE` | `1`     | Attention: 0=causal, 1=non-causal               |
+| `NORNICDB_RERANK_FLASH_ATTN`     | `-1`    | Flash attention: -1=auto, 0=disabled, 1=enabled |
 
 Local models live in `NORNICDB_MODELS_DIR` (default `./models`). Download the default reranker with `make download-bge-reranker`.
 
@@ -984,11 +985,11 @@ NornicDB validates configuration on startup and will:
 
 ### Async Write Settings
 
-| Setting                | Impact                               | Recommendation            |
-| ---------------------- | ------------------------------------ | ------------------------- |
-| `async_writes_enabled: true`        | 3-10x write throughput improvement   | Enable for most workloads |
-| `async_flush_interval: 50ms` | Balance of consistency vs throughput | Default works well        |
-| `async_max_node_cache_size: 50000`    | Memory usage vs bulk performance     | Adjust based on RAM       |
+| Setting                            | Impact                               | Recommendation            |
+| ---------------------------------- | ------------------------------------ | ------------------------- |
+| `async_writes_enabled: true`       | 3-10x write throughput improvement   | Enable for most workloads |
+| `async_flush_interval: 50ms`       | Balance of consistency vs throughput | Default works well        |
+| `async_max_node_cache_size: 50000` | Memory usage vs bulk performance     | Adjust based on RAM       |
 
 ### Search Similarity
 

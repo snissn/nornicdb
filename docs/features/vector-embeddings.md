@@ -248,8 +248,8 @@ Where `k` is typically 60.
 Embeddings are indexed using an auto-selected strategy:
 
 - **GPU brute-force (exact)** when GPU is enabled and `N` is within the configured threshold
-- **CPU brute-force (exact)** for small datasets (low overhead)
-- **HNSW (ANN)** for large datasets when brute-force is no longer viable
+- **CPU brute-force (exact)** only when `NORNICDB_VECTOR_CPU_BRUTE_MAX_N` opts in below a chosen threshold
+- **HNSW (ANN)** by default when GPU brute-force or clustering is not selected
 
 ```go
 // Indexing/search strategy is selected automatically at runtime.

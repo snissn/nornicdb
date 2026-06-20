@@ -343,8 +343,8 @@ func TestVectorSearchOnly_UsesClusterWhenAvailable(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, response)
 
-	// Without clustering, should use standard vector search
-	assert.Equal(t, "vector_brute", response.SearchMethod)
+	// Without clustering, HNSW is the default vector search strategy.
+	assert.Equal(t, "vector_hnsw", response.SearchMethod)
 }
 
 // TestIndexNode_AddsToClusterIndex tests that IndexNode adds embeddings

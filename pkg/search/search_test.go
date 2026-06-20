@@ -281,11 +281,11 @@ func TestServicePersistenceAndTimingHelpers(t *testing.T) {
 	require.NoError(t, err)
 
 	// persistHNSWBackground skip and save branches.
-	svc.persistHNSWBackground(hnswPath) // skip (< NSmallMax)
+	svc.persistHNSWBackground(hnswPath) // skip (no vectors)
 	svc.hnswMu.Lock()
 	svc.hnswIndex = NewHNSWIndex(3, HNSWConfigFromEnv())
 	svc.hnswMu.Unlock()
-	for i := 0; i < NSmallMax; i++ {
+	for i := 0; i < 3; i++ {
 		require.NoError(t, svc.vectorIndex.Add(fmt.Sprintf("n-%d", i), []float32{1, 0, 0}))
 	}
 	svc.persistHNSWBackground(hnswPath)
@@ -1128,10 +1128,10 @@ func TestSearchService_BuildIndexes_SkipIterationWarmsHNSWWhenDiskIndexMissing(t
 	bm.Index("doc-1", "alpha beta")
 	require.NoError(t, bm.Save(bm25Path))
 
-	// Seed persisted vector file store with >= NSmallMax vectors to force HNSW warmup path.
+	// Seed persisted vector file store with vectors to force the default HNSW warmup path.
 	vfs, err := NewVectorFileStore(vectorPath, 3)
 	require.NoError(t, err)
-	for i := 0; i < NSmallMax; i++ {
+	for i := 0; i < 8; i++ {
 		id := fmt.Sprintf("seed-%d", i)
 		vec := []float32{1, 0, 0}
 		if i%2 == 1 {
@@ -1152,13 +1152,13 @@ func TestSearchService_BuildIndexes_SkipIterationWarmsHNSWWhenDiskIndexMissing(t
 
 	require.NoError(t, svc.BuildIndexes(context.Background()))
 	require.True(t, svc.IsReady())
-	require.GreaterOrEqual(t, svc.EmbeddingCount(), NSmallMax)
+	require.GreaterOrEqual(t, svc.EmbeddingCount(), 8)
 
 	// Missing on-disk HNSW should trigger warmup build.
 	svc.hnswMu.RLock()
 	defer svc.hnswMu.RUnlock()
 	require.NotNil(t, svc.hnswIndex)
-	require.GreaterOrEqual(t, svc.hnswIndex.Size(), NSmallMax)
+	require.GreaterOrEqual(t, svc.hnswIndex.Size(), 8)
 }
 
 func TestSearchService_PersistBaseIndexes_Branches(t *testing.T) {
@@ -1296,7 +1296,7 @@ func TestVectorSearchOnly_MethodAndFilterBranches(t *testing.T) {
 	opts.Limit = 5
 	resp, err := svc.vectorSearchOnly(context.Background(), []float32{1, 0, 0}, opts)
 	require.NoError(t, err)
-	require.Equal(t, "vector_brute", resp.SearchMethod)
+	require.Equal(t, "vector_hnsw", resp.SearchMethod)
 	require.NotEmpty(t, resp.Results)
 	for i, r := range resp.Results {
 		require.Equal(t, i+1, r.VectorRank)

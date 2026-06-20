@@ -101,6 +101,8 @@ func allowedKeysRaw() []keyTuple {
 		{"NORNICDB_VECTOR_IVF_HNSW_ENABLED", "boolean", "IVF-HNSW"},
 		{"NORNICDB_VECTOR_IVF_HNSW_MIN_CLUSTER_SIZE", "number", "IVF-HNSW"},
 		{"NORNICDB_VECTOR_IVF_HNSW_MAX_CLUSTERS", "number", "IVF-HNSW"},
+		// Vector CPU/GPU strategy thresholds
+		{"NORNICDB_VECTOR_CPU_BRUTE_MAX_N", "number", "Vector"},
 		// Vector GPU
 		{"NORNICDB_VECTOR_GPU_BRUTE_MIN_N", "number", "Vector"},
 		{"NORNICDB_VECTOR_GPU_BRUTE_MAX_N", "number", "Vector"},

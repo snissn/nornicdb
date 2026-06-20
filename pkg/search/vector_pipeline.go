@@ -4,7 +4,7 @@
 // hybrid-ann-plan.md. It provides:
 //   - CandidateGenerator interface for approximate candidate generation (brute/HNSW)
 //   - ExactScorer interface for exact scoring of candidates (CPU/GPU)
-//   - Auto strategy selection (brute vs HNSW based on dataset size)
+//   - Auto strategy selection (HNSW by default; brute-force via explicit thresholds)
 //   - GPU-accelerated exact scoring when available
 package search
 
@@ -13,15 +13,17 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/orneryd/nornicdb/pkg/envutil"
 	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 )
 
 // Configuration constants for the vector search pipeline.
 const (
-	// NSmallMax is the maximum dataset size for which brute-force search is used.
-	// Below this threshold, brute-force is often faster than ANN overhead.
-	NSmallMax = 5000
+	// NSmallMax is the default maximum dataset size for automatic CPU brute-force
+	// search. Zero makes HNSW the default unless NORNICDB_VECTOR_CPU_BRUTE_MAX_N
+	// opts into CPU brute-force for datasets below that threshold.
+	NSmallMax = 0
 
 	// CandidateMultiplier determines how many candidates to generate relative to k.
 	// Formula: C = max(k * CandidateMultiplier, 200)
@@ -31,11 +33,19 @@ const (
 	MaxCandidates = 5000
 )
 
+func cpuBruteForceMaxN() int {
+	n := envutil.GetInt("NORNICDB_VECTOR_CPU_BRUTE_MAX_N", NSmallMax)
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
 // CandidateGenerator generates candidate vectors for approximate search.
 //
 // Implementations:
-//   - BruteForceCandidateGen: Exact search over all vectors (for small N)
-//   - HNSWCandidateGen: Approximate search using HNSW graph (for large N)
+//   - BruteForceCandidateGen: Exact search over all vectors (explicit opt-in)
+//   - HNSWCandidateGen: Approximate search using HNSW graph (default)
 //
 // The generator returns candidate IDs and approximate scores. These candidates
 // will be re-scored exactly by ExactScorer before final ranking.
@@ -90,8 +100,8 @@ type ScoredCandidate struct {
 
 // BruteForceCandidateGen implements CandidateGenerator using brute-force search.
 //
-// This is optimal for small datasets (N < NSmallMax) where ANN overhead
-// dominates brute-force computation time.
+// This is available for explicit brute-force paths. The default vector pipeline
+// uses HNSW unless NORNICDB_VECTOR_CPU_BRUTE_MAX_N is set above zero.
 type BruteForceCandidateGen struct {
 	vectorIndex *VectorIndex
 }
@@ -125,8 +135,7 @@ func (b *BruteForceCandidateGen) SearchCandidates(ctx context.Context, query []f
 }
 
 // FileStoreBruteForceCandidateGen implements CandidateGenerator using brute-force search
-// directly over the file-backed vector store. This is used for small datasets when
-// vectors are not held in-memory.
+// directly over the file-backed vector store.
 type FileStoreBruteForceCandidateGen struct {
 	vectorStore *VectorFileStore
 }
@@ -155,7 +164,7 @@ func (b *FileStoreBruteForceCandidateGen) SearchCandidates(ctx context.Context, 
 	}
 	candidates := make([]Candidate, 0, initialCap)
 
-	// Small datasets only (N < NSmallMax), so a full scan is acceptable and avoids building HNSW.
+	// Explicit brute-force path over file-backed vectors.
 	if err := b.vectorStore.IterateChunked(4096, func(ids []string, vecs [][]float32) error {
 		select {
 		case <-ctx.Done():
@@ -185,8 +194,7 @@ func (b *FileStoreBruteForceCandidateGen) SearchCandidates(ctx context.Context, 
 
 // HNSWCandidateGen implements CandidateGenerator using HNSW approximate search.
 //
-// This is optimal for large datasets (N >= NSmallMax) where ANN provides
-// significant speedup over brute-force.
+// This is the default vector-search candidate generator.
 type HNSWCandidateGen struct {
 	hnswIndex *HNSWIndex
 }

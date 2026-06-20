@@ -231,12 +231,11 @@ func TestVectorSearchCandidates_UsesPipeline(t *testing.T) {
 	assert.Greater(t, candidates[0].Score, 0.9)
 }
 
-func TestVectorSearchCandidates_AutoStrategy(t *testing.T) {
+func TestVectorSearchCandidates_AutoStrategyDefaultsToHNSW(t *testing.T) {
 	engine := storage.NewMemoryEngine()
 	svc := NewServiceWithDimensions(engine, 4)
 
-	// Small dataset: should use brute force
-	for i := 0; i < NSmallMax-1; i++ {
+	for i := 0; i < 12; i++ {
 		node := &storage.Node{
 			ID:              storage.NodeID(fmt.Sprintf("node%d", i)),
 			ChunkEmbeddings: [][]float32{{float32(i % 4), float32((i + 1) % 4), 0, 0}},
@@ -250,11 +249,17 @@ func TestVectorSearchCandidates_AutoStrategy(t *testing.T) {
 
 	candidates, err := svc.VectorSearchCandidates(context.Background(), query, opts)
 	require.NoError(t, err)
-	// Should work with brute force (no HNSW created)
-	assert.GreaterOrEqual(t, len(candidates), 0)
+	assert.GreaterOrEqual(t, len(candidates), 1)
+	_, ok := svc.vectorPipeline.candidateGen.(*HNSWCandidateGen)
+	require.True(t, ok)
+}
 
-	// Large dataset: should use HNSW
-	for i := NSmallMax - 1; i < NSmallMax+100; i++ {
+func TestVectorSearchCandidates_CPUBruteForceThresholdOptIn(t *testing.T) {
+	t.Setenv("NORNICDB_VECTOR_CPU_BRUTE_MAX_N", "100")
+	engine := storage.NewMemoryEngine()
+	svc := NewServiceWithDimensions(engine, 4)
+
+	for i := 0; i < 12; i++ {
 		node := &storage.Node{
 			ID:              storage.NodeID(fmt.Sprintf("node%d", i)),
 			ChunkEmbeddings: [][]float32{{float32(i % 4), float32((i + 1) % 4), 0, 0}},
@@ -262,18 +267,23 @@ func TestVectorSearchCandidates_AutoStrategy(t *testing.T) {
 		require.NoError(t, svc.IndexNode(node))
 	}
 
-	// Next search should trigger HNSW creation
-	candidates, err = svc.VectorSearchCandidates(context.Background(), query, opts)
+	query := []float32{1, 0, 0, 0}
+	opts := DefaultSearchOptions()
+	opts.Limit = 10
+
+	candidates, err := svc.VectorSearchCandidates(context.Background(), query, opts)
 	require.NoError(t, err)
-	// Should work with HNSW
-	assert.GreaterOrEqual(t, len(candidates), 0)
+	assert.GreaterOrEqual(t, len(candidates), 1)
+	_, ok := svc.vectorPipeline.candidateGen.(*BruteForceCandidateGen)
+	require.True(t, ok)
 }
 
-func TestVectorSearchPipeline_UsesBruteForceWhenClusteredAndSmall(t *testing.T) {
+func TestVectorSearchPipeline_UsesBruteForceWhenClusteredAndThresholdOptIn(t *testing.T) {
+	t.Setenv("NORNICDB_VECTOR_CPU_BRUTE_MAX_N", "50")
 	engine := storage.NewMemoryEngine()
 	svc := NewServiceWithDimensions(engine, 4)
 
-	// Enable clustering and force it to cluster with a small dataset.
+	// Enable clustering and force it to cluster with a dataset below the CPU brute-force threshold.
 	svc.EnableClustering(nil, 2)
 	svc.SetMinEmbeddingsForClustering(1)
 

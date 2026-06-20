@@ -72,7 +72,7 @@ flowchart TD
     ClusterMode -->|Yes| IVFHNSW["IVF-HNSW candidate gen (CPU)<br/>centroids → per-cluster HNSW"]
     ClusterMode -->|No| KMeans["K-means candidate gen (CPU)<br/>centroids → vectors in nearest clusters"]
 
-    Clustered -->|No| Small{"N < NSmallMax?"}
+    Clustered -->|No| Small{"CPU brute max N > 0<br/>AND N < max?"}
     Small -->|Yes| CPUBrute["CPU brute candidate gen (exact)<br/>VectorIndex.Search()"]
     Small -->|No| HNSW["Global HNSW candidate gen (ANN, CPU)"]
 

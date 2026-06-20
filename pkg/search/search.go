@@ -1154,7 +1154,7 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 
 // DefaultMinEmbeddingsForClustering is the default minimum number of embeddings
 // needed before k-means clustering provides any benefit. Below this threshold,
-// brute-force search is faster than cluster overhead.
+// the default non-clustered vector strategy avoids cluster overhead.
 //
 // This value can be overridden per-service using SetMinEmbeddingsForClustering().
 //
@@ -1237,7 +1237,7 @@ func (s *Service) ensureClusterIndexBackfilled(targetCount int) {
 // for very large datasets (N > 100K).
 //
 // Returns nil (not error) if there are too few embeddings - clustering will
-// be skipped silently as brute-force search is faster for small datasets.
+// be skipped silently and the default non-clustered vector strategy is used.
 // Returns error only if clustering is not enabled or fails unexpectedly.
 func (s *Service) TriggerClustering(ctx context.Context) error {
 	if ctx == nil {
@@ -1418,8 +1418,8 @@ func (s *Service) IsClusteringEnabled() bool {
 }
 
 // SetMinEmbeddingsForClustering sets the minimum number of embeddings required
-// before k-means clustering is triggered. Below this threshold, brute-force
-// search is used as it's faster for small datasets.
+// before k-means clustering is triggered. Below this threshold, the default
+// non-clustered vector strategy is used to avoid cluster overhead.
 //
 // This should be called BEFORE TriggerClustering() to take effect.
 //
@@ -1726,13 +1726,14 @@ func (s *Service) persistVectorStoreBackground(vectorPath string, vfs *VectorFil
 }
 
 func (s *Service) persistHNSWBackground(hnswPath string) {
-	// Only persist HNSW when we use HNSW strategy (N >= NSmallMax). Do not build on shutdown to avoid long hangs.
+	// Only persist HNSW when there are vectors to index. Do not build an empty
+	// graph on shutdown just because HNSW is the default strategy.
 	if hnswPath == "" {
 		return
 	}
 	vecCount := s.EmbeddingCount()
-	if vecCount < NSmallMax {
-		log.Printf("📇 Background persist: HNSW skip (vector count %d < %d)", vecCount, NSmallMax)
+	if vecCount == 0 {
+		log.Printf("📇 Background persist: HNSW skip (no vectors)")
 		return
 	}
 	s.hnswMu.RLock()
@@ -3053,8 +3054,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		s.mu.Unlock()
 	}()
 
-	// When skipping iteration and we use HNSW strategy (N >= NSmallMax), load HNSW from disk so warmup does not rebuild it.
-	if skipIteration && hnswPath != "" && vectorCount >= NSmallMax {
+	// When skipping iteration and HNSW is active, load HNSW from disk so warmup does not rebuild it.
+	cpuBruteMaxN := cpuBruteForceMaxN()
+	if skipIteration && hnswPath != "" && vectorCount > 0 && vectorCount >= cpuBruteMaxN {
 		vectorLookup := s.getVectorLookup()
 		dimensions := s.VectorIndexDimensions()
 		var loaded *HNSWIndex
@@ -3097,7 +3099,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			hnswWarmupReason = fmt.Sprintf("dimension mismatch (disk=%d current=%d)", loaded.GetDimensions(), dimensions)
 		}
 	}
-	if skipIteration && vectorCount >= NSmallMax && !hnswLoadedFromDisk {
+	if skipIteration && vectorCount > 0 && vectorCount >= cpuBruteMaxN && !hnswLoadedFromDisk {
 		if hnswWarmupReason == "" {
 			if hnswPath == "" {
 				hnswWarmupReason = "hnsw path not configured"
@@ -3757,7 +3759,8 @@ type SearchCandidate struct {
 // RRF fusion, and storage fetches.
 //
 // This method uses the unified vector search pipeline (CandidateGen + ExactScore)
-// with automatic strategy selection (brute-force for small N, HNSW for large N).
+// with automatic strategy selection. HNSW is the default; CPU brute-force is
+// only selected automatically when NORNICDB_VECTOR_CPU_BRUTE_MAX_N is set above zero.
 func (s *Service) VectorSearchCandidates(ctx context.Context, embedding []float32, opts *SearchOptions) ([]SearchCandidate, error) {
 	if err := s.EnsureWarm(ctx); err != nil {
 		return nil, err
@@ -3903,8 +3906,8 @@ func collapseIndexResultsByNodeID(results []indexResult) []indexResult {
 //   - GPU brute-force (exact) when enabled and within configured thresholds
 //   - Cluster routing when clustered (GPU ScoreSubset when GPU enabled but full brute is out-of-range;
 //     otherwise CPU IVF-HNSW when available, else CPU k-means routing)
-//   - CPU brute-force for small datasets (N < NSmallMax)
-//   - Global HNSW for large datasets (N >= NSmallMax, no clustering)
+//   - CPU brute-force only when NORNICDB_VECTOR_CPU_BRUTE_MAX_N is set above zero
+//   - Global HNSW by default when clustering is not active
 func (s *Service) getOrCreateVectorPipeline(ctx context.Context) (*VectorSearchPipeline, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -3970,7 +3973,7 @@ func (s *Service) desiredRuntimeStrategy(vectorCount int) strategyMode {
 	if gpuEnabled && vectorCount >= gpuMinN && vectorCount <= gpuMaxN {
 		return strategyModeBruteGPU
 	}
-	if vectorCount < NSmallMax {
+	if cpuBruteMaxN := cpuBruteForceMaxN(); cpuBruteMaxN > 0 && vectorCount < cpuBruteMaxN {
 		return strategyModeBruteCPU
 	}
 	return strategyModeHNSW
@@ -4513,7 +4516,7 @@ func (s *Service) resolveStandardVectorStrategy(ctx context.Context, vectorCount
 			scorerPolicy: exactScorerPolicyIdentity,
 		}, nil
 	}
-	if vectorCount < NSmallMax {
+	if cpuBruteMaxN := cpuBruteForceMaxN(); cpuBruteMaxN > 0 && vectorCount < cpuBruteMaxN {
 		// Small dataset: use brute-force on CPU (exact) when vectors are in memory;
 		// when using file-backed store, do direct file-store scan (no HNSW build).
 		if vfs != nil {

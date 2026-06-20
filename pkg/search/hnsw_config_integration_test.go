@@ -20,8 +20,8 @@ func TestHNSWConfigIntegration(t *testing.T) {
 		engine := storage.NewMemoryEngine()
 		svc := NewServiceWithDimensions(engine, 4)
 
-		// Add enough nodes to trigger HNSW creation (>= NSmallMax)
-		for i := 0; i < NSmallMax+10; i++ {
+		// Add nodes and verify HNSW is used by default.
+		for i := 0; i < 10; i++ {
 			node := &storage.Node{
 				ID:              storage.NodeID(string(rune('a'+i%26)) + string(rune(i))),
 				ChunkEmbeddings: [][]float32{{float32(i % 4), float32((i + 1) % 4), 0, 0}},
@@ -54,8 +54,8 @@ func TestHNSWConfigIntegration(t *testing.T) {
 		engine := storage.NewMemoryEngine()
 		svc := NewServiceWithDimensions(engine, 4)
 
-		// Add enough nodes to trigger HNSW creation
-		for i := 0; i < NSmallMax+10; i++ {
+		// Add nodes and verify HNSW is used by default.
+		for i := 0; i < 10; i++ {
 			node := &storage.Node{
 				ID:              storage.NodeID(string(rune('a'+i%26)) + string(rune(i))),
 				ChunkEmbeddings: [][]float32{{float32(i % 4), float32((i + 1) % 4), 0, 0}},
@@ -94,8 +94,8 @@ func TestHNSWConfigIntegration(t *testing.T) {
 		engine := storage.NewMemoryEngine()
 		svc := NewServiceWithDimensions(engine, 4)
 
-		// Add enough nodes to trigger HNSW creation
-		for i := 0; i < NSmallMax+10; i++ {
+		// Add nodes and verify HNSW is used by default.
+		for i := 0; i < 10; i++ {
 			node := &storage.Node{
 				ID:              storage.NodeID(string(rune('a'+i%26)) + string(rune(i))),
 				ChunkEmbeddings: [][]float32{{float32(i % 4), float32((i + 1) % 4), 0, 0}},

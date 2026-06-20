@@ -397,15 +397,18 @@ NornicDB chooses the fastest available vector-search strategy at runtime:
 
 1. **K-means clustered search** (when clustering is enabled and clustered)
 2. **GPU brute-force (exact)** (when GPU is enabled and the dataset is within the configured threshold)
-3. **CPU brute-force (exact)** for small datasets
-4. **HNSW (ANN)** for large CPU-only datasets
+3. **CPU brute-force (exact)** only when `NORNICDB_VECTOR_CPU_BRUTE_MAX_N` opts in below a chosen threshold
+4. **HNSW (ANN)** by default for CPU-only datasets
 
 GPU brute-force is **exact** and typically stays competitive to much larger `N` than CPU brute-force due to massive parallelism.
-Once brute-force becomes too slow (or GPU is unavailable), the pipeline switches to HNSW.
+CPU brute-force is opt-in. With the default `NORNICDB_VECTOR_CPU_BRUTE_MAX_N=0`, the pipeline uses HNSW regardless of dataset size unless GPU brute-force or clustering is selected.
 
 Tuning knobs:
 
 ```bash
+# Opt into CPU brute-force below this N; 0 keeps HNSW as the CPU default.
+export NORNICDB_VECTOR_CPU_BRUTE_MAX_N=0
+
 # Use GPU brute-force when N is in this range (defaults shown)
 export NORNICDB_VECTOR_GPU_BRUTE_MIN_N=5000
 export NORNICDB_VECTOR_GPU_BRUTE_MAX_N=15000

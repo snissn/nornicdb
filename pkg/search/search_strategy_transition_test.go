@@ -52,31 +52,25 @@ func waitForStrategy(t *testing.T, svc *Service, want strategyMode, timeout time
 	require.Equal(t, want, svc.currentPipelineStrategy())
 }
 
-func TestRuntimeStrategyTransition_ThresholdCrossDebouncedSingleFlight(t *testing.T) {
+func TestRuntimeStrategy_DefaultsToHNSW(t *testing.T) {
 	engine := newNamespacedEngine(t)
 	svc := NewServiceWithDimensions(engine, 4)
-	svc.SetRuntimeStrategyTransitionsEnabled(true)
+	require.NotNil(t, svc)
+
+	_, err := svc.getOrCreateVectorPipeline(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, strategyModeHNSW, svc.currentPipelineStrategy())
+}
+
+func TestRuntimeStrategy_CPUBruteForceThresholdOptIn(t *testing.T) {
+	t.Setenv("NORNICDB_VECTOR_CPU_BRUTE_MAX_N", "10")
+	engine := newNamespacedEngine(t)
+	svc := NewServiceWithDimensions(engine, 4)
 	require.NotNil(t, svc)
 
 	_, err := svc.getOrCreateVectorPipeline(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, strategyModeBruteCPU, svc.currentPipelineStrategy())
-
-	for i := 0; i < NSmallMax-5; i++ {
-		indexTestNode(t, svc, fmt.Sprintf("pre-%d", i), testVec4(i))
-	}
-	require.Equal(t, NSmallMax-5, svc.EmbeddingCount())
-
-	for i := 0; i < 16; i++ {
-		indexTestNode(t, svc, fmt.Sprintf("burst-%d", i), testVec4(10000+i))
-	}
-
-	waitForStrategy(t, svc, strategyModeHNSW, 45*time.Second)
-
-	svc.strategyTransitionMu.Lock()
-	starts := svc.strategyTransitionStarts
-	svc.strategyTransitionMu.Unlock()
-	require.Equal(t, uint64(1), starts)
 }
 
 func TestRuntimeStrategyTransition_DisabledByDefaultDoesNotScheduleBuild(t *testing.T) {
@@ -86,13 +80,13 @@ func TestRuntimeStrategyTransition_DisabledByDefaultDoesNotScheduleBuild(t *test
 
 	_, err := svc.getOrCreateVectorPipeline(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, strategyModeBruteCPU, svc.currentPipelineStrategy())
+	require.Equal(t, strategyModeHNSW, svc.currentPipelineStrategy())
 
-	for i := 0; i < NSmallMax+1; i++ {
+	for i := 0; i < 8; i++ {
 		indexTestNode(t, svc, fmt.Sprintf("node-%d", i), testVec4(i))
 	}
 
-	require.Equal(t, strategyModeBruteCPU, svc.currentPipelineStrategy())
+	require.Equal(t, strategyModeHNSW, svc.currentPipelineStrategy())
 	svc.strategyTransitionMu.Lock()
 	defer svc.strategyTransitionMu.Unlock()
 	require.Equal(t, uint64(0), svc.strategyTransitionStarts)
@@ -100,42 +94,22 @@ func TestRuntimeStrategyTransition_DisabledByDefaultDoesNotScheduleBuild(t *test
 	require.False(t, svc.strategyTransitionInProgress)
 }
 
-func TestRuntimeStrategyTransition_DeltaReplayPreservesWritesDuringBuild(t *testing.T) {
+func TestRuntimeStrategy_HNSWDefaultIndexesLiveWrites(t *testing.T) {
 	engine := newNamespacedEngine(t)
 	svc := NewServiceWithDimensions(engine, 4)
-	svc.SetRuntimeStrategyTransitionsEnabled(true)
 	require.NotNil(t, svc)
 
 	_, err := svc.getOrCreateVectorPipeline(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, strategyModeBruteCPU, svc.currentPipelineStrategy())
+	require.Equal(t, strategyModeHNSW, svc.currentPipelineStrategy())
 
-	for i := 0; i < NSmallMax-2; i++ {
+	for i := 0; i < 8; i++ {
 		indexTestNode(t, svc, fmt.Sprintf("seed-%d", i), testVec4(i))
 	}
-
-	indexTestNode(t, svc, "cross-1", []float32{1, 0, 0, 0})
-	indexTestNode(t, svc, "cross-2", []float32{0, 1, 0, 0})
-
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		svc.strategyTransitionMu.Lock()
-		inProgress := svc.strategyTransitionInProgress
-		svc.strategyTransitionMu.Unlock()
-		if inProgress {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-
 	indexTestNode(t, svc, "late-node", []float32{0, 1, 0, 0})
 
-	waitForStrategy(t, svc, strategyModeHNSW, 45*time.Second)
-
 	opts := DefaultSearchOptions()
-	// Use a large limit so HNSW candidate truncation does not make this assertion flaky
-	// when many vectors are near the query direction.
-	opts.Limit = 500
+	opts.Limit = 20
 	require.Eventually(t, func() bool {
 		resp, err := svc.vectorSearchOnly(context.Background(), []float32{0, 1, 0, 0}, opts)
 		if err != nil {
@@ -148,31 +122,6 @@ func TestRuntimeStrategyTransition_DeltaReplayPreservesWritesDuringBuild(t *test
 		}
 		return false
 	}, 5*time.Second, 50*time.Millisecond, "late-node must be searchable after transition replay")
-}
-
-func TestRuntimeStrategyTransition_HNSWToBruteClearsIndexMemory(t *testing.T) {
-	engine := newNamespacedEngine(t)
-	svc := NewServiceWithDimensions(engine, 4)
-	svc.SetRuntimeStrategyTransitionsEnabled(true)
-	require.NotNil(t, svc)
-
-	_, err := svc.getOrCreateVectorPipeline(context.Background())
-	require.NoError(t, err)
-
-	for i := 0; i < NSmallMax+16; i++ {
-		indexTestNode(t, svc, fmt.Sprintf("node-%d", i), testVec4(i))
-	}
-	waitForStrategy(t, svc, strategyModeHNSW, 45*time.Second)
-	require.NotNil(t, svc.hnswIndex)
-
-	for i := 0; i < 64; i++ {
-		require.NoError(t, svc.RemoveNode(storage.NodeID(fmt.Sprintf("node-%d", i))))
-	}
-	waitForStrategy(t, svc, strategyModeBruteCPU, 45*time.Second)
-
-	svc.hnswMu.RLock()
-	defer svc.hnswMu.RUnlock()
-	require.Nil(t, svc.hnswIndex)
 }
 
 func TestRuntimeStrategyTransition_CPUToGPUBruteNoRebuild(t *testing.T) {
