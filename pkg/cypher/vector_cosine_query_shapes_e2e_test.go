@@ -151,6 +151,8 @@ func TestE2E_VectorCosine_TinyChunkPropertyPatternUsesIndexedPath(t *testing.T) 
 		require.NoError(t, err)
 	}
 	require.Equal(t, 21, searchSvc.CountPropertyVectorEntries("emb"))
+	require.NoError(t, searchSvc.BuildIndexes(ctx))
+	require.True(t, searchSvc.IsReady())
 
 	q := make([]float64, dim)
 	q[0] = 1.0
@@ -203,6 +205,8 @@ func BenchmarkE2E_VectorCosine_TinyChunkPropertyPattern(b *testing.B) {
 		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Chunk {uuid:'c-%02d', group_id:'kg', emb:%s})", i, formatInlineFloat64Vector(vec)), nil)
 		require.NoError(b, err)
 	}
+	require.NoError(b, searchSvc.BuildIndexes(ctx))
+	require.True(b, searchSvc.IsReady())
 
 	q := make([]float64, dim)
 	q[0] = 1.0

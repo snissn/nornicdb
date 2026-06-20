@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/search"
@@ -448,6 +449,53 @@ func TestCallDbIndexVectorQueryNodes_DoesNotCreateSearchServiceWhenUnwired(t *te
 		require.Equal(t, "doc-00", res.Rows[0][0])
 		require.Nil(t, exec.searchService, "queryNodes must use exact fallback when no DB-owned service is wired, not allocate a throwaway service")
 	}
+}
+
+func TestCallDbIndexVectorQueryNodes_LazyWiredServiceWarmsBeforeQuery(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	counting := &countingStreamingEngine{Engine: engine}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX doc_emb_idx FOR (n:Doc) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	searchSvc := search.NewServiceWithDimensions(engine, 4)
+	var warmCalls int32
+	var warmErr atomic.Value
+	searchSvc.SetLazyWarming(true, search.WarmFunc(func() {
+		atomic.AddInt32(&warmCalls, 1)
+		if err := searchSvc.BuildIndexes(context.Background()); err != nil {
+			warmErr.Store(err)
+		}
+	}))
+	exec.SetSearchService(searchSvc)
+
+	_, err = exec.Execute(ctx, "CREATE (:Doc {uuid:'doc-best', embedding:[1.0,0.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Doc {uuid:'doc-other', embedding:[0.0,1.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	require.False(t, searchSvc.IsReady())
+
+	counting.allNodesCalls = 0
+	counting.labelCalls = 0
+	counting.streamNodesCalls = 0
+
+	res, err := exec.Execute(ctx, "CALL db.index.vector.queryNodes('doc_emb_idx', 1, $q) YIELD node, score RETURN node.uuid AS uuid, score", map[string]interface{}{
+		"q": []float64{1, 0, 0, 0},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "doc-best", res.Rows[0][0])
+	if errValue := warmErr.Load(); errValue != nil {
+		require.NoError(t, errValue.(error))
+	}
+	require.True(t, searchSvc.IsReady())
+	require.Equal(t, int32(1), atomic.LoadInt32(&warmCalls))
+	require.Equal(t, 0, counting.allNodesCalls)
+	require.Equal(t, 0, counting.labelCalls)
+	require.Equal(t, 0, counting.streamNodesCalls)
 }
 
 // mockQueryEmbedder is a test embedder for string queries

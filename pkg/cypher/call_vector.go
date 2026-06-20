@@ -185,7 +185,11 @@ func (e *StorageExecutor) callDbIndexVectorQueryNodes(ctx context.Context, cyphe
 	}
 
 	svc := e.searchService
-	if !canUseWiredNodeVectorService(svc, wantDims, targetProperty) {
+	useService, err := prepareWiredNodeVectorService(ctx, svc, wantDims)
+	if err != nil {
+		return nil, err
+	}
+	if !useService {
 		nodeScores, ok := e.fetchCosineNodeScoresExact(ctx, targetLabel, targetProperty, similarityFunc, k, queryVector, true, wantDims)
 		if !ok {
 			return nil, fmt.Errorf("vector query failed")

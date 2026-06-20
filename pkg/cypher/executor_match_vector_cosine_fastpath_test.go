@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/search"
@@ -138,6 +139,8 @@ func TestMatchVectorCosineFastPath_WriteThenSearchLoop_NoScanRegression(t *testi
 	_, err = exec.Execute(ctx, "CREATE (:Item {uuid:'seed', emb:[1.0,0.0,0.0]})", nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, searchSvc.CountPropertyVectorEntries("emb"))
+	require.NoError(t, searchSvc.BuildIndexes(ctx))
+	require.True(t, searchSvc.IsReady())
 
 	query := "MATCH (n:Item) RETURN n.uuid AS uuid, vector.similarity.cosine(n.emb, $q) AS score ORDER BY score DESC LIMIT $k"
 	params := map[string]interface{}{"q": []float64{1.0, 0.0, 0.0}, "k": 3}
@@ -164,6 +167,64 @@ func TestMatchVectorCosineFastPath_WriteThenSearchLoop_NoScanRegression(t *testi
 	require.Equal(t, 0, counting.allNodesCalls, "write-then-search loop should not regress to full node scans")
 	require.Equal(t, 0, counting.labelCalls, "write-then-search loop should not regress to label scans")
 	require.Equal(t, 0, counting.streamNodesCalls, "write-then-search loop should not use stream-scan fallback")
+}
+
+func TestMatchVectorCosineFastPath_LazyWiredServiceWarmsBeforeIndexedQuery(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX entity_name_idx FOR (n:Entity) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	searchSvc := search.NewServiceWithDimensions(ns, 4)
+	var warmCalls int32
+	var warmErr atomic.Value
+	searchSvc.SetLazyWarming(true, search.WarmFunc(func() {
+		atomic.AddInt32(&warmCalls, 1)
+		if err := searchSvc.BuildIndexes(context.Background()); err != nil {
+			warmErr.Store(err)
+		}
+	}))
+	exec.SetSearchService(searchSvc)
+
+	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'best', group_id:'g', name_embedding:[1.0,0.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'other', group_id:'g', name_embedding:[0.0,1.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	require.False(t, searchSvc.IsReady())
+
+	counting.allNodesCalls = 0
+	counting.labelCalls = 0
+	counting.streamNodesCalls = 0
+
+	query := `
+MATCH (n:Entity)
+WHERE n.group_id = $group_id
+WITH n, vector.similarity.cosine(n.name_embedding, $search_vector) AS score
+RETURN n.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT $limit
+`
+	res, err := exec.Execute(ctx, query, map[string]interface{}{
+		"group_id":      "g",
+		"search_vector": []float64{1, 0, 0, 0},
+		"limit":         1,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "best", res.Rows[0][0])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+	if errValue := warmErr.Load(); errValue != nil {
+		require.NoError(t, errValue.(error))
+	}
+	require.True(t, searchSvc.IsReady())
+	require.Equal(t, int32(1), atomic.LoadInt32(&warmCalls))
+	require.Equal(t, 0, counting.allNodesCalls)
+	require.Equal(t, 0, counting.labelCalls)
+	require.Equal(t, 0, counting.streamNodesCalls)
 }
 
 func TestMatchVectorCosineFastPath_SetNodeVectorPropertyAfterWarmupIsSearchable(t *testing.T) {
@@ -322,6 +383,8 @@ func TestMatchVectorCosineFastPath_WithProjection_WriteThenSearchLoop_NoScanRegr
 	_, err = exec.Execute(ctx, "CREATE (:Chunk {uuid:'seed', emb:[1.0,0.0,0.0], group_id:'g'})", nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, searchSvc.CountPropertyVectorEntries("emb"))
+	require.NoError(t, searchSvc.BuildIndexes(ctx))
+	require.True(t, searchSvc.IsReady())
 
 	query := `MATCH (c:Chunk)
 WITH c, vector.similarity.cosine(c.emb, $q) AS score
