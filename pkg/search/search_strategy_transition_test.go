@@ -55,6 +55,7 @@ func waitForStrategy(t *testing.T, svc *Service, want strategyMode, timeout time
 func TestRuntimeStrategyTransition_ThresholdCrossDebouncedSingleFlight(t *testing.T) {
 	engine := newNamespacedEngine(t)
 	svc := NewServiceWithDimensions(engine, 4)
+	svc.SetRuntimeStrategyTransitionsEnabled(true)
 	require.NotNil(t, svc)
 
 	_, err := svc.getOrCreateVectorPipeline(context.Background())
@@ -78,9 +79,31 @@ func TestRuntimeStrategyTransition_ThresholdCrossDebouncedSingleFlight(t *testin
 	require.Equal(t, uint64(1), starts)
 }
 
+func TestRuntimeStrategyTransition_DisabledByDefaultDoesNotScheduleBuild(t *testing.T) {
+	engine := newNamespacedEngine(t)
+	svc := NewServiceWithDimensions(engine, 4)
+	require.False(t, svc.RuntimeStrategyTransitionsEnabled())
+
+	_, err := svc.getOrCreateVectorPipeline(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, strategyModeBruteCPU, svc.currentPipelineStrategy())
+
+	for i := 0; i < NSmallMax+1; i++ {
+		indexTestNode(t, svc, fmt.Sprintf("node-%d", i), testVec4(i))
+	}
+
+	require.Equal(t, strategyModeBruteCPU, svc.currentPipelineStrategy())
+	svc.strategyTransitionMu.Lock()
+	defer svc.strategyTransitionMu.Unlock()
+	require.Equal(t, uint64(0), svc.strategyTransitionStarts)
+	require.Nil(t, svc.strategyTransitionTimer)
+	require.False(t, svc.strategyTransitionInProgress)
+}
+
 func TestRuntimeStrategyTransition_DeltaReplayPreservesWritesDuringBuild(t *testing.T) {
 	engine := newNamespacedEngine(t)
 	svc := NewServiceWithDimensions(engine, 4)
+	svc.SetRuntimeStrategyTransitionsEnabled(true)
 	require.NotNil(t, svc)
 
 	_, err := svc.getOrCreateVectorPipeline(context.Background())
@@ -130,6 +153,7 @@ func TestRuntimeStrategyTransition_DeltaReplayPreservesWritesDuringBuild(t *test
 func TestRuntimeStrategyTransition_HNSWToBruteClearsIndexMemory(t *testing.T) {
 	engine := newNamespacedEngine(t)
 	svc := NewServiceWithDimensions(engine, 4)
+	svc.SetRuntimeStrategyTransitionsEnabled(true)
 	require.NotNil(t, svc)
 
 	_, err := svc.getOrCreateVectorPipeline(context.Background())
@@ -163,6 +187,7 @@ func TestRuntimeStrategyTransition_CPUToGPUBruteNoRebuild(t *testing.T) {
 
 	engine := newNamespacedEngine(t)
 	svc := NewServiceWithDimensions(engine, 4)
+	svc.SetRuntimeStrategyTransitionsEnabled(true)
 	svc.SetGPUManager(manager)
 
 	_, err = svc.getOrCreateVectorPipeline(context.Background())

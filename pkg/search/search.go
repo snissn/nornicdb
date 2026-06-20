@@ -597,6 +597,7 @@ type Service struct {
 	strategyTransitionSeq        uint64
 	strategyTransitionDeltas     []strategyDeltaMutation
 	strategyTransitionStarts     uint64
+	runtimeStrategyTransitions   atomic.Bool
 
 	// Plan 04-05-05: observability metric bag + pre-bound observers for
 	// the hybrid hot path. AttachMetrics injects + binds; observeSearchStage
@@ -775,9 +776,29 @@ func NewServiceWithDimensionsAndBM25Engine(engine storage.Engine, dimensions int
 	// consulting per-DB config).
 	svc.bm25Enabled.Store(true)
 	svc.vectorEnabled.Store(true)
+	svc.runtimeStrategyTransitions.Store(envutil.GetBoolStrict("NORNICDB_VECTOR_RUNTIME_STRATEGY_TRANSITIONS_ENABLED", false))
 	svc.warmDone = make(chan struct{})
 	log.Printf("📇 Search: BM25 engine selected: %s", selectedBM25Engine)
 	return svc
+}
+
+// SetRuntimeStrategyTransitionsEnabled controls whether live writes may schedule
+// background vector strategy rebuilds, such as brute-force -> HNSW transitions.
+// Explicit BuildIndexes/warmup calls can still build ANN structures when this is false.
+func (s *Service) SetRuntimeStrategyTransitionsEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.runtimeStrategyTransitions.Store(enabled)
+}
+
+// RuntimeStrategyTransitionsEnabled reports whether live write-triggered ANN
+// strategy transitions are enabled.
+func (s *Service) RuntimeStrategyTransitionsEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.runtimeStrategyTransitions.Load()
 }
 
 // WarmFunc is the callback that EnsureWarm fires to request a synchronous
@@ -3962,6 +3983,9 @@ func (s *Service) snapshotStrategyInputs() (int, *VectorIndex, *VectorFileStore)
 }
 
 func (s *Service) scheduleStrategyTransitionCheck() {
+	if !s.runtimeStrategyTransitions.Load() {
+		return
+	}
 	if s.buildInProgress.Load() {
 		return
 	}

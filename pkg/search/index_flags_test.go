@@ -94,6 +94,29 @@ func TestIndexNode_BothDisabled(t *testing.T) {
 	assert.Equal(t, 0, svc.fulltextIndex.Count())
 }
 
+func TestVectorQueryNodes_PassiveWhenLiveIndexEmpty(t *testing.T) {
+	engine := newNamespacedEngine(t)
+	node := &storage.Node{
+		ID:         storage.NodeID("n1"),
+		Labels:     []string{"Entity"},
+		Properties: map[string]interface{}{"embedding": []float32{1, 0, 0, 0}},
+	}
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+
+	svc := NewServiceWithDimensions(engine, 4)
+	hits, err := svc.VectorQueryNodes(context.Background(), []float32{1, 0, 0, 0}, VectorQuerySpec{
+		Label:    "Entity",
+		Property: "embedding",
+		Limit:    1,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, hits)
+	assert.False(t, svc.buildAttempted.Load(), "VectorQueryNodes must not trigger BuildIndexes from a read path")
+	assert.Equal(t, 0, svc.EmbeddingCount())
+}
+
 // TestEnsureWarm_TriggersOnceAndWaiters — proves that Service-level lazy
 // warming fires exactly once across concurrent first-readers and that all
 // readers block until the build completes. This is the contract that makes

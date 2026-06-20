@@ -210,10 +210,6 @@ func (s *Service) VectorQueryRelationships(ctx context.Context, queryEmbedding [
 }
 
 func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []float32, spec VectorQuerySpec, vectorName string) ([]VectorQueryHit, error) {
-	// Ensure the vector index is populated (tests and some embedding-only setups create nodes directly in storage).
-	if s.vectorIndex != nil && s.vectorIndex.Count() == 0 {
-		_ = s.BuildIndexes(ctx)
-	}
 	if s.vectorIndex == nil || s.vectorIndex.Count() == 0 {
 		return nil, nil
 	}
@@ -400,10 +396,6 @@ func cloneStringMap(src map[string]string) map[string]string {
 }
 
 func (s *Service) vectorQueryNodesExact(ctx context.Context, queryEmbedding []float32, spec VectorQuerySpec, vectorName string, similarity string) ([]VectorQueryHit, error) {
-	// Ensure the vector index is populated (tests and some embedding-only setups create nodes directly in storage).
-	if s.vectorIndex != nil && s.vectorIndex.Count() == 0 {
-		_ = s.BuildIndexes(ctx)
-	}
 	if s.vectorIndex == nil || s.vectorIndex.Count() == 0 {
 		return nil, nil
 	}
