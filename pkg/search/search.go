@@ -812,10 +812,10 @@ func (s *Service) SetLazyWarming(lazy bool, fn WarmFunc) {
 //     reader finds the service warm.
 //   - Concurrent first-readers wait on the same channel; only one fires
 //     the trigger.
-//   - When warmingLazy=false (eager) or the service is already ready,
+//   - When warmingLazy=false (eager) or the service is already fully built,
 //     EnsureWarm returns immediately.
 func (s *Service) EnsureWarm(ctx context.Context) error {
-	if !s.warmingLazy.Load() || s.IsReady() {
+	if !s.warmingLazy.Load() || s.ready.Load() {
 		return nil
 	}
 	s.warmOnce.Do(func() {
@@ -915,9 +915,20 @@ func (s *Service) FulltextDocCount() int {
 	return s.fulltextIndex.Count()
 }
 
-// IsReady reports whether the search indexes are fully built and ready to serve queries.
+// IsReady reports whether the search indexes are fully built and ready.
 func (s *Service) IsReady() bool {
 	return s.ready.Load()
+}
+
+// CanServeVectorQueries reports whether vector queries can be served by the
+// in-memory vector substrate without falling back to primary storage scans.
+//
+// A full BuildIndexes warmup makes the service ready. Separately, live writes
+// can populate vector entries before warmup completes; those entries are safe to
+// query through the vector pipeline, but they should not be conflated with the
+// Neo4j-style ONLINE/readiness state exposed by IsReady.
+func (s *Service) CanServeVectorQueries() bool {
+	return s.ready.Load() || s.EmbeddingCount() > 0
 }
 
 // BM25Engine returns the configured BM25 engine for this service ("v1" or "v2").

@@ -699,7 +699,7 @@ func prepareWiredNodeVectorService(ctx context.Context, svc *search.Service, wan
 	if err := svc.EnsureWarm(ctx); err != nil {
 		return false, err
 	}
-	if !svc.IsReady() {
+	if !svc.CanServeVectorQueries() {
 		return false, nil
 	}
 	return true, nil

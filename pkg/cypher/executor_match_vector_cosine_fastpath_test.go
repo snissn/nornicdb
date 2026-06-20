@@ -194,7 +194,8 @@ func TestMatchVectorCosineFastPath_LazyWiredServiceWarmsBeforeIndexedQuery(t *te
 	require.NoError(t, err)
 	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'other', group_id:'g', name_embedding:[0.0,1.0,0.0,0.0]})", nil)
 	require.NoError(t, err)
-	require.False(t, searchSvc.IsReady())
+	require.False(t, searchSvc.IsReady(), "live-indexed vector properties must not be reported as full warmup readiness")
+	require.True(t, searchSvc.CanServeVectorQueries(), "live-indexed vector properties make indexed queries service-backed before full warmup")
 
 	counting.allNodesCalls = 0
 	counting.labelCalls = 0
@@ -225,6 +226,56 @@ LIMIT $limit
 	require.Equal(t, 0, counting.allNodesCalls)
 	require.Equal(t, 0, counting.labelCalls)
 	require.Equal(t, 0, counting.streamNodesCalls)
+}
+
+func TestMatchVectorCosineFastPath_ExternalEmbeddingsUseLiveIndexBeforeReady(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX entity_name_idx FOR (n:Entity) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	searchSvc := search.NewServiceWithDimensions(ns, 4)
+	exec.SetSearchService(searchSvc)
+
+	for i := 0; i < 16; i++ {
+		vec := []float64{0, 0, 0, 0}
+		vec[i%4] = 1
+		_, err = exec.Execute(ctx, fmt.Sprintf("CREATE (:Entity {uuid:'e-%02d', group_id:'g', name_embedding:%s})", i, formatInlineFloat64Vector(vec)), nil)
+		require.NoError(t, err)
+	}
+	require.Equal(t, 16, searchSvc.CountPropertyVectorEntries("name_embedding"))
+	require.False(t, searchSvc.IsReady(), "live-indexed vector properties must not be reported as full warmup readiness")
+	require.True(t, searchSvc.CanServeVectorQueries(), "live-indexed vector properties should not need a full BuildIndexes warmup before querying")
+
+	counting.allNodesCalls = 0
+	counting.labelCalls = 0
+	counting.streamNodesCalls = 0
+
+	query := `
+MATCH (n:Entity)
+WHERE n.group_id = $group_id
+WITH n, vector.similarity.cosine(n.name_embedding, $search_vector) AS score
+WHERE score > $min_score
+RETURN n.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT $limit
+`
+	res, err := exec.Execute(ctx, query, map[string]interface{}{
+		"group_id":      "g",
+		"search_vector": []float64{1, 0, 0, 0},
+		"min_score":     -1.0,
+		"limit":         5,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 5)
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+	require.Equal(t, 0, counting.allNodesCalls, "live-index query must not full-scan storage before full warmup")
+	require.Equal(t, 0, counting.labelCalls, "live-index query must not label-scan storage before full warmup")
+	require.Equal(t, 0, counting.streamNodesCalls, "live-index query must not stream-scan storage before full warmup")
 }
 
 func TestMatchVectorCosineFastPath_SetNodeVectorPropertyAfterWarmupIsSearchable(t *testing.T) {
