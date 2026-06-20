@@ -173,6 +173,67 @@ func TestGraphitiScenarioE2E_LargePayloads(t *testing.T) {
 	require.LessOrEqual(t, len(res.Rows), 10)
 }
 
+func TestGraphitiScenarioE2E_ExternalVectorIngestDoesNotUseExactScanFallbackBeforeWarmup(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	const dim = 1024
+	const episodes = 4
+	const nodesPerEpisode = 10
+	const edgesPerEpisode = 16
+	const searchesPerEpisode = 3
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX ent_idx FOR (n:Entity) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 1024, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE VECTOR INDEX rel_idx FOR ()-[e:RELATES_TO]-() ON (e.fact_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 1024, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	searchSvc := search.NewServiceWithDimensions(ns, dim)
+	exec.SetSearchService(searchSvc)
+
+	for episode := 0; episode < episodes; episode++ {
+		payload := buildGraphitiEpisodePayload(episode, nodesPerEpisode, edgesPerEpisode, dim)
+
+		res, err := exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": payload.nodes})
+		require.NoError(t, err)
+		require.Len(t, res.Rows, len(payload.nodes))
+
+		res, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
+		require.NoError(t, err)
+		require.Len(t, res.Rows, len(payload.edges))
+
+		require.False(t, searchSvc.IsReady(), "test must cover pre-warmup ingest, not fully built search readiness")
+		require.True(t, searchSvc.CanServeVectorQueries(), "live indexed external vectors should be queryable before full warmup")
+		require.Equal(t, (episode+1)*nodesPerEpisode, searchSvc.CountPropertyVectorEntries("name_embedding"))
+
+		counting.allNodesCalls = 0
+		counting.allEdgesCalls = 0
+		counting.labelCalls = 0
+		counting.streamNodesCalls = 0
+
+		for searchIdx := 0; searchIdx < searchesPerEpisode; searchIdx++ {
+			queryVec := unitVectorF64(episode+searchIdx, dim)
+			nodeQuery := fmt.Sprintf("%s\n/* graphiti_node_resolution_episode_%d_search_%d */", graphitiNodeSimilarityQuery, episode, searchIdx)
+			nodeRes, err := exec.Execute(ctx, nodeQuery, map[string]interface{}{
+				"group_id":      graphitiGroupID,
+				"search_vector": queryVec,
+				"min_score":     -1.0,
+				"limit":         8,
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, nodeRes.Rows)
+			require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath, "episode %d node search %d should use vector-index fast path", episode, searchIdx)
+		}
+
+		require.Equal(t, 0, counting.allNodesCalls, "episode %d must not use node exact full-scan fallback", episode)
+		require.Equal(t, 0, counting.labelCalls, "episode %d must not use node exact label-scan fallback", episode)
+		require.Equal(t, 0, counting.streamNodesCalls, "episode %d must not stream-scan nodes for cosine resolution", episode)
+	}
+}
+
 func TestGraphitiScenarioE2E_RelationshipFulltextMultiTokenFacts(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")
@@ -503,6 +564,39 @@ func buildGraphitiScenarioPayload(entityCount, edgeCount, chunkCount, dim int) g
 		edges:  edges,
 		chunks: chunks,
 	}
+}
+
+func buildGraphitiEpisodePayload(episode, entityCount, edgeCount, dim int) graphitiScenarioPayload {
+	nodes := make([]map[string]interface{}, 0, entityCount)
+	for i := 0; i < entityCount; i++ {
+		global := episode*entityCount + i
+		uuid := fmt.Sprintf("episode-%02d-entity-%06d", episode, i)
+		nodes = append(nodes, map[string]interface{}{
+			"uuid":           uuid,
+			"name":           fmt.Sprintf("episode %02d entity %06d", episode, i),
+			"summary":        fmt.Sprintf("DOS episode %02d synthetic entity %06d", episode, i),
+			"group_id":       graphitiGroupID,
+			"labels":         []string{"Entity", fmt.Sprintf("Episode%d", episode)},
+			"name_embedding": deterministicVectorF64(global, dim),
+		})
+	}
+
+	edges := make([]map[string]interface{}, 0, edgeCount)
+	for i := 0; i < edgeCount; i++ {
+		src := i % entityCount
+		dst := (i + (i % 5) + 1) % entityCount
+		edges = append(edges, map[string]interface{}{
+			"uuid":             fmt.Sprintf("episode-%02d-edge-%06d", episode, i),
+			"source_node_uuid": fmt.Sprintf("episode-%02d-entity-%06d", episode, src),
+			"target_node_uuid": fmt.Sprintf("episode-%02d-entity-%06d", episode, dst),
+			"name":             "RELATES_TO",
+			"fact":             fmt.Sprintf("DOS episode %02d fact %06d", episode, i),
+			"group_id":         graphitiGroupID,
+			"fact_embedding":   deterministicVectorF64(100_000+episode*edgeCount+i, dim),
+		})
+	}
+
+	return graphitiScenarioPayload{nodes: nodes, edges: edges}
 }
 
 func deterministicVectorF64(seed, dim int) []float64 {

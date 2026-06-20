@@ -13,6 +13,7 @@ type countingStreamingEngine struct {
 	storage.Engine
 	streamNodesCalls int
 	allNodesCalls    int
+	allEdgesCalls    int
 	labelCalls       int
 }
 
@@ -41,6 +42,11 @@ func (c *countingStreamingEngine) StreamNodeChunks(ctx context.Context, chunkSiz
 func (c *countingStreamingEngine) AllNodes() ([]*storage.Node, error) {
 	c.allNodesCalls++
 	return c.Engine.AllNodes()
+}
+
+func (c *countingStreamingEngine) AllEdges() ([]*storage.Edge, error) {
+	c.allEdgesCalls++
+	return c.Engine.AllEdges()
 }
 
 func (c *countingStreamingEngine) GetNodesByLabel(label string) ([]*storage.Node, error) {
