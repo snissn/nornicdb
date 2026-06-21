@@ -471,6 +471,7 @@ type Service struct {
 	// indexMu serializes index mutation operations (IndexNode/RemoveNode/BuildIndexes batches)
 	// without blocking read paths that use s.mu for lightweight config/state reads.
 	indexMu        sync.Mutex
+	buildMu        sync.Mutex
 	ready          atomic.Bool
 	buildAttempted atomic.Bool
 	// resumeVectorBuild skips re-adding vectors already present in vectorFileStore during BuildIndexes.
@@ -1003,6 +1004,27 @@ func (s *Service) CurrentStrategy() string {
 func (s *Service) setBuildPhase(phase string) {
 	s.buildPhase.Store(phase)
 	s.buildPhaseUnix.Store(time.Now().Unix())
+}
+
+func (s *Service) resetANNForBuild() {
+	s.pipelineMu.Lock()
+	s.vectorPipeline = nil
+	s.pipelineMu.Unlock()
+
+	s.hnswMu.Lock()
+	if s.hnswIndex != nil {
+		s.hnswIndex.Clear()
+		s.hnswIndex = nil
+	}
+	s.hnswDeferredMutations.Store(0)
+	s.hnswMu.Unlock()
+
+	s.clusterHNSWMu.Lock()
+	s.clusterHNSW = nil
+	s.clusterHNSWMu.Unlock()
+	s.ivfpqMu.Lock()
+	s.ivfpqIndex = nil
+	s.ivfpqMu.Unlock()
 }
 
 // SetGPUManager enables GPU acceleration for exact brute-force vector search.
@@ -2851,6 +2873,11 @@ type NodeIterator interface {
 // if both load with count > 0 (and semver format version matches), the full iteration
 // is skipped. Otherwise iterates over storage and saves both indexes at the end when paths are set.
 func (s *Service) BuildIndexes(ctx context.Context) error {
+	s.buildMu.Lock()
+	defer s.buildMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.buildAttempted.Store(true)
 	// Per-DB master switches: when both indexes are disabled, mark ready
 	// (search handler returns 503 search_disabled_for_database upstream)
@@ -2867,6 +2894,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		s.ready.Store(true)
 		return nil
 	}
+	s.resetANNForBuild()
 	s.ready.Store(false)
 	s.buildInProgress.Store(true)
 	s.buildStartedUnix.Store(time.Now().Unix())

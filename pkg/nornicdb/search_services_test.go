@@ -898,6 +898,59 @@ func TestSearchServices_EnsurePendingFlush_ReplaysQueuedOps(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
+func TestSearchServices_LazyWriteEventDoesNotStartIndexBuild(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	cfg.Memory.EmbeddingEnabled = false
+	cfg.Memory.SearchBM25Enabled = false
+	cfg.Memory.SearchVectorEnabled = true
+	cfg.Memory.SearchVectorWarming = "lazy"
+	cfg.Database.AsyncWritesEnabled = false
+
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	const dbName = "tenant_lazy_ingest"
+	db.indexNodeFromEvent(&storage.Node{
+		ID:              storage.NodeID(dbName + ":n1"),
+		Labels:          []string{"Entity"},
+		Properties:      map[string]any{"name": "alice"},
+		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+	})
+
+	svc, err := db.GetOrCreateSearchService(dbName, nil)
+	require.NoError(t, err)
+	require.NotNil(t, svc)
+
+	time.Sleep(2 * searchMutationDebounceDelay)
+
+	progress := svc.GetBuildProgress()
+	require.False(t, progress.Building, "lazy write events must not start BuildIndexes")
+	require.False(t, progress.Ready, "lazy vector search stays cold until the first read")
+	require.Equal(t, 0, svc.EmbeddingCount(), "queued lazy writes must not populate ANN indexes before warmup")
+
+	status := db.GetDatabaseSearchStatus(dbName)
+	require.True(t, status.LazyTriggerNeeded, "first read should remain the lazy warm trigger")
+
+	db.searchServicesMu.RLock()
+	entry := db.searchServices[dbName]
+	db.searchServicesMu.RUnlock()
+	require.NotNil(t, entry)
+	require.True(t, entry.hasPending(), "write mutation should remain queued for post-build replay")
+	entry.pendingFlushMu.Lock()
+	require.False(t, entry.pendingFlushRunning, "lazy-cold writes should not keep a flush worker running")
+	require.Nil(t, entry.pendingFlushTimer, "lazy-cold writes should not reschedule flush timers until warmup starts")
+	entry.pendingFlushMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, dbName))
+	require.Eventually(t, func() bool {
+		return svc.EmbeddingCount() == 1
+	}, 5*time.Second, 10*time.Millisecond, "lazy build should replay queued write mutations after warmup")
+}
+
 func TestSearchServices_GetOrCreate_ResolverAndPersistPaths(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Memory.EmbeddingDimensions = 3

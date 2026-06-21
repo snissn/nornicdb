@@ -493,6 +493,30 @@ func (db *DB) GetDatabaseSearchStatus(dbName string) DatabaseSearchStatus {
 	}
 }
 
+func (db *DB) shouldStartSearchBuildForWriteEvent(dbName string, progress search.BuildProgress) bool {
+	if progress.Building {
+		return true
+	}
+	if progress.Ready {
+		return false
+	}
+	bm25On, vectorOn, bm25Warming, vectorWarming := db.resolveSearchFlags(dbName)
+	return (bm25On && bm25Warming == "startup") || (vectorOn && vectorWarming == "startup")
+}
+
+func (db *DB) ensurePendingFlushAfterSuccessfulBuild(entry *dbSearchService) {
+	if entry == nil || !entry.hasPending() {
+		return
+	}
+	entry.pendingFlushMu.Lock()
+	running := entry.pendingFlushRunning
+	entry.pendingFlushMu.Unlock()
+	if running {
+		return
+	}
+	db.ensurePendingFlush(entry)
+}
+
 func (db *DB) startSearchIndexBuild(entry *dbSearchService, ctx context.Context) {
 	if entry == nil || entry.svc == nil {
 		return
@@ -514,6 +538,9 @@ func (db *DB) startSearchIndexBuild(entry *dbSearchService, ctx context.Context)
 			}
 			entry.buildErrMu.Unlock()
 			entry.closeBuildDone()
+			if err == nil {
+				db.ensurePendingFlushAfterSuccessfulBuild(entry)
+			}
 		}) {
 			entry.buildErrMu.Lock()
 			entry.buildErr = ErrClosed
@@ -543,23 +570,27 @@ func (db *DB) ensurePendingFlush(entry *dbSearchService) {
 		entry.pendingFlushMu.Unlock()
 
 		started := db.startBackgroundTask(func() {
+			reschedulePending := true
 			defer func() {
 				entry.pendingFlushMu.Lock()
 				entry.pendingFlushRunning = false
 				entry.pendingFlushMu.Unlock()
-				if entry.hasPending() {
+				if reschedulePending && entry.hasPending() {
 					db.ensurePendingFlush(entry)
 				}
 			}()
 
 			progress := entry.svc.GetBuildProgress()
-			if progress.Building || !progress.Ready {
+			if db.shouldStartSearchBuildForWriteEvent(entry.dbName, progress) {
 				ctx := db.buildCtx
 				if ctx == nil {
 					ctx = context.Background()
 				}
 				db.startSearchIndexBuild(entry, ctx)
 				<-entry.buildDone
+			} else if !progress.Ready {
+				reschedulePending = false
+				return
 			}
 
 			for {
@@ -759,7 +790,7 @@ func (db *DB) indexNodeFromEvent(node *storage.Node) {
 
 	entry.queueIndex(userNode)
 	progress := svc.GetBuildProgress()
-	if progress.Building || !progress.Ready {
+	if db.shouldStartSearchBuildForWriteEvent(dbName, progress) {
 		ctx := db.buildCtx
 		if ctx == nil {
 			ctx = context.Background()
@@ -788,7 +819,7 @@ func (db *DB) removeNodeFromEvent(nodeID storage.NodeID) {
 
 	entry.queueRemove(local)
 	progress := entry.svc.GetBuildProgress()
-	if progress.Building || !progress.Ready {
+	if db.shouldStartSearchBuildForWriteEvent(dbName, progress) {
 		ctx := db.buildCtx
 		if ctx == nil {
 			ctx = context.Background()

@@ -9,6 +9,18 @@ export NORNICDB_PPROF_ENABLED=true
 export NORNICDB_PPROF_LISTEN=127.0.0.1:9091
 ```
 
+For Docker or headless container profiling, publish the pprof port and bind the listener inside the container:
+
+```bash
+docker run --rm \
+   -p 7474:7474 \
+   -p 7687:7687 \
+   -p 9091:9091 \
+   -e NORNICDB_PPROF_ENABLED=true \
+   -e NORNICDB_PPROF_LISTEN=0.0.0.0:9091 \
+   nornicdb-amd64-cpu-headless
+```
+
 Available endpoints include:
 
 - `/debug/pprof/profile`

@@ -123,7 +123,7 @@ RUN \
     echo "=== Model embedding complete ===" && \
     ls -lh /app/models/
 
-EXPOSE 7474 7687
+EXPOSE 7474 7687 9091
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD wget --spider -q http://localhost:7474/health || exit 1

@@ -188,7 +188,6 @@ import (
 	"github.com/orneryd/nornicdb/pkg/config/dbconfig"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/embed"
-	"github.com/orneryd/nornicdb/pkg/envutil"
 	"github.com/orneryd/nornicdb/pkg/graphql"
 	"github.com/orneryd/nornicdb/pkg/heimdall"
 	"github.com/orneryd/nornicdb/pkg/localllm"
@@ -464,12 +463,6 @@ type Config struct {
 	// This contains feature flags like HeimdallEnabled loaded from YAML/env
 	Features *nornicConfig.FeatureFlagsConfig
 
-	// Debug/Profiling Configuration
-	// EnablePprof enables /debug/pprof endpoints for performance profiling
-	// WARNING: Only enable in development/testing environments
-	// Env: NORNICDB_ENABLE_PPROF=true|false
-	EnablePprof bool
-
 	// Logger is the structured-logging entrypoint per Phase 2 D-01.
 	// If nil, a discard-handler fallback is installed at New() — graceful
 	// degrade for the transitional period; ctors will be tightened post-M1
@@ -570,11 +563,6 @@ func DefaultConfig() *Config {
 		//   NORNICDB_HEADLESS=true
 		//   --headless flag
 		Headless: false,
-
-		// Pprof disabled by default (security: profiling endpoints expose internals)
-		// Override via:
-		//   NORNICDB_ENABLE_PPROF=true
-		EnablePprof: envutil.GetBoolStrict("NORNICDB_ENABLE_PPROF", false),
 
 		// HTTP/2 always enabled (backwards compatible with HTTP/1.1)
 		// MaxConcurrentStreams: 250 matches Go's internal default

@@ -2,8 +2,6 @@ package server
 
 import (
 	"net/http"
-
-	// _ "net/http/pprof" // Register pprof handlers
 	"os"
 	"time"
 
@@ -29,7 +27,6 @@ func (s *Server) buildRouter() http.Handler {
 	s.registerMCPRoutes(mux)
 	s.registerHeimdallRoutes(mux)
 	s.registerGraphQLRoutes(mux)
-	// s.registerDebugRoutes(mux) // Pprof endpoints
 
 	return s.wrapWithMiddleware(mux)
 }
@@ -311,36 +308,6 @@ func (s *Server) registerGraphQLRoutes(mux *http.ServeMux) {
 	}, auth.PermRead))
 	s.log.Info("graphql API enabled", "route", "/graphql")
 }
-
-// registerDebugRoutes registers pprof profiling endpoints
-// func (s *Server) registerDebugRoutes(mux *http.ServeMux) {
-// 	// ==========================================================================
-// 	// Debug/Profiling Endpoints (development/testing only)
-// 	// ==========================================================================
-// 	if !s.config.EnablePprof {
-// 		return
-// 	}
-//
-// 	// Register pprof handlers at /debug/pprof/*
-// 	// These are provided by net/http/pprof package
-// 	mux.HandleFunc("/debug/pprof/", func(w http.ResponseWriter, r *http.Request) {
-// 		http.DefaultServeMux.ServeHTTP(w, r)
-// 	})
-// 	mux.HandleFunc("/debug/pprof/cmdline", func(w http.ResponseWriter, r *http.Request) {
-// 		http.DefaultServeMux.ServeHTTP(w, r)
-// 	})
-// 	mux.HandleFunc("/debug/pprof/profile", func(w http.ResponseWriter, r *http.Request) {
-// 		http.DefaultServeMux.ServeHTTP(w, r)
-// 	})
-// 	mux.HandleFunc("/debug/pprof/symbol", func(w http.ResponseWriter, r *http.Request) {
-// 		http.DefaultServeMux.ServeHTTP(w, r)
-// 	})
-// 	mux.HandleFunc("/debug/pprof/trace", func(w http.ResponseWriter, r *http.Request) {
-// 		http.DefaultServeMux.ServeHTTP(w, r)
-// 	})
-//
-// 	// (would log: pprof profiling enabled at /debug/pprof/)
-// }
 
 func (s *Server) wrapWithMiddleware(next http.Handler) http.Handler {
 	// Wrap with middleware (order matters: outermost runs first)

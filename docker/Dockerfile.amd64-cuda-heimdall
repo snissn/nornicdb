@@ -113,7 +113,7 @@ RUN \
     echo "✓ Downloaded qwen3-0.6b-instruct.gguf ($(du -h /app/models/qwen3-0.6b-instruct.gguf | cut -f1))" && \
     echo "✓ Heimdall cognitive features + reranker enabled"
 
-EXPOSE 7474 7687
+EXPOSE 7474 7687 9091
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD wget --spider -q http://localhost:7474/health || exit 1

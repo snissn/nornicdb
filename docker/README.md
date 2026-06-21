@@ -39,6 +39,22 @@ Heimdall provides:
 
 **Models are automatically downloaded during build** - no manual setup required!
 
+### Profiling With pprof
+
+pprof is exposed by a separate observability listener and is disabled by default. To profile a container, publish port `9091` and bind the listener inside the container:
+
+```bash
+docker run --rm \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -p 9091:9091 \
+  -e NORNICDB_PPROF_ENABLED=true \
+  -e NORNICDB_PPROF_LISTEN=0.0.0.0:9091 \
+  nornicdb-amd64-cpu-headless
+
+go tool pprof http://127.0.0.1:9091/debug/pprof/profile?seconds=30
+```
+
 ---
 
 ## ARM64 Metal (Apple Silicon)

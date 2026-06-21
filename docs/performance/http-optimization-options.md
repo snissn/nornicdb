@@ -37,7 +37,7 @@ From recent profiling of NornicDB's HTTP write path:
 
 ```bash
 # 1. Collect CPU profile from production workload
-go tool pprof http://localhost:7474/debug/pprof/profile?seconds=60
+go tool pprof http://127.0.0.1:9091/debug/pprof/profile?seconds=60
 
 # 2. Save as default.pgo in main package
 go tool pprof -proto profile.pb.gz > default.pgo
@@ -310,12 +310,15 @@ func encodeJSONFast(data interface{}) []byte {
 Use the HTTP write performance test harness:
 
 ```bash
-# Start server with pprof enabled
-./nornicdb --enable-pprof --http-port 7474
+# Start server with the opt-in observability pprof listener
+NORNICDB_PPROF_ENABLED=true \
+NORNICDB_PPROF_LISTEN=127.0.0.1:9091 \
+./nornicdb --http-port 7474
 
 # Run benchmark
 go run testing/benchmarks/http_write_latency/main.go \
     -url http://localhost:7474 \
+    -pprof-url http://127.0.0.1:9091 \
     -database neo4j \
     -requests 10000 \
     -concurrency 50 \

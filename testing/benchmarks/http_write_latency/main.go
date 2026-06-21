@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,9 +45,10 @@ import (
 //		-concurrency 10 \
 //		-auth admin:password
 //
-//	# With pprof profiling (requires NORNICDB_ENABLE_PPROF=true on server)
+//	# With pprof profiling (requires NORNICDB_PPROF_ENABLED=true on server)
 //	go run testing/benchmarks/http_write_latency/main.go \
 //		-url http://localhost:7474 \
+//		-pprof-url http://127.0.0.1:9091 \
 //		-database testdb \
 //		-requests 1000 \
 //		-concurrency 10 \
@@ -60,7 +62,8 @@ func main() {
 		requests      = flag.Int("requests", 1000, "Total number of requests")
 		concurrency   = flag.Int("concurrency", runtime.GOMAXPROCS(0), "Number of concurrent goroutines")
 		auth          = flag.String("auth", "admin:password", "Basic auth credentials (username:password)")
-		pprofEnabled  = flag.Bool("pprof-enabled", false, "Enable pprof profiling (requires server to have pprof enabled)")
+		pprofEnabled  = flag.Bool("pprof-enabled", false, "Collect a CPU profile from the pprof listener")
+		pprofURL      = flag.String("pprof-url", "http://127.0.0.1:9091", "pprof listener URL")
 		pprofDuration = flag.Duration("pprof-duration", 30*time.Second, "Duration for pprof CPU profile")
 		warmup        = flag.Int("warmup", 10, "Number of warmup requests")
 		verbose       = flag.Bool("verbose", false, "Print detailed per-request stats")
@@ -75,6 +78,9 @@ func main() {
 	fmt.Printf("Concurrency:   %d\n", *concurrency)
 	fmt.Printf("Warmup:        %d\n", *warmup)
 	fmt.Printf("Pprof enabled: %v\n", *pprofEnabled)
+	if *pprofEnabled {
+		fmt.Printf("Pprof URL:     %s\n", *pprofURL)
+	}
 	fmt.Printf("\n")
 
 	// Create HTTP client with connection pooling
@@ -125,10 +131,11 @@ func main() {
 	if *pprofEnabled {
 		fmt.Printf("Starting pprof CPU profile (duration: %v)...\n", *pprofDuration)
 		pprofDone = make(chan struct{})
+		profileURL := fmt.Sprintf("%s/debug/pprof/profile", strings.TrimRight(*pprofURL, "/"))
 		pprofCmd = exec.Command("go", "tool", "pprof",
 			"-proto",
 			"-seconds", fmt.Sprintf("%.0f", pprofDuration.Seconds()),
-			fmt.Sprintf("%s/debug/pprof/profile", *url),
+			profileURL,
 		)
 		pprofCmd.Stdout = os.Stdout
 		pprofCmd.Stderr = os.Stderr

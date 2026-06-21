@@ -7,11 +7,10 @@ Benchmark harness for measuring HTTP write latency and throughput for NornicDB's
 ### 1. Start NornicDB Server
 
 ```bash
-# Start server with pprof enabled (for profiling)
-./nornicdb --enable-pprof --http-port 7474 --data-dir ./data/test
-
-# Or use environment variable
-NORNICDB_ENABLE_PPROF=true ./nornicdb --http-port 7474
+# Start server with the opt-in observability pprof listener
+NORNICDB_PPROF_ENABLED=true \
+NORNICDB_PPROF_LISTEN=127.0.0.1:9091 \
+./nornicdb --http-port 7474 --data-dir ./data/test
 ```
 
 ### 2. Run Benchmark
@@ -20,6 +19,7 @@ NORNICDB_ENABLE_PPROF=true ./nornicdb --http-port 7474
 ```bash
 go run testing/benchmarks/http_write_latency/main.go \
     -url http://localhost:7474 \
+    -pprof-url http://127.0.0.1:9091 \
     -database testdb \
     -requests 10000 \
     -concurrency 50 \
@@ -60,10 +60,10 @@ The benchmark outputs:
 
 ```bash
 # View CPU profile
-go tool pprof http://localhost:7474/debug/pprof/profile?seconds=60
+go tool pprof http://127.0.0.1:9091/debug/pprof/profile?seconds=60
 
 # View memory profile
-go tool pprof http://localhost:7474/debug/pprof/heap
+go tool pprof http://127.0.0.1:9091/debug/pprof/heap
 
 # Compare profiles
 go tool pprof -base=before.pb.gz -http=:8080 after.pb.gz
@@ -79,6 +79,7 @@ go tool pprof -base=before.pb.gz -http=:8080 after.pb.gz
 | `-concurrency` | `GOMAXPROCS` | Number of concurrent goroutines |
 | `-auth` | `admin:admin` | Basic auth credentials (username:password) |
 | `-pprof-enabled` | `false` | Enable pprof CPU profiling |
+| `-pprof-url` | `http://127.0.0.1:9091` | pprof listener URL |
 | `-pprof-duration` | `30s` | Duration for pprof CPU profile |
 | `-warmup` | `10` | Number of warmup requests |
 | `-verbose` | `false` | Print detailed per-request stats |
@@ -144,8 +145,9 @@ See [HTTP Optimization Options](../../../../docs/performance/http-optimization-o
 - Check server authentication settings
 
 ### "Pprof endpoints not found"
-- Ensure server was started with `--enable-pprof` flag
-- Or set `NORNICDB_ENABLE_PPROF=true` environment variable
+- Set `NORNICDB_PPROF_ENABLED=true` on the server
+- Use `-pprof-url` for the pprof listener, not the main HTTP API URL
+- For Docker profiling, publish port `9091` and set `NORNICDB_PPROF_LISTEN=0.0.0.0:9091`
 
 ### Low throughput
 - Increase `-concurrency` (but not beyond server capacity)
