@@ -2027,10 +2027,11 @@ func (ae *AsyncEngine) EdgeCount() (int64, error) {
 }
 
 func (ae *AsyncEngine) NodeCountByPrefix(prefix string) (int64, error) {
-	locked := ae.flushMu.TryRLock()
-	if locked {
-		defer ae.flushMu.RUnlock()
-	}
+	// Keep prefix-scoped counts consistent with NodeCount during flush. Without
+	// this guard, callers can observe the mixed state between cache snapshot and
+	// cache cleanup where the underlying engine has not committed the write yet.
+	ae.flushMu.RLock()
+	defer ae.flushMu.RUnlock()
 
 	// Snapshot cache state under lock, then release before engine I/O.
 	ae.mu.RLock()
@@ -2116,10 +2117,8 @@ func (ae *AsyncEngine) NodeCountByLabelInNamespace(namespace, label string) (int
 }
 
 func (ae *AsyncEngine) EdgeCountByPrefix(prefix string) (int64, error) {
-	locked := ae.flushMu.TryRLock()
-	if locked {
-		defer ae.flushMu.RUnlock()
-	}
+	ae.flushMu.RLock()
+	defer ae.flushMu.RUnlock()
 
 	ae.mu.RLock()
 

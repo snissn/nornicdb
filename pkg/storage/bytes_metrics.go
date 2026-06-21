@@ -13,13 +13,13 @@
 //   - nodes  — prefixNode
 //   - edges  — prefixEdge
 //   - index  — prefixLabelIndex + prefixEdgeBetweenIndex + prefixTemporalIndex
-//              (sum across the three index prefixes; user-created indexes
-//              are not separately accounted by D-13c)
+//     (sum across the three index prefixes; user-created indexes
+//     are not separately accounted by D-13c)
 //   - wal    — heuristic (vlog size - lsm size from db.Size()); RISK-6
 //   - search — sum of IndexSizeBytes() across all per-database search
-//              services (Plan 04-05 owns the IndexSizeBytes accessor;
-//              this sweeper consumes via the SearchSizeFn callback so the
-//              storage layer never imports pkg/search)
+//     services (Plan 04-05 owns the IndexSizeBytes accessor;
+//     this sweeper consumes via the SearchSizeFn callback so the
+//     storage layer never imports pkg/search)
 //
 // The sweeper is registered in cmd/nornicdb between pprof and workers
 // components per RESEARCH §Q4 — i.e. it Drains AFTER the workers and
