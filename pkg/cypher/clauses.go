@@ -688,6 +688,11 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 				findKeywordIndexInContext(trimmedRest, "CREATE") >= 0 ||
 				findKeywordIndexInContext(trimmedRest, "SET") >= 0)
 		if matchStartedMutation {
+			if strings.HasPrefix(upperRest, "MATCH") {
+				if fast, ok, err := e.executeUnwindRelationshipMergeBatch(ctx, variable, items, restQuery); ok {
+					return fast, err
+				}
+			}
 			// Bulk-seed fast path: UNWIND $rows MATCH (...) [MATCH (...)...]
 			// CREATE (...) [CREATE (...)...] without RETURN / WITH / nested
 			// UNWIND. Parses the mutation body once, then runs each row

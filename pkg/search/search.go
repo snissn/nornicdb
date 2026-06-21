@@ -1012,10 +1012,9 @@ func (s *Service) resetANNForBuild() {
 	s.pipelineMu.Unlock()
 
 	s.hnswMu.Lock()
-	if s.hnswIndex != nil {
-		s.hnswIndex.Clear()
-		s.hnswIndex = nil
-	}
+	// Drop the pointer without clearing the old graph; readers that already
+	// captured it can finish without contending with a reset we would discard.
+	s.hnswIndex = nil
 	s.hnswDeferredMutations.Store(0)
 	s.hnswMu.Unlock()
 

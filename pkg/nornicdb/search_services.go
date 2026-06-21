@@ -796,8 +796,12 @@ func (db *DB) indexNodeFromEvent(node *storage.Node) {
 			ctx = context.Background()
 		}
 		db.startSearchIndexBuild(entry, ctx)
+		db.ensurePendingFlush(entry)
+		return
 	}
-	db.ensurePendingFlush(entry)
+	if progress.Ready {
+		db.ensurePendingFlush(entry)
+	}
 }
 
 func (db *DB) removeNodeFromEvent(nodeID storage.NodeID) {
@@ -825,8 +829,12 @@ func (db *DB) removeNodeFromEvent(nodeID storage.NodeID) {
 			ctx = context.Background()
 		}
 		db.startSearchIndexBuild(entry, ctx)
+		db.ensurePendingFlush(entry)
+		return
 	}
-	db.ensurePendingFlush(entry)
+	if progress.Ready {
+		db.ensurePendingFlush(entry)
+	}
 }
 
 // GetDatabaseManagedEmbeddingStats returns managed embedding usage for a database.

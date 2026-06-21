@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -218,6 +219,169 @@ func TestUnwindMergeChainBatch_ContainmentEdgeOnly(t *testing.T) {
 		"both unique constraints present; must route through schema lookup")
 	require.False(t, trace.MergeScanFallbackUsed,
 		"no scan fallback justified when both unique constraints are present")
+}
+
+func TestUnwindRelationshipMergeBatch_NArityMatchAndRowReplace(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	for _, stmt := range []string{
+		"CREATE (:Service {key:'svc-a'}), (:Topic {key:'topic-b'}), (:Tenant {key:'tenant-c'})",
+	} {
+		_, err := exec.Execute(ctx, stmt, nil)
+		require.NoError(t, err)
+	}
+
+	query := `UNWIND $rows AS row
+MATCH (source:Service {key: row.source_key})
+MATCH (target:Topic {key: row.target_key})
+MATCH (tenant:Tenant {key: row.tenant})
+MERGE (source)-[rel:PUBLISHES {uuid: row.uuid, tenant: row.tenant}]->(target)
+SET rel = row
+WITH rel, row CALL db.create.setRelationshipVectorProperty(rel, "embedding", row.embedding)
+RETURN row.uuid AS uuid, row.tenant AS tenant`
+
+	rows := []map[string]interface{}{{
+		"source_key": "svc-a",
+		"target_key": "topic-b",
+		"tenant":     "tenant-c",
+		"uuid":       "edge-1",
+		"fact":       "first",
+		"embedding":  []float64{1, 0, 0},
+	}}
+	res, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Equal(t, []string{"uuid", "tenant"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	trace := exec.LastHotPathTrace()
+	require.True(t, trace.UnwindRelationshipMergeBatch)
+	require.True(t, trace.UnwindMergeChainBatch)
+
+	rows[0]["fact"] = "updated"
+	rows[0]["embedding"] = []float64{0, 1, 0}
+	res, err = exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	trace = exec.LastHotPathTrace()
+	require.True(t, trace.UnwindRelationshipMergeBatch)
+	require.True(t, trace.UnwindMergeChainBatch)
+
+	count := mustCountRows(t, exec, ctx, "MATCH (:Service {key:'svc-a'})-[rel:PUBLISHES]->(:Topic {key:'topic-b'}) WHERE rel.uuid = 'edge-1' RETURN count(rel)", nil)
+	require.Equal(t, int64(1), count)
+
+	res, err = exec.Execute(ctx, "MATCH (:Service {key:'svc-a'})-[rel:PUBLISHES {uuid:'edge-1'}]->(:Topic {key:'topic-b'}) RETURN rel.fact AS fact, rel.embedding AS embedding, rel.tenant AS tenant", nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "updated", res.Rows[0][0])
+	require.Equal(t, []float64{0, 1, 0}, res.Rows[0][1])
+	require.Equal(t, "tenant-c", res.Rows[0][2])
+}
+
+func TestRelationshipBatchScalarEdgeKeyMatchesStoredProperties(t *testing.T) {
+	merge := relationshipMergeSpec{
+		relType:      "PUBLISHES",
+		rowFieldRefs: map[string]string{"uuid": "uuid", "tenant": "tenant"},
+		literals:     map[string]interface{}{"scope": "public"},
+	}
+	merge.keyProps = relationshipMergeKeyProps(merge.rowFieldRefs, merge.literals)
+	row := map[string]interface{}{"uuid": "edge-001", "tenant": "tenant-a"}
+	edgeProps := map[string]interface{}{"uuid": "edge-001", "tenant": "tenant-a", "scope": "public"}
+
+	rowKey := relationshipBatchEdgeKeyFromRow("source", "target", merge, row)
+	propKey, ok := relationshipBatchEdgeKeyFromProperties("source", "target", merge, edgeProps)
+
+	require.True(t, ok)
+	require.Equal(t, rowKey, propKey)
+	require.NotContains(t, rowKey, "\"entries\"")
+}
+
+func TestUnwindRelationshipMergeBatch_AmbiguousMatchFallsBack(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+CREATE (:Service {key:'svc'}), (:Service {key:'svc'}), (:Topic {key:'topic'}), (:Tenant {key:'tenant-a'})
+`, nil)
+	require.NoError(t, err)
+
+	query := `UNWIND $rows AS row
+MATCH (source:Service {key: row.source_key})
+MATCH (target:Topic {key: row.target_key})
+MATCH (tenant:Tenant {key: row.tenant})
+MERGE (source)-[rel:PUBLISHES {uuid: row.uuid, tenant: row.tenant}]->(target)
+SET rel = row
+WITH rel, row CALL db.create.setRelationshipVectorProperty(rel, "embedding", row.embedding)
+RETURN row.uuid AS uuid`
+	rows := []map[string]interface{}{{
+		"source_key": "svc",
+		"target_key": "topic",
+		"tenant":     "tenant-a",
+		"uuid":       "edge-ambiguous",
+		"embedding":  []float64{1, 0, 0, 0},
+	}}
+
+	res, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 2)
+	require.False(t, exec.LastHotPathTrace().UnwindRelationshipMergeBatch)
+}
+
+func BenchmarkUnwindRelationshipMergeBatch_NArityUpsertExisting(b *testing.B) {
+	baseStore := newTestMemoryEngine(b)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	const batchSize = 256
+	for i := 0; i < batchSize; i++ {
+		_, err := exec.Execute(ctx, fmt.Sprintf("CREATE (:Service {key:'svc-%03d'}), (:Topic {key:'topic-%03d'}), (:Tenant {key:'tenant-%03d'})", i, i, i), nil)
+		require.NoError(b, err)
+	}
+
+	query := `UNWIND $rows AS row
+MATCH (source:Service {key: row.source_key})
+MATCH (target:Topic {key: row.target_key})
+MATCH (tenant:Tenant {key: row.tenant})
+MERGE (source)-[rel:PUBLISHES {uuid: row.uuid, tenant: row.tenant}]->(target)
+SET rel = row
+WITH rel, row CALL db.create.setRelationshipVectorProperty(rel, "embedding", row.embedding)
+RETURN row.uuid AS uuid`
+
+	rows := make([]map[string]interface{}, 0, batchSize)
+	for i := 0; i < batchSize; i++ {
+		rows = append(rows, map[string]interface{}{
+			"source_key": fmt.Sprintf("svc-%03d", i),
+			"target_key": fmt.Sprintf("topic-%03d", i),
+			"tenant":     fmt.Sprintf("tenant-%03d", i),
+			"uuid":       fmt.Sprintf("edge-%03d", i),
+			"fact":       "relationship batch benchmark",
+			"embedding":  []float64{1, 0, 0, 0},
+		})
+	}
+	params := map[string]interface{}{"rows": rows}
+	res, err := exec.Execute(ctx, query, params)
+	require.NoError(b, err)
+	require.Len(b, res.Rows, batchSize)
+	require.True(b, exec.LastHotPathTrace().UnwindRelationshipMergeBatch)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err = exec.Execute(ctx, query, params)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(res.Rows) != batchSize {
+			b.Fatalf("expected %d rows, got %d", batchSize, len(res.Rows))
+		}
+		if !exec.LastHotPathTrace().UnwindRelationshipMergeBatch {
+			b.Fatal("expected generic relationship merge batch fast path")
+		}
+	}
 }
 
 // multiVariableSetEdgeCypher exercises a composite-key MERGE pattern: the

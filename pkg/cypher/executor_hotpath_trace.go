@@ -2,21 +2,22 @@ package cypher
 
 // HotPathTrace records which key query hot paths were used for the most recent Execute call.
 type HotPathTrace struct {
-	OuterIndexTopK              bool
-	OuterScanFallbackUsed       bool
-	FabricBatchedApplyRows      bool
-	SimpleMatchLimitFastPath    bool
-	CosineVectorIndexFastPath   bool
-	CompoundQueryFastPath       bool
-	TraversalStartSeedTopK      bool
-	TraversalEndSeedTopK        bool
-	UnwindSimpleMergeBatch      bool
-	UnwindMergeChainBatch       bool
-	UnwindFixedChainLinkBatch   bool
-	UnwindMultiMatchCreateBatch bool
-	CallTailTraversalFastPath   bool
-	MergeSchemaLookupUsed       bool
-	MergeScanFallbackUsed       bool
+	OuterIndexTopK               bool
+	OuterScanFallbackUsed        bool
+	FabricBatchedApplyRows       bool
+	SimpleMatchLimitFastPath     bool
+	CosineVectorIndexFastPath    bool
+	CompoundQueryFastPath        bool
+	TraversalStartSeedTopK       bool
+	TraversalEndSeedTopK         bool
+	UnwindSimpleMergeBatch       bool
+	UnwindMergeChainBatch        bool
+	UnwindRelationshipMergeBatch bool
+	UnwindFixedChainLinkBatch    bool
+	UnwindMultiMatchCreateBatch  bool
+	CallTailTraversalFastPath    bool
+	MergeSchemaLookupUsed        bool
+	MergeScanFallbackUsed        bool
 }
 
 func (e *StorageExecutor) resetHotPathTrace() {
@@ -118,6 +119,16 @@ func (e *StorageExecutor) markUnwindMergeChainBatchUsed() {
 	}
 	e.hotPathTraceState.mu.Lock()
 	e.hotPathTraceState.trace.UnwindMergeChainBatch = true
+	e.hotPathTraceState.mu.Unlock()
+}
+
+func (e *StorageExecutor) markUnwindRelationshipMergeBatchUsed() {
+	if e.hotPathTraceState == nil {
+		e.hotPathTraceState = &hotPathTraceState{}
+	}
+	e.hotPathTraceState.mu.Lock()
+	e.hotPathTraceState.trace.UnwindMergeChainBatch = true
+	e.hotPathTraceState.trace.UnwindRelationshipMergeBatch = true
 	e.hotPathTraceState.mu.Unlock()
 }
 

@@ -159,9 +159,10 @@ func (s *Service) VectorQueryRelationships(ctx context.Context, queryEmbedding [
 		if !ok || len(vec) != len(queryEmbedding) {
 			continue
 		}
-		copied := make([]float32, len(vec))
-		copy(copied, vec)
-		candidates = append(candidates, edgeMeta{id: edgeID, vec: copied})
+		// Relationship vectors are copied when indexed and then treated as immutable.
+		// Snapshot the slice header only; copying every vector per query dominates
+		// Graphiti relationship retrieval allocations.
+		candidates = append(candidates, edgeMeta{id: edgeID, vec: vec})
 	}
 	s.mu.RUnlock()
 	if len(candidates) == 0 {
@@ -173,10 +174,6 @@ func (s *Service) VectorQueryRelationships(ctx context.Context, queryEmbedding [
 		score float64
 	}
 	scored := make([]scoredEdge, 0, len(candidates))
-	var normalizedQuery []float32
-	if similarity == "cosine" {
-		normalizedQuery = vector.Normalize(queryEmbedding)
-	}
 	for _, cand := range candidates {
 		select {
 		case <-ctx.Done():
@@ -186,7 +183,7 @@ func (s *Service) VectorQueryRelationships(ctx context.Context, queryEmbedding [
 		var score float64
 		switch similarity {
 		case "cosine":
-			score = vector.DotProduct(normalizedQuery, vector.Normalize(cand.vec))
+			score = vector.CosineSimilarity(queryEmbedding, cand.vec)
 			if score > 1.0 {
 				score = 1.0
 			} else if score < -1.0 {

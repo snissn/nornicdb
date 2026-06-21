@@ -117,6 +117,7 @@ func TestGraphitiScenarioE2E_LargePayloads(t *testing.T) {
 	res, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
 	require.NoError(t, err)
 	require.Len(t, res.Rows, len(payload.edges))
+	require.True(t, exec.LastHotPathTrace().UnwindRelationshipMergeBatch, "bulk relationship ingest should use the generic relationship merge batch fast path")
 
 	res, err = exec.Execute(ctx, graphitiBulkChunkSaveQuery, map[string]interface{}{
 		"anchor": "entity-000000",
@@ -204,6 +205,7 @@ func TestGraphitiScenarioE2E_ExternalVectorIngestDoesNotUseExactScanFallbackBefo
 		res, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
 		require.NoError(t, err)
 		require.Len(t, res.Rows, len(payload.edges))
+		require.True(t, exec.LastHotPathTrace().UnwindRelationshipMergeBatch, "episode %d bulk relationship ingest should use the generic relationship merge batch fast path", episode)
 
 		require.False(t, searchSvc.IsReady(), "test must cover pre-warmup ingest, not fully built search readiness")
 		require.Equal(t, (episode+1)*nodesPerEpisode, searchSvc.CountPropertyVectorEntries("name_embedding"))

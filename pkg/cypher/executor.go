@@ -930,6 +930,12 @@ func (e *StorageExecutor) notifyEdgeMutated(edgeID string) {
 		return
 	}
 	if edge, err := e.storage.GetEdge(storage.EdgeID(edgeID)); err == nil && edge != nil {
+		e.indexMutatedEdge(edge)
+	}
+}
+
+func (e *StorageExecutor) indexMutatedEdge(edge *storage.Edge) {
+	if e.searchService != nil && edge != nil {
 		_ = e.searchService.IndexEdge(edge)
 	}
 }

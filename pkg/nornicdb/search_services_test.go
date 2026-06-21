@@ -922,8 +922,14 @@ func TestSearchServices_LazyWriteEventDoesNotStartIndexBuild(t *testing.T) {
 	svc, err := db.GetOrCreateSearchService(dbName, nil)
 	require.NoError(t, err)
 	require.NotNil(t, svc)
-
-	time.Sleep(2 * searchMutationDebounceDelay)
+	db.searchServicesMu.RLock()
+	entry := db.searchServices[dbName]
+	db.searchServicesMu.RUnlock()
+	require.NotNil(t, entry)
+	entry.pendingFlushMu.Lock()
+	require.False(t, entry.pendingFlushRunning, "lazy-cold writes should not start a flush worker")
+	require.Nil(t, entry.pendingFlushTimer, "lazy-cold writes should not allocate a flush timer")
+	entry.pendingFlushMu.Unlock()
 
 	progress := svc.GetBuildProgress()
 	require.False(t, progress.Building, "lazy write events must not start BuildIndexes")
@@ -933,10 +939,6 @@ func TestSearchServices_LazyWriteEventDoesNotStartIndexBuild(t *testing.T) {
 	status := db.GetDatabaseSearchStatus(dbName)
 	require.True(t, status.LazyTriggerNeeded, "first read should remain the lazy warm trigger")
 
-	db.searchServicesMu.RLock()
-	entry := db.searchServices[dbName]
-	db.searchServicesMu.RUnlock()
-	require.NotNil(t, entry)
 	require.True(t, entry.hasPending(), "write mutation should remain queued for post-build replay")
 	entry.pendingFlushMu.Lock()
 	require.False(t, entry.pendingFlushRunning, "lazy-cold writes should not keep a flush worker running")

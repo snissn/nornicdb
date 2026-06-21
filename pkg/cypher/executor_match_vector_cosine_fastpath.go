@@ -416,11 +416,19 @@ func (e *StorageExecutor) tryFastPathMatchRelationshipVectorCosine(ctx context.C
 		return nil, false
 	}
 
-	rows := make([][]interface{}, 0, len(edgeScores))
+	rows := make([][]interface{}, 0, min(limit, len(edgeScores)))
 	nodeCtx := make(map[string]*storage.Node, 2)
 	edgeCtx := make(map[string]*storage.Edge, 1)
 	for _, hit := range edgeScores {
-		if !e.buildRelationshipContextInto(pattern, hit.edge, nodeCtx, edgeCtx) {
+		edge := hit.edge
+		if edge == nil && hit.edgeID != "" {
+			var err error
+			edge, err = e.storage.GetEdge(hit.edgeID)
+			if err != nil || edge == nil {
+				continue
+			}
+		}
+		if !e.buildRelationshipContextInto(pattern, edge, nodeCtx, edgeCtx) {
 			continue
 		}
 		if preWhereClause != "" && !evaluateExpressionBoolWithContext(e, ctx, preWhereClause, nodeCtx, edgeCtx) {
@@ -559,13 +567,13 @@ func (e *StorageExecutor) tryFastPathMatchWithRelationshipVectorCosineProjection
 		return nil, false
 	}
 
-	candidateLimit := chooseVectorCandidateLimit(limit, preWhereClause != "" || scoreOp != "")
+	candidateLimit := chooseVectorCandidateLimit(limit, preWhereClause != "" || scorePredicateRejectsLeadingResults(orderDesc, scoreOp))
 	edgeScores, ok := e.fetchCosineRelationshipScores(ctx, indexName, candidateLimit, queryExpr, orderDesc)
 	if !ok {
 		return nil, false
 	}
 
-	rows := make([][]interface{}, 0, len(edgeScores))
+	rows := make([][]interface{}, 0, min(limit, len(edgeScores)))
 	nodeCtx := make(map[string]*storage.Node, 2)
 	edgeCtx := make(map[string]*storage.Edge, 1)
 	scoreExprIsAlias := make([]bool, len(returnItems))
@@ -573,7 +581,15 @@ func (e *StorageExecutor) tryFastPathMatchWithRelationshipVectorCosineProjection
 		scoreExprIsAlias[i] = strings.EqualFold(strings.TrimSpace(returnItems[i].expr), scoreRef)
 	}
 	for _, hit := range edgeScores {
-		if !e.buildRelationshipContextInto(pattern, hit.edge, nodeCtx, edgeCtx) {
+		edge := hit.edge
+		if edge == nil && hit.edgeID != "" {
+			var err error
+			edge, err = e.storage.GetEdge(hit.edgeID)
+			if err != nil || edge == nil {
+				continue
+			}
+		}
+		if !e.buildRelationshipContextInto(pattern, edge, nodeCtx, edgeCtx) {
 			continue
 		}
 		if preWhereClause != "" && !evaluateExpressionBoolWithContext(e, ctx, preWhereClause, nodeCtx, edgeCtx) {
@@ -607,8 +623,9 @@ type vectorNodeScore struct {
 }
 
 type vectorEdgeScore struct {
-	edge  *storage.Edge
-	score float64
+	edgeID storage.EdgeID
+	edge   *storage.Edge
+	score  float64
 }
 
 func (e *StorageExecutor) tryFastPathAnyMatchVectorCosine(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, bool) {
@@ -843,11 +860,7 @@ func (e *StorageExecutor) fetchCosineRelationshipScores(ctx context.Context, ind
 		if err == nil {
 			out := make([]vectorEdgeScore, 0, len(hits))
 			for _, hit := range hits {
-				edge, err := e.storage.GetEdge(storage.EdgeID(hit.ID))
-				if err != nil {
-					continue
-				}
-				out = append(out, vectorEdgeScore{edge: edge, score: hit.Score})
+				out = append(out, vectorEdgeScore{edgeID: storage.EdgeID(hit.ID), score: hit.Score})
 			}
 			return out, true
 		}
@@ -1360,6 +1373,17 @@ func compareScore(score float64, op string, target float64) bool {
 		return score < target
 	case "<=":
 		return score <= target
+	default:
+		return false
+	}
+}
+
+func scorePredicateRejectsLeadingResults(orderDesc bool, op string) bool {
+	switch op {
+	case "<", "<=":
+		return orderDesc
+	case ">", ">=":
+		return !orderDesc
 	default:
 		return false
 	}
