@@ -197,7 +197,7 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 		// yields PREFIXED IDs, so a batched-read + map-lookup mismatches.
 		// GetNode handles both forms via idempotent prefixNodeID.
 		idx := make(map[string]*storage.Node, len(distinct))
-		needsScan := false
+		unresolved := make(map[string]any)
 		for k, val := range distinct {
 			ids := schema.PropertyIndexLookup(m.label, m.propName, val)
 			matched := 0
@@ -209,18 +209,21 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 				}
 			}
 			if matched != 1 {
-				needsScan = true
+				delete(idx, k)
+				unresolved[k] = val
 			}
 		}
-		if needsScan {
-			scanned, scanUnique, err := buildNodeBatchLabelMatchIndex(store, key, distinct)
+		if len(unresolved) > 0 {
+			scanned, scanUnique, err := buildNodeBatchLabelMatchIndex(store, key, unresolved)
 			if err != nil {
 				return nil, true, err
 			}
 			if !scanUnique {
 				return nil, false, nil
 			}
-			idx = scanned
+			for k, node := range scanned {
+				idx[k] = node
+			}
 		}
 		batchIndex[key] = idx
 	}

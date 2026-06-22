@@ -1,5 +1,7 @@
 package cypher
 
+import "sync"
+
 // keywordScan provides high-performance, allocation-free keyword searching with:
 //   - case-insensitive matching
 //   - flexible whitespace between keyword tokens
@@ -27,6 +29,19 @@ type keywordScanOpts struct {
 
 	Boundary keywordBoundaryMode
 }
+
+type keywordIndexCacheKey struct {
+	s       string
+	keyword string
+	from    int
+}
+
+var defaultKeywordIndexCache = struct {
+	sync.RWMutex
+	m map[keywordIndexCacheKey]int
+}{m: make(map[keywordIndexCacheKey]int, 1024)}
+
+const defaultKeywordIndexCacheMax = 4096
 
 func defaultKeywordScanOpts() keywordScanOpts {
 	return keywordScanOpts{
@@ -61,7 +76,7 @@ func topLevelKeywordIndex(s, keyword string) int {
 
 func keywordIndexFrom(s, keyword string, from int, opts keywordScanOpts) int {
 	if isDefaultKeywordScanOpts(opts) {
-		return keywordIndexFromDefault(s, keyword, from)
+		return cachedKeywordIndexFromDefault(s, keyword, from)
 	}
 
 	ks, ke := trimKeywordWSBounds(keyword)
@@ -224,6 +239,25 @@ func keywordIndexFrom(s, keyword string, from int, opts keywordScanOpts) int {
 	}
 
 	return -1
+}
+
+func cachedKeywordIndexFromDefault(s, keyword string, from int) int {
+	key := keywordIndexCacheKey{s: s, keyword: keyword, from: from}
+	defaultKeywordIndexCache.RLock()
+	idx, ok := defaultKeywordIndexCache.m[key]
+	defaultKeywordIndexCache.RUnlock()
+	if ok {
+		return idx
+	}
+
+	idx = keywordIndexFromDefault(s, keyword, from)
+	defaultKeywordIndexCache.Lock()
+	if len(defaultKeywordIndexCache.m) >= defaultKeywordIndexCacheMax {
+		defaultKeywordIndexCache.m = make(map[keywordIndexCacheKey]int, 1024)
+	}
+	defaultKeywordIndexCache.m[key] = idx
+	defaultKeywordIndexCache.Unlock()
+	return idx
 }
 
 func keywordIndexFromDefault(s, keyword string, from int) int {

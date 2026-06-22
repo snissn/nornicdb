@@ -508,7 +508,7 @@ func buildRelationshipBatchNodeMatchIndex(store storage.Engine, rows []map[strin
 			}
 		}
 		if schema != nil && schema.HasPropertyIndex(key.label, key.prop) {
-			needsScan := false
+			unresolved := make(map[string]interface{})
 			for valueKey, value := range distinct {
 				ids := schema.PropertyIndexLookup(key.label, key.prop, value)
 				matched := 0
@@ -520,17 +520,20 @@ func buildRelationshipBatchNodeMatchIndex(store storage.Engine, rows []map[strin
 					}
 				}
 				if matched != 1 {
-					needsScan = true
+					delete(idx, valueKey)
+					unresolved[valueKey] = value
 				}
 			}
-			if needsScan {
-				scanned, scanUnique, err := buildNodeBatchLabelMatchIndex(store, key, distinct)
+			if len(unresolved) > 0 {
+				scanned, scanUnique, err := buildNodeBatchLabelMatchIndex(store, key, unresolved)
 				if err != nil {
 					return nil, false, err
 				}
-				idx = scanned
 				if !scanUnique {
 					unique = false
+				}
+				for valueKey, node := range scanned {
+					idx[valueKey] = node
 				}
 			}
 			index[key] = idx

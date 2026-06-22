@@ -17,6 +17,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/cypher/testutil"
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
 
@@ -97,6 +98,51 @@ CREATE (s)-[:SUPPLIES]->(p)`
 	supplies, err := exec.Execute(ctx, `MATCH ()-[r:SUPPLIES]->() RETURN count(r) AS n`, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(50), supplies.Rows[0][0])
+}
+
+func TestNorthwindSeeder_ProductsIncompleteIndexedMatchBucketKeepsFastPath(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := testutil.SetupTestExecutorWithStore(t, store)
+	seedCategoriesAndSuppliers(t, exec, 4, 4)
+	ctx := context.Background()
+
+	schema := store.GetSchema()
+	require.NotNil(t, schema)
+	ids := schema.PropertyIndexLookup("Supplier", "supplierID", int64(2))
+	require.NotEmpty(t, ids)
+	for _, id := range ids {
+		require.NoError(t, schema.PropertyIndexDelete("Supplier", "supplierID", id, int64(2)))
+	}
+	require.Empty(t, schema.PropertyIndexLookup("Supplier", "supplierID", int64(2)))
+
+	rows := []interface{}{
+		map[string]interface{}{"productID": int64(101), "productName": "P101", "sku": "SKU-00101", "unitPrice": 1.25, "unitsInStock": int64(10), "discontinued": false, "description": "indexed supplier", "categoryID": int64(1), "supplierID": int64(1)},
+		map[string]interface{}{"productID": int64(102), "productName": "P102", "sku": "SKU-00102", "unitPrice": 2.50, "unitsInStock": int64(11), "discontinued": false, "description": "stale supplier", "categoryID": int64(2), "supplierID": int64(2)},
+		map[string]interface{}{"productID": int64(103), "productName": "P103", "sku": "SKU-00103", "unitPrice": 3.75, "unitsInStock": int64(12), "discontinued": false, "description": "indexed supplier again", "categoryID": int64(3), "supplierID": int64(3)},
+	}
+
+	query := `
+UNWIND $rows AS row
+MATCH (c:Category {categoryID: row.categoryID})
+MATCH (s:Supplier {supplierID: row.supplierID})
+CREATE (p:Product {productID: row.productID, productName: row.productName, sku: row.sku, unitPrice: row.unitPrice, unitsInStock: row.unitsInStock, discontinued: row.discontinued, description: row.description})
+CREATE (p)-[:PART_OF]->(c)
+CREATE (s)-[:SUPPLIES]->(p)`
+
+	_, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	trace := exec.LastHotPathTrace()
+	require.True(t, trace.UnwindMultiMatchCreateBatch,
+		"products seed with one stale supplier index entry must keep UnwindMultiMatchCreateBatch; got trace=%+v", trace)
+
+	products, err := exec.Execute(ctx, `MATCH (p:Product) RETURN count(p) AS n`, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(len(rows)), products.Rows[0][0])
+
+	supplies, err := exec.Execute(ctx, `MATCH ()-[r:SUPPLIES]->() RETURN count(r) AS n`, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(len(rows)), supplies.Rows[0][0])
 }
 
 // TestNorthwindSeeder_OrdersPass1HitsUnwindMultiMatchCreate verifies Pass 1
