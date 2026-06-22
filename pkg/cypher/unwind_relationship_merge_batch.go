@@ -48,7 +48,7 @@ type rowFieldReturnSpec struct {
 	alias    string
 }
 
-type relationshipBatchMatchKey struct {
+type nodeBatchMatchKey struct {
 	label string
 	prop  string
 }
@@ -488,74 +488,113 @@ func relationshipBatchRowHasRequiredFields(row map[string]interface{}, plan unwi
 	return true
 }
 
-func buildRelationshipBatchNodeMatchIndex(store storage.Engine, rows []map[string]interface{}, matches []matchClauseSpec) (map[relationshipBatchMatchKey]map[string]*storage.Node, bool, error) {
-	index := make(map[relationshipBatchMatchKey]map[string]*storage.Node, len(matches))
+func buildRelationshipBatchNodeMatchIndex(store storage.Engine, rows []map[string]interface{}, matches []matchClauseSpec) (map[nodeBatchMatchKey]map[string]*storage.Node, bool, error) {
+	index := make(map[nodeBatchMatchKey]map[string]*storage.Node, len(matches))
 	schema := store.GetSchema()
 	unique := true
-	matchGroups := make(map[relationshipBatchMatchKey][]matchClauseSpec, len(matches))
+	matchGroups := make(map[nodeBatchMatchKey][]matchClauseSpec, len(matches))
 	for _, match := range matches {
-		key := relationshipBatchMatchKey{label: match.label, prop: match.propName}
+		key := nodeBatchMatchKey{label: match.label, prop: match.propName}
 		matchGroups[key] = append(matchGroups[key], match)
 	}
 	for key, group := range matchGroups {
 		idx := make(map[string]*storage.Node, len(rows))
-		if schema != nil && schema.HasPropertyIndex(key.label, key.prop) {
-			distinct := make(map[string]interface{}, len(rows))
-			for _, match := range group {
-				for _, row := range rows {
-					if value, ok := row[match.rowField]; ok {
-						distinct[propEqKeyBatch(value)] = value
-					}
+		distinct := make(map[string]interface{}, len(rows))
+		for _, match := range group {
+			for _, row := range rows {
+				if value, ok := row[match.rowField]; ok {
+					distinct[propEqKeyBatch(value)] = value
 				}
 			}
+		}
+		if schema != nil && schema.HasPropertyIndex(key.label, key.prop) {
+			needsScan := false
 			for valueKey, value := range distinct {
 				ids := schema.PropertyIndexLookup(key.label, key.prop, value)
-				if len(ids) > 1 {
-					unique = false
-					break
-				}
+				matched := 0
 				for _, id := range ids {
 					node, err := store.GetNode(id)
-					if err == nil && node != nil {
+					if err == nil && nodeBatchMatchesValue(node, key, value) {
+						matched++
 						idx[valueKey] = node
-						break
 					}
+				}
+				if matched != 1 {
+					needsScan = true
+				}
+			}
+			if needsScan {
+				scanned, scanUnique, err := buildNodeBatchLabelMatchIndex(store, key, distinct)
+				if err != nil {
+					return nil, false, err
+				}
+				idx = scanned
+				if !scanUnique {
+					unique = false
 				}
 			}
 			index[key] = idx
 			continue
 		}
 
-		nodes, err := store.GetNodesByLabel(key.label)
+		scanned, scanUnique, err := buildNodeBatchLabelMatchIndex(store, key, distinct)
 		if err != nil {
-			return nil, false, fmt.Errorf("GetNodesByLabel(%s): %w", key.label, err)
+			return nil, false, err
 		}
-		for _, node := range nodes {
-			if node == nil || node.Properties == nil {
-				continue
-			}
-			value, ok := node.Properties[key.prop]
-			if !ok {
-				continue
-			}
-			valueKey := propEqKeyBatch(value)
-			if _, exists := idx[valueKey]; exists {
-				unique = false
-				break
-			}
-			idx[valueKey] = node
+		if !scanUnique {
+			unique = false
 		}
-		index[key] = idx
+		index[key] = scanned
 	}
 	return index, unique, nil
 }
 
-func lookupRelationshipBatchMatchedNode(index map[relationshipBatchMatchKey]map[string]*storage.Node, match matchClauseSpec, row map[string]interface{}) *storage.Node {
+func buildNodeBatchLabelMatchIndex(store storage.Engine, key nodeBatchMatchKey, distinct map[string]interface{}) (map[string]*storage.Node, bool, error) {
+	idx := make(map[string]*storage.Node, len(distinct))
+	nodes, err := store.GetNodesByLabel(key.label)
+	if err != nil {
+		return nil, false, fmt.Errorf("GetNodesByLabel(%s): %w", key.label, err)
+	}
+	unique := true
+	for _, node := range nodes {
+		if node == nil || node.Properties == nil {
+			continue
+		}
+		value, ok := node.Properties[key.prop]
+		if !ok {
+			continue
+		}
+		valueKey := propEqKeyBatch(value)
+		wantedValue, wanted := distinct[valueKey]
+		if !wanted || !nodeBatchMatchesValue(node, key, wantedValue) {
+			continue
+		}
+		if _, exists := idx[valueKey]; exists {
+			unique = false
+			continue
+		}
+		idx[valueKey] = node
+	}
+	return idx, unique, nil
+}
+
+func nodeBatchMatchesValue(node *storage.Node, key nodeBatchMatchKey, value interface{}) bool {
+	if node == nil || node.Properties == nil || !mergeNodeHasLabels(node, []string{key.label}) {
+		return false
+	}
+	nodeValue, ok := node.Properties[key.prop]
+	if !ok {
+		return false
+	}
+	return propEqKeyBatch(nodeValue) == propEqKeyBatch(value)
+}
+
+func lookupRelationshipBatchMatchedNode(index map[nodeBatchMatchKey]map[string]*storage.Node, match matchClauseSpec, row map[string]interface{}) *storage.Node {
 	value, ok := row[match.rowField]
 	if !ok {
 		return nil
 	}
-	return index[relationshipBatchMatchKey{label: match.label, prop: match.propName}][propEqKeyBatch(value)]
+	return index[nodeBatchMatchKey{label: match.label, prop: match.propName}][propEqKeyBatch(value)]
 }
 
 func normalizeRelationshipBatchRowProperties(row map[string]interface{}, vectorSetters []relationshipVectorSetterSpec) map[string]interface{} {

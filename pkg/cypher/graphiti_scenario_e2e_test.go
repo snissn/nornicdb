@@ -208,6 +208,58 @@ func TestGraphitiScenarioE2E_BulkEdgeSaveIndexedRepeatedEntityMatches(t *testing
 	require.Equal(t, int64(len(edges)), countEdges)
 }
 
+func TestGraphitiScenarioE2E_BulkEdgeSaveIndexedEntityMatchesSurviveIncompleteIndex(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE INDEX entity_uuid_idx IF NOT EXISTS FOR (n:Entity) ON (n.uuid)", nil)
+	require.NoError(t, err)
+
+	payload := buildGraphitiScenarioPayload(24, 64, 0, 8)
+	res, err := exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": payload.nodes})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(payload.nodes))
+
+	// Reproduce the stale-substrate shape: the logical nodes exist and are
+	// visible by label scan, but the declared property index is missing a
+	// subset of uuid entries. Relationship MATCH must use the index only as
+	// an accelerator, not as proof that those endpoint nodes are absent.
+	schema := ns.GetSchema()
+	require.NotNil(t, schema)
+	nodes, err := ns.GetNodesByLabel("Entity")
+	require.NoError(t, err)
+	require.NotEmpty(t, nodes)
+	removed := 0
+	for _, node := range nodes {
+		uuid, _ := node.Properties["uuid"].(string)
+		if uuid == "" {
+			continue
+		}
+		if uuid == "entity-000003" || uuid == "entity-000007" || uuid == "entity-000011" || uuid == "entity-000017" {
+			ids := schema.PropertyIndexLookup("Entity", "uuid", uuid)
+			require.NotEmpty(t, ids)
+			for _, id := range ids {
+				require.NoError(t, schema.PropertyIndexDelete("Entity", "uuid", id, uuid))
+			}
+			removed++
+		}
+	}
+	require.Equal(t, 4, removed)
+	require.Empty(t, schema.PropertyIndexLookup("Entity", "uuid", "entity-000003"))
+
+	res, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(payload.edges))
+	trace := exec.LastHotPathTrace()
+	require.True(t, trace.UnwindRelationshipMergeBatch)
+	require.True(t, trace.UnwindMergeChainBatch)
+
+	countEdges := mustCountRows(t, exec, ctx, "MATCH (:Entity)-[e:RELATES_TO]->(:Entity) WHERE e.group_id = $g RETURN count(e)", map[string]interface{}{"g": graphitiGroupID})
+	require.Equal(t, int64(len(payload.edges)), countEdges)
+}
+
 func TestGraphitiScenarioE2E_ExternalVectorIngestDoesNotUseExactScanFallbackBeforeWarmup(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")

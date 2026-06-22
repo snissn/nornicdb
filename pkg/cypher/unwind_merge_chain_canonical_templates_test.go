@@ -364,6 +364,58 @@ RETURN row.uuid AS uuid`
 	require.Equal(t, int64(len(rows)), count)
 }
 
+func TestUnwindRelationshipMergeBatch_IncompleteIndexedMatchBucketKeepsFastPath(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE INDEX service_key_idx IF NOT EXISTS FOR (n:Service) ON (n.key)", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE INDEX topic_key_idx IF NOT EXISTS FOR (n:Topic) ON (n.key)", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE INDEX tenant_key_idx IF NOT EXISTS FOR (n:Tenant) ON (n.key)", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `
+CREATE (:Service {key:'svc-1'}), (:Service {key:'svc-2'}),
+       (:Topic {key:'topic-1'}), (:Topic {key:'topic-2'}),
+       (:Tenant {key:'tenant-a'}), (:Tenant {key:'tenant-b'})
+`, nil)
+	require.NoError(t, err)
+
+	schema := store.GetSchema()
+	require.NotNil(t, schema)
+	ids := schema.PropertyIndexLookup("Topic", "key", "topic-1")
+	require.NotEmpty(t, ids)
+	for _, id := range ids {
+		require.NoError(t, schema.PropertyIndexDelete("Topic", "key", id, "topic-1"))
+	}
+	require.Empty(t, schema.PropertyIndexLookup("Topic", "key", "topic-1"))
+
+	query := `UNWIND $rows AS row
+MATCH (source:Service {key: row.source_key})
+MATCH (target:Topic {key: row.target_key})
+MATCH (tenant:Tenant {key: row.tenant})
+MERGE (source)-[rel:PUBLISHES {uuid: row.uuid, tenant: row.tenant}]->(target)
+SET rel = row
+WITH rel, row CALL db.create.setRelationshipVectorProperty(rel, "embedding", row.embedding)
+RETURN row.uuid AS uuid`
+	rows := []map[string]interface{}{
+		{"source_key": "svc-1", "target_key": "topic-1", "tenant": "tenant-a", "uuid": "edge-1", "embedding": []float64{1, 0, 0, 0}},
+		{"source_key": "svc-2", "target_key": "topic-2", "tenant": "tenant-b", "uuid": "edge-2", "embedding": []float64{0, 1, 0, 0}},
+	}
+
+	res, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(rows))
+	trace := exec.LastHotPathTrace()
+	require.True(t, trace.UnwindRelationshipMergeBatch)
+	require.True(t, trace.UnwindMergeChainBatch)
+
+	count := mustCountRows(t, exec, ctx, "MATCH (:Service)-[rel:PUBLISHES]->(:Topic) RETURN count(rel)", nil)
+	require.Equal(t, int64(len(rows)), count)
+}
+
 func BenchmarkUnwindRelationshipMergeBatch_NArityUpsertExisting(b *testing.B) {
 	baseStore := newTestMemoryEngine(b)
 	store := storage.NewNamespacedEngine(baseStore, "test")

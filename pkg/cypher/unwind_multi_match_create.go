@@ -137,15 +137,10 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 	pendingEdges := make([]*storage.Edge, 0, len(items)*(len(plan.edgeCreates)+1))
 
 	// Deterministic resolution rule (no heuristics): every MATCH in a bulk
-	// batch MUST resolve against the schema property index. If the user
-	// declared `CREATE INDEX … ON (label.prop)`, that index is authoritative
-	// and MUST be populated on every subsequent CREATE. Falling back to a
-	// label-scan preload would mask a broken index-maintenance path.
-	//
-	// If no index exists, we do NOT paper over the missing DDL with a
-	// label scan — we refuse the fast path and let the caller fall back.
-	// That keeps the bulk fast path's behaviour tied exactly to what the
-	// user's Cypher DDL declared.
+	// batch MUST have a declared schema property index. The index is used as
+	// the accelerator, but any unresolved requested value is verified by a
+	// bounded label scan so an incomplete index cannot silently drop rows.
+	// If no index exists, refuse the fast path and let the caller fall back.
 	schema := store.GetSchema()
 	for _, m := range plan.matches {
 		if schema == nil || !schema.HasPropertyIndex(m.label, m.propName) {
@@ -175,9 +170,9 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 	// The map key format mirrors propEqKeyBatch below so int64/float64
 	// numeric equivalents collide (a Bolt int64 row value and a float64
 	// stored property both hash to the same key).
-	batchIndex := make(map[struct{ label, prop string }]map[string]*storage.Node, len(plan.matches))
+	batchIndex := make(map[nodeBatchMatchKey]map[string]*storage.Node, len(plan.matches))
 	for _, m := range plan.matches {
-		key := struct{ label, prop string }{m.label, m.propName}
+		key := nodeBatchMatchKey{label: m.label, prop: m.propName}
 		if _, seen := batchIndex[key]; seen {
 			continue
 		}
@@ -202,15 +197,30 @@ func (e *StorageExecutor) executeUnwindMultiMatchCreateBatch(
 		// yields PREFIXED IDs, so a batched-read + map-lookup mismatches.
 		// GetNode handles both forms via idempotent prefixNodeID.
 		idx := make(map[string]*storage.Node, len(distinct))
+		needsScan := false
 		for k, val := range distinct {
 			ids := schema.PropertyIndexLookup(m.label, m.propName, val)
+			matched := 0
 			for _, id := range ids {
 				n, err := store.GetNode(id)
-				if err == nil && n != nil {
+				if err == nil && nodeBatchMatchesValue(n, key, val) {
+					matched++
 					idx[k] = n
-					break
 				}
 			}
+			if matched != 1 {
+				needsScan = true
+			}
+		}
+		if needsScan {
+			scanned, scanUnique, err := buildNodeBatchLabelMatchIndex(store, key, distinct)
+			if err != nil {
+				return nil, true, err
+			}
+			if !scanUnique {
+				return nil, false, nil
+			}
+			idx = scanned
 		}
 		batchIndex[key] = idx
 	}
@@ -288,7 +298,7 @@ func isSimpleWithPassthroughClause(clause string) bool {
 func (e *StorageExecutor) planUnwindMultiMatchCreateRowIndexed(
 	plan unwindMultiMatchCreatePlan,
 	row map[string]any,
-	batchIndex map[struct{ label, prop string }]map[string]*storage.Node,
+	batchIndex map[nodeBatchMatchKey]map[string]*storage.Node,
 	pendingNodes *[]*storage.Node, pendingEdges *[]*storage.Edge,
 ) error {
 	bound := make(map[string]*storage.Node, len(plan.matches)+len(plan.nodeCreates))
@@ -299,7 +309,7 @@ func (e *StorageExecutor) planUnwindMultiMatchCreateRowIndexed(
 		if !ok {
 			return nil
 		}
-		key := struct{ label, prop string }{m.label, m.propName}
+		key := nodeBatchMatchKey{label: m.label, prop: m.propName}
 		idx, ok := batchIndex[key]
 		if !ok {
 			return fmt.Errorf("internal: missing batch index for %s.%s", m.label, m.propName)
