@@ -174,6 +174,40 @@ func TestGraphitiScenarioE2E_LargePayloads(t *testing.T) {
 	require.LessOrEqual(t, len(res.Rows), 10)
 }
 
+func TestGraphitiScenarioE2E_BulkEdgeSaveIndexedRepeatedEntityMatches(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE INDEX entity_uuid_idx IF NOT EXISTS FOR (n:Entity) ON (n.uuid)", nil)
+	require.NoError(t, err)
+
+	nodes := []map[string]interface{}{
+		{"uuid": "source-1", "labels": []string{"Entity"}, "name_embedding": []float64{1, 0, 0}},
+		{"uuid": "source-2", "labels": []string{"Entity"}, "name_embedding": []float64{0, 1, 0}},
+		{"uuid": "target-1", "labels": []string{"Entity"}, "name_embedding": []float64{0, 0, 1}},
+		{"uuid": "target-2", "labels": []string{"Entity"}, "name_embedding": []float64{1, 1, 0}},
+	}
+	res, err := exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": nodes})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(nodes))
+
+	edges := []map[string]interface{}{
+		{"uuid": "edge-1", "source_node_uuid": "source-1", "target_node_uuid": "target-1", "group_id": graphitiGroupID, "fact": "source one relates to target one", "fact_embedding": []float64{1, 0, 0}},
+		{"uuid": "edge-2", "source_node_uuid": "source-2", "target_node_uuid": "target-2", "group_id": graphitiGroupID, "fact": "source two relates to target two", "fact_embedding": []float64{0, 1, 0}},
+	}
+	res, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": edges})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(edges))
+	trace := exec.LastHotPathTrace()
+	require.True(t, trace.UnwindRelationshipMergeBatch)
+	require.True(t, trace.UnwindMergeChainBatch)
+
+	countEdges := mustCountRows(t, exec, ctx, "MATCH (:Entity)-[e:RELATES_TO]->(:Entity) WHERE e.group_id = $g RETURN count(e)", map[string]interface{}{"g": graphitiGroupID})
+	require.Equal(t, int64(len(edges)), countEdges)
+}
+
 func TestGraphitiScenarioE2E_ExternalVectorIngestDoesNotUseExactScanFallbackBeforeWarmup(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")

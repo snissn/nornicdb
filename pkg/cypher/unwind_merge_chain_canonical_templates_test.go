@@ -330,6 +330,40 @@ RETURN row.uuid AS uuid`
 	require.False(t, exec.LastHotPathTrace().UnwindRelationshipMergeBatch)
 }
 
+func TestUnwindRelationshipMergeBatch_RepeatedIndexedMatchKeyUsesAllRowFields(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE INDEX component_key_idx IF NOT EXISTS FOR (n:Component) ON (n.key)", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Component {key:'left-1'}), (:Component {key:'left-2'}), (:Component {key:'right-1'}), (:Component {key:'right-2'})", nil)
+	require.NoError(t, err)
+
+	query := `UNWIND $rows AS row
+MATCH (left:Component {key: row.left_key})
+MATCH (right:Component {key: row.right_key})
+MERGE (left)-[rel:DEPENDS_ON {uuid: row.uuid}]->(right)
+SET rel = row
+WITH rel, row CALL db.create.setRelationshipVectorProperty(rel, "embedding", row.embedding)
+RETURN row.uuid AS uuid`
+	rows := []map[string]interface{}{
+		{"left_key": "left-1", "right_key": "right-1", "uuid": "edge-1", "embedding": []float64{1, 0, 0}},
+		{"left_key": "left-2", "right_key": "right-2", "uuid": "edge-2", "embedding": []float64{0, 1, 0}},
+	}
+
+	res, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(rows))
+	trace := exec.LastHotPathTrace()
+	require.True(t, trace.UnwindRelationshipMergeBatch)
+	require.True(t, trace.UnwindMergeChainBatch)
+
+	count := mustCountRows(t, exec, ctx, "MATCH (:Component)-[rel:DEPENDS_ON]->(:Component) RETURN count(rel)", nil)
+	require.Equal(t, int64(len(rows)), count)
+}
+
 func BenchmarkUnwindRelationshipMergeBatch_NArityUpsertExisting(b *testing.B) {
 	baseStore := newTestMemoryEngine(b)
 	store := storage.NewNamespacedEngine(baseStore, "test")

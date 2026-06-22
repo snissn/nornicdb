@@ -492,21 +492,24 @@ func buildRelationshipBatchNodeMatchIndex(store storage.Engine, rows []map[strin
 	index := make(map[relationshipBatchMatchKey]map[string]*storage.Node, len(matches))
 	schema := store.GetSchema()
 	unique := true
+	matchGroups := make(map[relationshipBatchMatchKey][]matchClauseSpec, len(matches))
 	for _, match := range matches {
 		key := relationshipBatchMatchKey{label: match.label, prop: match.propName}
-		if _, exists := index[key]; exists {
-			continue
-		}
+		matchGroups[key] = append(matchGroups[key], match)
+	}
+	for key, group := range matchGroups {
 		idx := make(map[string]*storage.Node, len(rows))
-		if schema != nil && schema.HasPropertyIndex(match.label, match.propName) {
+		if schema != nil && schema.HasPropertyIndex(key.label, key.prop) {
 			distinct := make(map[string]interface{}, len(rows))
-			for _, row := range rows {
-				if value, ok := row[match.rowField]; ok {
-					distinct[propEqKeyBatch(value)] = value
+			for _, match := range group {
+				for _, row := range rows {
+					if value, ok := row[match.rowField]; ok {
+						distinct[propEqKeyBatch(value)] = value
+					}
 				}
 			}
 			for valueKey, value := range distinct {
-				ids := schema.PropertyIndexLookup(match.label, match.propName, value)
+				ids := schema.PropertyIndexLookup(key.label, key.prop, value)
 				if len(ids) > 1 {
 					unique = false
 					break
@@ -523,15 +526,15 @@ func buildRelationshipBatchNodeMatchIndex(store storage.Engine, rows []map[strin
 			continue
 		}
 
-		nodes, err := store.GetNodesByLabel(match.label)
+		nodes, err := store.GetNodesByLabel(key.label)
 		if err != nil {
-			return nil, false, fmt.Errorf("GetNodesByLabel(%s): %w", match.label, err)
+			return nil, false, fmt.Errorf("GetNodesByLabel(%s): %w", key.label, err)
 		}
 		for _, node := range nodes {
 			if node == nil || node.Properties == nil {
 				continue
 			}
-			value, ok := node.Properties[match.propName]
+			value, ok := node.Properties[key.prop]
 			if !ok {
 				continue
 			}
