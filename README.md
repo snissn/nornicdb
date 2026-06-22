@@ -69,6 +69,8 @@ Open [http://localhost:7474](http://localhost:7474) for the admin UI. For NVIDIA
 
 NornicDB is a graph database for workloads that need graph traversal, vector retrieval, and historical truth in the same system. It speaks Neo4j's language through Bolt and Cypher, exposes REST, GraphQL, and gRPC interfaces, and can preserve Qdrant-style client workflows where that helps migration.
 
+The architecture draws from [research](https://github.com/orneryd/NornicDB/blob/main/docs/research/papers/persistence-semantics-nornicdb/references.bib) in Temporal GraphRAG, agent memory systems, event-sourced decision memory, and persistence semantics for AI agents. These ideas appear in NornicDB as graph-native support for temporal facts, canonical knowledge versioning, replayable history, policy-driven memory retention, and audit-friendly retrieval.
+
 It is built for knowledge systems, agent memory, Graph-RAG, and canonical truth stores where semantic search is only part of the query. The design goal is not to bolt a vector store onto a graph database. The design goal is one execution path for graph, vector, temporal, and audit-oriented workloads.
 
 ## Why NornicDB Is Different
