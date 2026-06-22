@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/search"
@@ -547,6 +548,60 @@ func BenchmarkGraphitiScenarioHotspots(b *testing.B) {
 			require.NoError(b, err)
 		}
 	})
+}
+
+func BenchmarkGraphitiBulkEdgeSaveIncompleteIndex(b *testing.B) {
+	base := newTestMemoryEngine(b)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	exec.cache = nil
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE INDEX entity_uuid_idx IF NOT EXISTS FOR (n:Entity) ON (n.uuid)", nil)
+	require.NoError(b, err)
+
+	payload := buildGraphitiScenarioPayload(64, 256, 0, 16)
+	res, err := exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": payload.nodes})
+	require.NoError(b, err)
+	require.Len(b, res.Rows, len(payload.nodes))
+
+	schema := ns.GetSchema()
+	require.NotNil(b, schema)
+	entityNodes, err := ns.GetNodesByLabel("Entity")
+	require.NoError(b, err)
+	require.NotEmpty(b, entityNodes)
+
+	removed := 0
+	for _, node := range entityNodes {
+		uuid, _ := node.Properties["uuid"].(string)
+		if uuid == "" {
+			continue
+		}
+		if strings.HasSuffix(uuid, "003") || strings.HasSuffix(uuid, "007") || strings.HasSuffix(uuid, "011") || strings.HasSuffix(uuid, "017") {
+			ids := schema.PropertyIndexLookup("Entity", "uuid", uuid)
+			require.NotEmpty(b, ids)
+			for _, id := range ids {
+				require.NoError(b, schema.PropertyIndexDelete("Entity", "uuid", id, uuid))
+			}
+			removed++
+		}
+	}
+	require.NotZero(b, removed)
+
+	// Warm one-time executor/query setup so the measurement reflects the
+	// steady-state repeated ingest path rather than setup overhead.
+	res, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
+	require.NoError(b, err)
+	require.Len(b, res.Rows, len(payload.edges))
+	require.True(b, exec.LastHotPathTrace().UnwindRelationshipMergeBatch)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
+		require.NoError(b, err)
+		require.Len(b, res.Rows, len(payload.edges))
+	}
 }
 
 func BenchmarkGraphitiRelationshipVectorFastPath(b *testing.B) {

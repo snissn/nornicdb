@@ -68,6 +68,8 @@ u1,u2,KNOWS,2024
 	require.Equal(t, "KNOWS", edges[0].Type)
 	require.Equal(t, int64(2024), edges[0].Properties["since"])
 	require.True(t, report.IndexesBuilt)
+	_, err = os.Stat(filepath.Join(dir, "search", "mydb", "hnsw"))
+	require.NoError(t, err)
 
 	constraints := engine.GetSchema().GetConstraintsForLabels([]string{"Person"})
 	require.Len(t, constraints, 1)

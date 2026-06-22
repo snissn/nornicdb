@@ -110,6 +110,10 @@ func TestEvaluateExpression_FullFunctionAdvancedBranches(t *testing.T) {
 		"(CASE WHEN n.age > 18 THEN 'adult' ELSE 'minor' END)",
 		nodes, nil, nil, nil, nil, 0,
 	))
+	assert.Equal(t, "adult", exec.evaluateExpressionWithContext(ctx,
+		"CASE\nWHEN n.age > 18 THEN 'adult' ELSE 'minor'\nEND",
+		nodes, nil,
+	))
 
 	// Array indexing and slicing.
 	assert.EqualValues(t, int64(10), exec.evaluateExpressionWithContextFullFunctions(ctx,
@@ -172,4 +176,33 @@ func TestEvaluateExpression_FullFunctionAdvancedBranches(t *testing.T) {
 		"exists(n.missing)",
 		nodes, nil, nil, nil, nil, 0,
 	))
+}
+
+func BenchmarkEvaluateExpressionWithContext_HotPredicate(b *testing.B) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(b), "bench"))
+	ctx := context.Background()
+	nodes := map[string]*storage.Node{
+		"n": {
+			ID:     "n1",
+			Labels: []string{"Entity"},
+			Properties: map[string]interface{}{
+				"uuid":  "entity-123",
+				"name":  "Alice Johnson",
+				"email": "alice@example.com",
+			},
+		},
+	}
+	expr := "n.uuid IS NOT NULL AND n.name CONTAINS 'Alice' AND n.email STARTS WITH 'alice'"
+
+	// Prime one-time executor/query setup before measurement so the benchmark
+	// reflects steady-state repeated row evaluation, which is the hot path.
+	require.Equal(b, true, exec.evaluateExpressionWithContext(ctx, expr, nodes, nil))
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if exec.evaluateExpressionWithContext(ctx, expr, nodes, nil) != true {
+			b.Fatal("predicate should remain true")
+		}
+	}
 }

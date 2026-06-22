@@ -67,6 +67,142 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+func asciiLowerByte(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+func equalFoldASCII(text, other string) bool {
+	if len(text) != len(other) {
+		return false
+	}
+	for i := 0; i < len(text); i++ {
+		if asciiLowerByte(text[i]) != asciiLowerByte(other[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasPrefixFoldASCII(text, prefix string) bool {
+	return len(text) >= len(prefix) && equalFoldASCII(text[:len(prefix)], prefix)
+}
+
+func hasSuffixFoldASCII(text, suffix string) bool {
+	return len(text) >= len(suffix) && equalFoldASCII(text[len(text)-len(suffix):], suffix)
+}
+
+func isASCIIWhitespace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+func hasKeywordPrefixFoldASCII(text, keyword string) bool {
+	if len(text) < len(keyword) || !equalFoldASCII(text[:len(keyword)], keyword) {
+		return false
+	}
+	return len(text) == len(keyword) || isASCIIWhitespace(text[len(keyword)])
+}
+
+func operatorMatchesAt(expr, op string, idx int, caseInsensitive bool) bool {
+	for offset := 0; offset < len(op); offset++ {
+		exprByte := expr[idx+offset]
+		opByte := op[offset]
+		if caseInsensitive {
+			exprByte = asciiLowerByte(exprByte)
+			opByte = asciiLowerByte(opByte)
+		}
+		if exprByte != opByte {
+			return false
+		}
+	}
+	return true
+}
+
+func findTopLevelOperator(expr, op string, caseInsensitive, trackBrackets bool) int {
+	if len(expr) < len(op) {
+		return -1
+	}
+
+	inQuote := false
+	quoteChar := rune(0)
+	parenDepth := 0
+	bracketDepth := 0
+
+	for i := 0; i <= len(expr)-len(op); i++ {
+		c := rune(expr[i])
+		switch {
+		case c == '\'' || c == '"':
+			if !inQuote {
+				inQuote = true
+				quoteChar = c
+			} else if c == quoteChar {
+				inQuote = false
+			}
+		case c == '(' && !inQuote:
+			parenDepth++
+		case c == ')' && !inQuote:
+			parenDepth--
+		case trackBrackets && c == '[' && !inQuote:
+			bracketDepth++
+		case trackBrackets && c == ']' && !inQuote:
+			bracketDepth--
+		case !inQuote && parenDepth == 0 && (!trackBrackets || bracketDepth == 0):
+			if operatorMatchesAt(expr, op, i, caseInsensitive) {
+				if op == "=" {
+					if i > 0 && (expr[i-1] == '<' || expr[i-1] == '>' || expr[i-1] == '!') {
+						continue
+					}
+					if i < len(expr)-1 && expr[i+1] == '~' {
+						continue
+					}
+				}
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+func splitByOperatorWithOptions(expr, op string, caseInsensitive, trackBrackets bool) (string, string, bool) {
+	idx := findTopLevelOperator(expr, op, caseInsensitive, trackBrackets)
+	if idx < 0 {
+		return "", "", false
+	}
+	left := strings.TrimSpace(expr[:idx])
+	right := strings.TrimSpace(expr[idx+len(op):])
+	return left, right, true
+}
+
+func hasTopLevelExpressionOperator(expr string) bool {
+	if expr == "" {
+		return false
+	}
+	switch expr[0] {
+	case '(', '[', '{':
+		return false
+	}
+	if hasKeywordPrefixFoldASCII(expr, "case") {
+		return false
+	}
+	if hasPrefixFoldASCII(expr, "not ") || hasSuffixFoldASCII(expr, " is null") || hasSuffixFoldASCII(expr, " is not null") {
+		return true
+	}
+	for _, op := range []string{" BETWEEN ", " AND ", " OR ", " XOR ", " STARTS WITH ", " ENDS WITH ", " CONTAINS ", " NOT IN ", " IN "} {
+		if findTopLevelOperator(expr, op, true, true) >= 0 {
+			return true
+		}
+	}
+	for _, op := range []string{"<>", "<=", ">=", "=~", "!=", "=", "<", ">", " + ", "+", "*", "/", "%", " - ", "-"} {
+		if findTopLevelOperator(expr, op, false, true) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // ========================================
 // Logical Operators
 // ========================================
@@ -93,34 +229,7 @@ import (
 //	hasLogicalOperator("name CONTAINS 'AND'", " AND ") // false (inside quotes)
 //	hasLogicalOperator("(a AND b) OR c", " AND ")      // false (inside parens)
 func (e *StorageExecutor) hasLogicalOperator(expr, op string) bool {
-	upperExpr := strings.ToUpper(expr)
-	upperOp := strings.ToUpper(op)
-
-	inQuote := false
-	quoteChar := rune(0)
-	parenDepth := 0
-
-	for i := 0; i <= len(upperExpr)-len(upperOp); i++ {
-		c := rune(expr[i])
-		switch {
-		case c == '\'' || c == '"':
-			if !inQuote {
-				inQuote = true
-				quoteChar = c
-			} else if c == quoteChar {
-				inQuote = false
-			}
-		case c == '(' && !inQuote:
-			parenDepth++
-		case c == ')' && !inQuote:
-			parenDepth--
-		case !inQuote && parenDepth == 0:
-			if upperExpr[i:i+len(upperOp)] == upperOp {
-				return true
-			}
-		}
-	}
-	return false
+	return findTopLevelOperator(expr, op, true, false) >= 0
 }
 
 // evaluateLogicalAnd evaluates expr1 AND expr2.
@@ -145,18 +254,15 @@ func (e *StorageExecutor) hasLogicalOperator(expr, op string) bool {
 //	evaluateLogicalAnd("a = 1 AND b = 2", nodes, rels)  // true if both conditions match
 //	evaluateLogicalAnd("true AND false", nodes, rels)  // false
 func (e *StorageExecutor) evaluateLogicalAnd(ctx context.Context, expr string, nodes map[string]*storage.Node, rels map[string]*storage.Edge) interface{} {
-	parts := e.splitByOperator(expr, " AND ")
-	if len(parts) < 2 {
+	left, right, ok := splitByOperatorWithOptions(expr, " AND ", true, false)
+	if !ok {
 		return nil
 	}
 
-	for _, part := range parts {
-		result := e.evaluateExpressionWithContext(ctx, part, nodes, rels)
-		if result != true {
-			return false
-		}
+	if e.evaluateExpressionWithContext(ctx, left, nodes, rels) != true {
+		return false
 	}
-	return true
+	return e.evaluateExpressionWithContext(ctx, right, nodes, rels) == true
 }
 
 // evaluateLogicalOr evaluates expr1 OR expr2.
@@ -181,18 +287,15 @@ func (e *StorageExecutor) evaluateLogicalAnd(ctx context.Context, expr string, n
 //	evaluateLogicalOr("a = 1 OR b = 2", nodes, rels)  // true if either condition matches
 //	evaluateLogicalOr("false OR true", nodes, rels)  // true
 func (e *StorageExecutor) evaluateLogicalOr(ctx context.Context, expr string, nodes map[string]*storage.Node, rels map[string]*storage.Edge) interface{} {
-	parts := e.splitByOperator(expr, " OR ")
-	if len(parts) < 2 {
+	left, right, ok := splitByOperatorWithOptions(expr, " OR ", true, false)
+	if !ok {
 		return nil
 	}
 
-	for _, part := range parts {
-		result := e.evaluateExpressionWithContext(ctx, part, nodes, rels)
-		if result == true {
-			return true
-		}
+	if e.evaluateExpressionWithContext(ctx, left, nodes, rels) == true {
+		return true
 	}
-	return false
+	return e.evaluateExpressionWithContext(ctx, right, nodes, rels) == true
 }
 
 // evaluateLogicalXor evaluates expr1 XOR expr2.
@@ -217,13 +320,13 @@ func (e *StorageExecutor) evaluateLogicalOr(ctx context.Context, expr string, no
 //	evaluateLogicalXor("true XOR true", nodes, rels)   // false
 //	evaluateLogicalXor("false XOR false", nodes, rels) // false
 func (e *StorageExecutor) evaluateLogicalXor(ctx context.Context, expr string, nodes map[string]*storage.Node, rels map[string]*storage.Edge) interface{} {
-	parts := e.splitByOperator(expr, " XOR ")
-	if len(parts) != 2 {
+	leftExpr, rightExpr, ok := splitByOperatorWithOptions(expr, " XOR ", true, false)
+	if !ok {
 		return nil
 	}
 
-	left := e.evaluateExpressionWithContext(ctx, parts[0], nodes, rels) == true
-	right := e.evaluateExpressionWithContext(ctx, parts[1], nodes, rels) == true
+	left := e.evaluateExpressionWithContext(ctx, leftExpr, nodes, rels) == true
+	right := e.evaluateExpressionWithContext(ctx, rightExpr, nodes, rels) == true
 	return left != right
 }
 
@@ -290,40 +393,7 @@ func (e *StorageExecutor) hasOperatorOutsideQuotes(expr, op string) bool {
 	if len(expr) < len(op) || !strings.Contains(expr, op) {
 		return false
 	}
-	inQuote := false
-	quoteChar := rune(0)
-	parenDepth := 0
-
-	for i := 0; i <= len(expr)-len(op); i++ {
-		c := rune(expr[i])
-		switch {
-		case c == '\'' || c == '"':
-			if !inQuote {
-				inQuote = true
-				quoteChar = c
-			} else if c == quoteChar {
-				inQuote = false
-			}
-		case c == '(' && !inQuote:
-			parenDepth++
-		case c == ')' && !inQuote:
-			parenDepth--
-		case !inQuote && parenDepth == 0:
-			if expr[i:i+len(op)] == op {
-				// Make sure = is not part of <= or >=
-				if op == "=" {
-					if i > 0 && (expr[i-1] == '<' || expr[i-1] == '>' || expr[i-1] == '!') {
-						continue
-					}
-					if i < len(expr)-1 && expr[i+1] == '~' {
-						continue
-					}
-				}
-				return true
-			}
-		}
-	}
-	return false
+	return findTopLevelOperator(expr, op, false, false) >= 0
 }
 
 // evaluateComparisonExpr evaluates comparison expressions.
@@ -364,10 +434,10 @@ func (e *StorageExecutor) evaluateComparisonExpr(ctx context.Context, expr strin
 	}
 
 	for _, op := range ops {
-		parts := e.splitByOperator(expr, op.op)
-		if len(parts) == 2 {
-			left := e.evaluateExpressionWithContext(ctx, parts[0], nodes, rels)
-			right := e.evaluateExpressionWithContext(ctx, parts[1], nodes, rels)
+		leftExpr, rightExpr, ok := splitByOperatorWithOptions(expr, op.op, false, false)
+		if ok {
+			left := e.evaluateExpressionWithContext(ctx, leftExpr, nodes, rels)
+			right := e.evaluateExpressionWithContext(ctx, rightExpr, nodes, rels)
 			return op.eval(left, right)
 		}
 	}
@@ -437,49 +507,49 @@ func (e *StorageExecutor) hasArithmeticOperator(expr string) bool {
 func (e *StorageExecutor) evaluateArithmeticExpr(ctx context.Context, expr string, nodes map[string]*storage.Node, rels map[string]*storage.Edge) interface{} {
 	// Handle + operator (date + duration, or numeric addition)
 	// Try with spaces first, then without
-	if parts := e.splitByOperator(expr, " + "); len(parts) == 2 {
-		left := e.evaluateExpressionWithContext(ctx, parts[0], nodes, rels)
-		right := e.evaluateExpressionWithContext(ctx, parts[1], nodes, rels)
+	if leftExpr, rightExpr, ok := splitByOperatorWithOptions(expr, " + ", true, false); ok {
+		left := e.evaluateExpressionWithContext(ctx, leftExpr, nodes, rels)
+		right := e.evaluateExpressionWithContext(ctx, rightExpr, nodes, rels)
 		return e.add(left, right)
 	}
-	if parts := e.splitByOperator(expr, "+"); len(parts) == 2 {
-		left := e.evaluateExpressionWithContext(ctx, parts[0], nodes, rels)
-		right := e.evaluateExpressionWithContext(ctx, parts[1], nodes, rels)
+	if leftExpr, rightExpr, ok := splitByOperatorWithOptions(expr, "+", true, false); ok {
+		left := e.evaluateExpressionWithContext(ctx, leftExpr, nodes, rels)
+		right := e.evaluateExpressionWithContext(ctx, rightExpr, nodes, rels)
 		return e.add(left, right)
 	}
 
 	// Handle * operator
-	if parts := e.splitByOperator(expr, "*"); len(parts) == 2 {
-		left := e.evaluateExpressionWithContext(ctx, parts[0], nodes, rels)
-		right := e.evaluateExpressionWithContext(ctx, parts[1], nodes, rels)
+	if leftExpr, rightExpr, ok := splitByOperatorWithOptions(expr, "*", true, false); ok {
+		left := e.evaluateExpressionWithContext(ctx, leftExpr, nodes, rels)
+		right := e.evaluateExpressionWithContext(ctx, rightExpr, nodes, rels)
 		return e.multiply(left, right)
 	}
 
 	// Handle / operator
-	if parts := e.splitByOperator(expr, "/"); len(parts) == 2 {
-		left := e.evaluateExpressionWithContext(ctx, parts[0], nodes, rels)
-		right := e.evaluateExpressionWithContext(ctx, parts[1], nodes, rels)
+	if leftExpr, rightExpr, ok := splitByOperatorWithOptions(expr, "/", true, false); ok {
+		left := e.evaluateExpressionWithContext(ctx, leftExpr, nodes, rels)
+		right := e.evaluateExpressionWithContext(ctx, rightExpr, nodes, rels)
 		return e.divide(left, right)
 	}
 
 	// Handle % operator
-	if parts := e.splitByOperator(expr, "%"); len(parts) == 2 {
-		left := e.evaluateExpressionWithContext(ctx, parts[0], nodes, rels)
-		right := e.evaluateExpressionWithContext(ctx, parts[1], nodes, rels)
+	if leftExpr, rightExpr, ok := splitByOperatorWithOptions(expr, "%", true, false); ok {
+		left := e.evaluateExpressionWithContext(ctx, leftExpr, nodes, rels)
+		right := e.evaluateExpressionWithContext(ctx, rightExpr, nodes, rels)
 		return e.modulo(left, right)
 	}
 
 	// Handle - operator (binary subtraction, not unary minus)
 	// Try with spaces first, then without (but be careful with unary minus)
-	if parts := e.splitByOperator(expr, " - "); len(parts) == 2 {
-		left := e.evaluateExpressionWithContext(ctx, parts[0], nodes, rels)
-		right := e.evaluateExpressionWithContext(ctx, parts[1], nodes, rels)
+	if leftExpr, rightExpr, ok := splitByOperatorWithOptions(expr, " - ", true, false); ok {
+		left := e.evaluateExpressionWithContext(ctx, leftExpr, nodes, rels)
+		right := e.evaluateExpressionWithContext(ctx, rightExpr, nodes, rels)
 		return e.subtract(left, right)
 	}
 	// For - without spaces, only split if both sides would be valid expressions
-	if parts := e.splitByOperator(expr, "-"); len(parts) == 2 && parts[0] != "" {
-		left := e.evaluateExpressionWithContext(ctx, parts[0], nodes, rels)
-		right := e.evaluateExpressionWithContext(ctx, parts[1], nodes, rels)
+	if leftExpr, rightExpr, ok := splitByOperatorWithOptions(expr, "-", true, false); ok && leftExpr != "" {
+		left := e.evaluateExpressionWithContext(ctx, leftExpr, nodes, rels)
+		right := e.evaluateExpressionWithContext(ctx, rightExpr, nodes, rels)
 		if left != nil && right != nil {
 			return e.subtract(left, right)
 		}
@@ -511,41 +581,11 @@ func (e *StorageExecutor) evaluateArithmeticExpr(ctx context.Context, expr strin
 //	splitByOperator("'a + b' + c", " + ")        // ["'a + b'", "c"]
 //	splitByOperator("(a + b) + c", " + ")        // ["(a + b)", "c"]
 func (e *StorageExecutor) splitByOperator(expr, op string) []string {
-	inQuote := false
-	quoteChar := rune(0)
-	parenDepth := 0
-	upperExpr := strings.ToUpper(expr)
-	upperOp := strings.ToUpper(op)
-
-	for i := 0; i <= len(expr)-len(op); i++ {
-		c := rune(expr[i])
-		switch {
-		case c == '\'' || c == '"':
-			if !inQuote {
-				inQuote = true
-				quoteChar = c
-			} else if c == quoteChar {
-				inQuote = false
-			}
-		case c == '(' && !inQuote:
-			parenDepth++
-		case c == ')' && !inQuote:
-			parenDepth--
-		case !inQuote && parenDepth == 0:
-			if upperExpr[i:i+len(upperOp)] == upperOp {
-				// Additional check for = not being part of <= or >=
-				if op == "=" {
-					if i > 0 && (expr[i-1] == '<' || expr[i-1] == '>' || expr[i-1] == '!') {
-						continue
-					}
-				}
-				left := strings.TrimSpace(expr[:i])
-				right := strings.TrimSpace(expr[i+len(op):])
-				return []string{left, right}
-			}
-		}
+	left, right, ok := splitByOperatorWithOptions(expr, op, true, false)
+	if !ok {
+		return []string{expr}
 	}
-	return []string{expr}
+	return []string{left, right}
 }
 
 // ========================================
@@ -812,38 +852,5 @@ func (e *StorageExecutor) subtract(left, right interface{}) interface{} {
 //	hasStringPredicate("n.name CONTAINS 'test'", " CONTAINS ")  // true
 //	hasStringPredicate("'CONTAINS' = n.name", " CONTAINS ")     // false (in quotes)
 func (e *StorageExecutor) hasStringPredicate(expr, predicate string) bool {
-	inQuote := false
-	quoteChar := rune(0)
-	parenDepth := 0
-	bracketDepth := 0
-
-	if len(expr) < len(predicate) {
-		return false
-	}
-
-	for i := 0; i <= len(expr)-len(predicate); i++ {
-		c := rune(expr[i])
-		switch {
-		case c == '\'' || c == '"':
-			if !inQuote {
-				inQuote = true
-				quoteChar = c
-			} else if c == quoteChar {
-				inQuote = false
-			}
-		case c == '(' && !inQuote:
-			parenDepth++
-		case c == ')' && !inQuote:
-			parenDepth--
-		case c == '[' && !inQuote:
-			bracketDepth++
-		case c == ']' && !inQuote:
-			bracketDepth--
-		case !inQuote && parenDepth == 0 && bracketDepth == 0:
-			if strings.EqualFold(expr[i:i+len(predicate)], predicate) {
-				return true
-			}
-		}
-	}
-	return false
+	return findTopLevelOperator(expr, predicate, true, true) >= 0
 }

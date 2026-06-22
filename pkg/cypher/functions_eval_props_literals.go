@@ -127,16 +127,9 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullPropsLiterals(
 	}
 
 	// String literal (single or double quotes)
-	if len(expr) >= 2 {
-		if expr[0] == '\'' && expr[len(expr)-1] == '\'' {
-			if decoded, ok := decodeCypherQuotedString(expr); ok {
-				return decoded
-			}
-		}
-		if expr[0] == '"' && expr[len(expr)-1] == '"' {
-			if decoded, ok := decodeCypherQuotedString(expr); ok {
-				return decoded
-			}
+	if isWholeCypherQuotedString(expr) {
+		if decoded, ok := decodeCypherQuotedString(expr); ok {
+			return decoded
 		}
 	}
 

@@ -6,6 +6,7 @@ package cypher
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -54,5 +55,159 @@ func (e *StorageExecutor) evaluateExpressionWithContextFull(ctx context.Context,
 	if v, ok := resolveParamPathRef(ctx, expr); ok {
 		return normalizePropValue(v)
 	}
+	if v, ok := e.evaluateExpressionFastLeaf(expr, nodes, rels, paths); ok {
+		return v
+	}
+	if hasTopLevelExpressionOperator(expr) {
+		return e.evaluateExpressionWithContextFullOperators(ctx, expr, "", nodes, rels, paths, allPathEdges, allPathNodes, pathLength)
+	}
 	return e.evaluateExpressionWithContextFullFunctions(ctx, expr, nodes, rels, paths, allPathEdges, allPathNodes, pathLength)
+}
+
+func isSimpleIdentifierOrProperty(expr string) bool {
+	if expr == "" {
+		return false
+	}
+	expectIdentStart := true
+	for i := 0; i < len(expr); i++ {
+		c := expr[i]
+		switch {
+		case c == '.':
+			if expectIdentStart {
+				return false
+			}
+			expectIdentStart = true
+		case c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
+			expectIdentStart = false
+		case c >= '0' && c <= '9':
+			if expectIdentStart {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return !expectIdentStart
+}
+
+func (e *StorageExecutor) evaluateExpressionFastLeaf(expr string, nodes map[string]*storage.Node, rels map[string]*storage.Edge, paths map[string]*PathResult) (interface{}, bool) {
+	if isWholeCypherQuotedString(expr) {
+		if decoded, ok := decodeCypherQuotedString(expr); ok {
+			return decoded, true
+		}
+	}
+
+	if equalFoldASCII(expr, "null") {
+		return nil, false
+	}
+	if equalFoldASCII(expr, "true") {
+		return true, true
+	}
+	if equalFoldASCII(expr, "false") {
+		return false, true
+	}
+
+	if exprCanBeNumber(expr) {
+		if num, err := strconv.ParseInt(expr, 10, 64); err == nil {
+			return num, true
+		}
+		if num, err := strconv.ParseFloat(expr, 64); err == nil {
+			return num, true
+		}
+	}
+
+	if !isSimpleIdentifierOrProperty(expr) {
+		return nil, false
+	}
+
+	if dotIdx := strings.IndexByte(expr, '.'); dotIdx > 0 {
+		varName := expr[:dotIdx]
+		propName := expr[dotIdx+1:]
+
+		if node, ok := nodes[varName]; ok {
+			if node == nil {
+				return nil, true
+			}
+			if propName == "has_embedding" {
+				if node.EmbedMeta != nil {
+					if val, ok := node.EmbedMeta["has_embedding"]; ok {
+						return val, true
+					}
+				}
+				return len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0, true
+			}
+			if val, ok := node.Properties[propName]; ok {
+				return val, true
+			}
+			return nil, true
+		}
+		if rel, ok := rels[varName]; ok {
+			if rel == nil {
+				return nil, true
+			}
+			if val, ok := rel.Properties[propName]; ok {
+				return val, true
+			}
+			return nil, true
+		}
+		if val, ok := e.fabricRecordBindings[varName]; ok {
+			switch v := val.(type) {
+			case map[string]interface{}:
+				if propVal, exists := v[propName]; exists {
+					return propVal, true
+				}
+				return nil, true
+			case *storage.Node:
+				if propVal, exists := v.Properties[propName]; exists {
+					return propVal, true
+				}
+				return nil, true
+			}
+		}
+		return nil, false
+	}
+
+	if node, ok := nodes[expr]; ok {
+		if node == nil {
+			return nil, true
+		}
+		if len(node.Properties) == 1 {
+			if val, hasValue := node.Properties["value"]; hasValue {
+				return val, true
+			}
+		}
+		return node, true
+	}
+	if rel, ok := rels[expr]; ok {
+		if rel == nil {
+			return nil, true
+		}
+		return rel, true
+	}
+	if val, ok := e.fabricRecordBindings[expr]; ok {
+		return val, true
+	}
+	if paths != nil {
+		if pathResult, ok := paths[expr]; ok && pathResult != nil {
+			return map[string]interface{}{
+				"_pathResult": pathResult,
+				"length":      pathResult.Length,
+				"nodes":       pathResult.Nodes,
+				"rels":        pathResult.Relationships,
+			}, true
+		}
+	}
+
+	return nil, true
+}
+
+func exprCanBeNumber(expr string) bool {
+	if expr == "" {
+		return false
+	}
+	first := expr[0]
+	if first >= '0' && first <= '9' {
+		return true
+	}
+	return first == '-' && len(expr) > 1 && expr[1] >= '0' && expr[1] <= '9'
 }

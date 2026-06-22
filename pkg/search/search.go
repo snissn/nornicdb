@@ -3209,9 +3209,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		s.setBuildPhase("warmup_hnsw_or_kmeans")
 		log.Printf("📇 BuildIndexes: starting vector pipeline warmup (k-means may run)...")
 		s.warmupVectorPipeline(ctx)
-		go s.runPersistWithContext(s.lifecycleCtx)
-		s.ready.Store(true)
-		s.setBuildPhase("ready")
+		s.finishBuildWithFinalPersist(ctx)
 		return nil
 	}
 
@@ -3350,9 +3348,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			_ = s.fulltextIndex.Load(fulltextPath)
 			log.Printf("📇 BuildIndexes: reloaded BM25 from disk after warmup")
 		}
-		go s.runPersistWithContext(s.lifecycleCtx)
-		s.ready.Store(true)
-		s.setBuildPhase("ready")
+		s.finishBuildWithFinalPersist(ctx)
 		return nil
 	}
 
@@ -3464,10 +3460,16 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		_ = s.fulltextIndex.Load(fulltextPath)
 		log.Printf("📇 BuildIndexes: reloaded BM25 from disk after warmup")
 	}
-	go s.runPersistWithContext(s.lifecycleCtx)
+	s.finishBuildWithFinalPersist(ctx)
+	return nil
+}
+
+func (s *Service) finishBuildWithFinalPersist(ctx context.Context) {
+	s.setBuildPhase("persisting_final_indexes")
+	s.buildInProgress.Store(false)
+	s.runPersistWithContext(ctx)
 	s.ready.Store(true)
 	s.setBuildPhase("ready")
-	return nil
 }
 
 // warmupVectorPipeline creates the vector search pipeline (and builds HNSW or IVF-HNSW if needed) so that

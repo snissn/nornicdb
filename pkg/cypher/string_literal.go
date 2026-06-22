@@ -2,6 +2,31 @@ package cypher
 
 import "strings"
 
+func isWholeCypherQuotedString(raw string) bool {
+	if len(raw) < 2 {
+		return false
+	}
+	quote := raw[0]
+	if quote != '\'' && quote != '"' {
+		return false
+	}
+	for i := 1; i < len(raw); i++ {
+		ch := raw[i]
+		if ch == '\\' && i+1 < len(raw) {
+			i++
+			continue
+		}
+		if ch == quote {
+			if i+1 < len(raw) && raw[i+1] == quote {
+				i++
+				continue
+			}
+			return i == len(raw)-1
+		}
+	}
+	return false
+}
+
 // decodeCypherQuotedString decodes a quoted Cypher string literal.
 // It supports both doubled quote escaping (Cypher standard) and the
 // backslash escapes already tolerated in several parser paths.
