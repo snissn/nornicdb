@@ -229,10 +229,11 @@ func (b *BadgerEngine) AllNodes() ([]*Node, error) {
 	start := time.Now()
 	defer b.observeStorageOp(start, b.opDurScan)
 	var nodes []*Node
+	var loaded []*Node
 	nowNanos := DecayScoringTime()
 	err := b.withView(func(txn *badger.Txn) error {
 		prefix := []byte{prefixNode}
-		it := txn.NewIterator(badgerIterOptsPrefetchValues(prefix, 0))
+		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
 		defer it.Close()
 
 		for it.Rewind(); it.Valid(); it.Next() {
@@ -242,6 +243,18 @@ func (b *BadgerEngine) AllNodes() ([]*Node, error) {
 				continue
 			}
 			nodeID := NodeID(key[1:])
+
+			b.nodeCacheMu.RLock()
+			if cached, ok := b.nodeCache[nodeID]; ok {
+				b.nodeCacheMu.RUnlock()
+				nodeCopy := copyNode(cached)
+				if b.filterNodeByDecay(nodeCopy, nowNanos) {
+					continue
+				}
+				nodes = append(nodes, nodeCopy)
+				continue
+			}
+			b.nodeCacheMu.RUnlock()
 
 			var node *Node
 			if err := it.Item().Value(func(val []byte) error {
@@ -256,12 +269,21 @@ func (b *BadgerEngine) AllNodes() ([]*Node, error) {
 				continue
 			}
 
+			loaded = append(loaded, node)
 			nodes = append(nodes, node)
 		}
 
 		return nil
 	})
 
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range loaded {
+		if node != nil {
+			b.cacheStoreNode(node)
+		}
+	}
 	return nodes, err
 }
 

@@ -65,6 +65,14 @@ func TestStrictTypedArray_PreservesHomogeneousInts(t *testing.T) {
 	assert.Equal(t, []int64{-1, 0, 1, math.MaxInt64}, got)
 }
 
+// TestStrictTypedArray_PreservesHomogeneousUints — []uint64 round-trip.
+func TestStrictTypedArray_PreservesHomogeneousUints(t *testing.T) {
+	eng := newTestEngine(t)
+	got := roundTripValueThroughCodec(t, eng, "uints", []uint64{0, 1, math.MaxUint64})
+	require.IsType(t, []uint64{}, got)
+	assert.Equal(t, []uint64{0, 1, math.MaxUint64}, got)
+}
+
 // TestStrictTypedArray_PreservesHomogeneousStrings — []string round-trip.
 func TestStrictTypedArray_PreservesHomogeneousStrings(t *testing.T) {
 	eng := newTestEngine(t)

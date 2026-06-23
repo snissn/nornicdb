@@ -23,6 +23,46 @@ func TestBadgerEngine_NodeCacheStoresDeepCopies(t *testing.T) {
 	require.Equal(t, "Alice", got.Properties["name"])
 }
 
+func TestBadgerEngine_AllNodesPopulatesNodeCache(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	node := testNode("allnodes-cache")
+	node.Properties["name"] = "Alice"
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+
+	engine.nodeCacheMu.Lock()
+	engine.nodeCache = make(map[NodeID]*Node, engine.nodeCacheMaxEntries)
+	engine.nodeCacheMu.Unlock()
+
+	nodes, err := engine.AllNodes()
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Equal(t, node.ID, nodes[0].ID)
+
+	engine.nodeCacheMu.RLock()
+	cached, ok := engine.nodeCache[node.ID]
+	engine.nodeCacheMu.RUnlock()
+	require.True(t, ok, "AllNodes should populate cache for repeated scan workloads")
+	require.NotSame(t, nodes[0], cached)
+	require.Equal(t, "Alice", cached.Properties["name"])
+}
+
+func TestBadgerEngine_NodeCacheNormalizesHomogeneousPropertyArrays(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	node := testNode("ncache-array")
+	node.Properties["embedding"] = []interface{}{0.7, 0.2, 0.05, 0.05}
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+
+	nodes, err := engine.AllNodes()
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.IsType(t, []float64{}, nodes[0].Properties["embedding"])
+	require.Equal(t, []float64{0.7, 0.2, 0.05, 0.05}, nodes[0].Properties["embedding"])
+}
+
 func TestBadgerEngine_UpdateEdge_UpdatesTypeIndexAndInvalidatesCache(t *testing.T) {
 	engine := createTestBadgerEngine(t)
 

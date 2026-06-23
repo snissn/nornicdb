@@ -61,6 +61,35 @@ func BenchmarkDeserializeNode(b *testing.B) {
 	}
 }
 
+func BenchmarkDecodeTokenizedPropertiesGraphitiVector(b *testing.B) {
+	eng := benchEngine(b)
+	props := benchmarkGraphitiProperties()
+	var data []byte
+	if err := eng.withUpdate(func(txn *badger.Txn) error {
+		var encErr error
+		data, encErr = eng.encodeTokenizedProperties(txn, "test", props)
+		if encErr != nil {
+			return encErr
+		}
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
+	}); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		out, err := eng.decodeTokenizedProperties("test", data)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if vec, ok := out["embedding"].([]float64); !ok || len(vec) != 1024 {
+			b.Fatalf("unexpected embedding shape: %T len=%d", out["embedding"], len(vec))
+		}
+	}
+}
+
 func BenchmarkSerializeEdge(b *testing.B) {
 	eng := benchEngine(b)
 	edge := benchmarkEdge()
@@ -168,4 +197,18 @@ func benchmarkEmbedding() []float32 {
 		emb[i] = float32(i) * 0.001
 	}
 	return emb
+}
+
+func benchmarkGraphitiProperties() map[string]any {
+	embedding := make([]float64, 1024)
+	for i := range embedding {
+		embedding[i] = float64(i%97) * 0.001
+	}
+	return map[string]any{
+		"name":          "Alice Johnson",
+		"group_id":      "episode-100",
+		"summary":       "Entity extracted from a Graphiti episode with client-supplied embeddings.",
+		"entity_source": "message",
+		"embedding":     embedding,
+	}
 }

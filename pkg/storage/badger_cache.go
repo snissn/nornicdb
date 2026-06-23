@@ -33,7 +33,9 @@ func (b *BadgerEngine) cacheStoreNode(node *Node) {
 	if b.nodeCacheMaxEntries > 0 && len(b.nodeCache) > b.nodeCacheMaxEntries {
 		b.nodeCache = make(map[NodeID]*Node, b.nodeCacheMaxEntries)
 	}
-	b.nodeCache[node.ID] = copyNode(node)
+	cached := copyNode(node)
+	normalizePropertyMapShapes(cached.Properties)
+	b.nodeCache[node.ID] = cached
 	b.nodeCacheMu.Unlock()
 }
 
@@ -70,7 +72,9 @@ func (b *BadgerEngine) cacheStoreEdge(edge *Edge) {
 	if b.edgeCacheMaxItems > 0 && len(b.edgeCache) > b.edgeCacheMaxItems {
 		b.edgeCache = make(map[EdgeID]*Edge, b.edgeCacheMaxItems)
 	}
-	b.edgeCache[edge.ID] = copyEdge(edge)
+	cached := copyEdge(edge)
+	normalizePropertyMapShapes(cached.Properties)
+	b.edgeCache[edge.ID] = cached
 	b.edgeCacheMu.Unlock()
 }
 

@@ -158,11 +158,10 @@ func decodeStrictTypedValue(dec *msgpack.Decoder) (any, error) {
 	if msgpcode.IsFixedMap(code) || code == msgpcode.Map16 || code == msgpcode.Map32 {
 		return decodeStrictTypedMap(dec)
 	}
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil, err
-	}
-	return v, nil
+	// DecodeInterface is the msgpack package's hand-written scalar path.
+	// Decode(&any) routes through reflection and dominates large property
+	// arrays such as Graphiti embedding vectors.
+	return dec.DecodeInterface()
 }
 
 // decodeStrictTypedArray decodes a msgpack array. If every element is
@@ -176,6 +175,23 @@ func decodeStrictTypedArray(dec *msgpack.Decoder) (any, error) {
 	if n <= 0 {
 		return []interface{}{}, nil
 	}
+	firstCode, err := dec.PeekCode()
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case firstCode == msgpcode.Double:
+		return decodeFloat64Array(dec, n)
+	case isSignedIntegerCode(firstCode):
+		return decodeInt64Array(dec, n)
+	case isUnsignedIntegerCode(firstCode):
+		return decodeUint64Array(dec, n)
+	case msgpcode.IsString(firstCode):
+		return decodeStringArray(dec, n)
+	case firstCode == msgpcode.False || firstCode == msgpcode.True:
+		return decodeBoolArray(dec, n)
+	}
+
 	// Decode the first element to learn the homogeneous kind candidate.
 	first, err := decodeStrictTypedValue(dec)
 	if err != nil {
@@ -273,6 +289,129 @@ func decodeStrictTypedArray(dec *msgpack.Decoder) (any, error) {
 		out[i] = next
 	}
 	return out, nil
+}
+
+func decodeFloat64Array(dec *msgpack.Decoder, n int) (any, error) {
+	out := make([]float64, n)
+	for i := 0; i < n; i++ {
+		code, err := dec.PeekCode()
+		if err != nil {
+			return nil, err
+		}
+		if code != msgpcode.Double {
+			next, err := decodeStrictTypedValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			return finishMixedArray(dec, sliceToAny(out[:i]), next, n)
+		}
+		v, err := dec.DecodeFloat64()
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+func decodeInt64Array(dec *msgpack.Decoder, n int) (any, error) {
+	out := make([]int64, n)
+	for i := 0; i < n; i++ {
+		code, err := dec.PeekCode()
+		if err != nil {
+			return nil, err
+		}
+		if !isSignedIntegerCode(code) {
+			next, err := decodeStrictTypedValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			return finishMixedArray(dec, sliceToAny(out[:i]), next, n)
+		}
+		v, err := dec.DecodeInt64()
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+func decodeUint64Array(dec *msgpack.Decoder, n int) (any, error) {
+	out := make([]uint64, n)
+	for i := 0; i < n; i++ {
+		code, err := dec.PeekCode()
+		if err != nil {
+			return nil, err
+		}
+		if !isUnsignedIntegerCode(code) {
+			next, err := decodeStrictTypedValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			return finishMixedArray(dec, sliceToAny(out[:i]), next, n)
+		}
+		v, err := dec.DecodeUint64()
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+func decodeStringArray(dec *msgpack.Decoder, n int) (any, error) {
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		code, err := dec.PeekCode()
+		if err != nil {
+			return nil, err
+		}
+		if !msgpcode.IsString(code) {
+			next, err := decodeStrictTypedValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			return finishMixedArray(dec, sliceToAny(out[:i]), next, n)
+		}
+		v, err := dec.DecodeString()
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+func decodeBoolArray(dec *msgpack.Decoder, n int) (any, error) {
+	out := make([]bool, n)
+	for i := 0; i < n; i++ {
+		code, err := dec.PeekCode()
+		if err != nil {
+			return nil, err
+		}
+		if code != msgpcode.False && code != msgpcode.True {
+			next, err := decodeStrictTypedValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			return finishMixedArray(dec, sliceToAny(out[:i]), next, n)
+		}
+		v, err := dec.DecodeBool()
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+func isSignedIntegerCode(code byte) bool {
+	return code == msgpcode.Int8 || code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64
+}
+
+func isUnsignedIntegerCode(code byte) bool {
+	return code == msgpcode.Uint8 || code == msgpcode.Uint16 || code == msgpcode.Uint32 || code == msgpcode.Uint64
 }
 
 // decodeStrictTypedMap decodes a msgpack map keyed by strings, recursing
