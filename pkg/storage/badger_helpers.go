@@ -921,6 +921,10 @@ func (b *BadgerEngine) decodeEdgeBodyByID(data []byte, id EdgeID) (*Edge, error)
 // rewritten by the V1→V2 migration, so a non-V2 body indicates
 // corruption or a forgotten upgrade.
 func (b *BadgerEngine) decodeNode(namespace string, data []byte) (*Node, error) {
+	return b.decodeNodeProjected(namespace, data, nil)
+}
+
+func (b *BadgerEngine) decodeNodeProjected(namespace string, data []byte, include map[string]struct{}) (*Node, error) {
 	if len(data) < 1 {
 		return nil, fmt.Errorf("node body empty")
 	}
@@ -943,7 +947,7 @@ func (b *BadgerEngine) decodeNode(namespace string, data []byte) (*Node, error) 
 	if err := decodeValue(bodyBytes, &node); err != nil {
 		return nil, err
 	}
-	props, err := b.decodeTokenizedProperties(namespace, propsBytes)
+	props, err := b.decodeTokenizedPropertiesProjected(namespace, propsBytes, include)
 	if err != nil {
 		return nil, err
 	}

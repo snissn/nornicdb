@@ -186,6 +186,56 @@ func (b *BadgerEngine) GetNode(id NodeID) (*Node, error) {
 	return node, err
 }
 
+// GetNodeProjected retrieves a node while decoding only the requested user
+// properties. Metadata fields such as ID, labels, timestamps, and embedding
+// metadata are still decoded from the node body. A nil properties slice falls
+// back to the full GetNode path; an empty non-nil slice returns no user
+// properties.
+func (b *BadgerEngine) GetNodeProjected(id NodeID, properties []string) (*Node, error) {
+	if id == "" {
+		return nil, ErrInvalidID
+	}
+	if properties == nil {
+		return b.GetNode(id)
+	}
+	start := time.Now()
+	defer b.observeStorageOp(start, b.opDurGet)
+	if err := b.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	include := propertyProjectionSet(properties)
+	var node *Node
+	err := b.withView(func(txn *badger.Txn) error {
+		item, err := txn.Get(nodeKey(id))
+		if err == badger.ErrKeyNotFound {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			namespace := namespaceForNodeID(id)
+			decoded, decodeErr := b.decodeNodeProjected(namespace, val, include)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			node = decoded
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if node == nil {
+		return nil, ErrNotFound
+	}
+	if b.filterNodeByDecay(node, DecayScoringTime()) {
+		return nil, ErrNotFound
+	}
+	return node, nil
+}
+
 // UpdateNode updates an existing node or creates it if it doesn't exist (upsert).
 func (b *BadgerEngine) UpdateNode(node *Node) error {
 	start := time.Now()

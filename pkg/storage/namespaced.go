@@ -185,6 +185,24 @@ func (n *NamespacedEngine) toUserNode(node *Node) *Node {
 	return &out
 }
 
+func keepNodeProperties(node *Node, properties []string) *Node {
+	if node == nil {
+		return nil
+	}
+	out := CopyNode(node)
+	if properties == nil {
+		return out
+	}
+	props := make(map[string]any, len(properties))
+	for _, property := range properties {
+		if value, ok := node.Properties[property]; ok {
+			props[property] = value
+		}
+	}
+	out.Properties = props
+	return out
+}
+
 func (n *NamespacedEngine) toUserEdge(edge *Edge) *Edge {
 	if edge == nil {
 		return nil
@@ -225,6 +243,23 @@ func (n *NamespacedEngine) GetNode(id NodeID) (*Node, error) {
 	// IMPORTANT: Never mutate nodes returned from the inner engine in-place.
 	// AsyncEngine (and other engines) may return pointers to cached objects that
 	// are later flushed; mutating IDs would corrupt cache state and cause data loss.
+	return n.toUserNode(node), nil
+}
+
+func (n *NamespacedEngine) GetNodeProjected(id NodeID, properties []string) (*Node, error) {
+	projected, ok := n.inner.(ProjectedNodeReader)
+	if !ok || properties == nil {
+		node, err := n.GetNode(id)
+		if err != nil || node == nil || properties == nil {
+			return node, err
+		}
+		return keepNodeProperties(node, properties), nil
+	}
+
+	node, err := projected.GetNodeProjected(n.prefixNodeID(id), properties)
+	if err != nil || node == nil {
+		return node, err
+	}
 	return n.toUserNode(node), nil
 }
 

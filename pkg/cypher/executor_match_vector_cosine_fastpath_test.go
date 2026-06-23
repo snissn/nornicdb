@@ -35,6 +35,39 @@ func (e *blockingNodeIteratorEngine) IterateNodes(fn func(*storage.Node) bool) e
 	return nil
 }
 
+type projectedCountingEngine struct {
+	storage.Engine
+	projectedCalls int
+	getNodeCalls   int
+	projectedProps [][]string
+}
+
+func (e *projectedCountingEngine) GetNode(id storage.NodeID) (*storage.Node, error) {
+	e.getNodeCalls++
+	return e.Engine.GetNode(id)
+}
+
+func (e *projectedCountingEngine) GetNodeProjected(id storage.NodeID, properties []string) (*storage.Node, error) {
+	e.projectedCalls++
+	props := append([]string(nil), properties...)
+	e.projectedProps = append(e.projectedProps, props)
+	if reader, ok := e.Engine.(storage.ProjectedNodeReader); ok {
+		return reader.GetNodeProjected(id, properties)
+	}
+	node, err := e.Engine.GetNode(id)
+	if err != nil || node == nil {
+		return node, err
+	}
+	out := storage.CopyNode(node)
+	out.Properties = make(map[string]any, len(properties))
+	for _, property := range properties {
+		if value, ok := node.Properties[property]; ok {
+			out.Properties[property] = value
+		}
+	}
+	return out, nil
+}
+
 func TestMatchVectorCosineFastPath_UsesVectorIndex(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")
@@ -244,6 +277,79 @@ LIMIT $limit
 	require.Equal(t, 0, counting.allNodesCalls)
 	require.Equal(t, 0, counting.labelCalls)
 	require.Equal(t, 0, counting.streamNodesCalls)
+}
+
+func TestMatchVectorCosineFastPath_ProjectedNodeReadSkipsVectorProperty(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	projected := &projectedCountingEngine{Engine: ns}
+	exec := NewStorageExecutor(projected)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX entity_name_idx FOR (n:Entity) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	searchSvc := search.NewServiceWithDimensions(projected, 4)
+	exec.SetSearchService(searchSvc)
+
+	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'best', group_id:'g', name_embedding:[1.0,0.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'other', group_id:'g', name_embedding:[0.0,1.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, searchSvc.CountPropertyVectorEntries("name_embedding"))
+
+	projected.projectedCalls = 0
+	projected.getNodeCalls = 0
+	projected.projectedProps = nil
+
+	query := `
+MATCH (n:Entity)
+WHERE n.group_id = $group_id
+WITH n, vector.similarity.cosine(n.name_embedding, $search_vector) AS score
+RETURN n.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT $limit
+`
+	res, err := exec.Execute(ctx, query, map[string]interface{}{
+		"group_id":      "g",
+		"search_vector": []float64{1, 0, 0, 0},
+		"limit":         1,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "best", res.Rows[0][0])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+	require.Positive(t, projected.projectedCalls)
+	require.Zero(t, projected.getNodeCalls)
+	require.NotEmpty(t, projected.projectedProps)
+	require.ElementsMatch(t, []string{"group_id", "uuid"}, projected.projectedProps[0])
+	require.NotContains(t, projected.projectedProps[0], "name_embedding")
+
+	projected.projectedCalls = 0
+	projected.getNodeCalls = 0
+	projected.projectedProps = nil
+
+	query = `
+MATCH (n:Entity)
+WHERE n.name_embedding IS NOT NULL
+WITH n, vector.similarity.cosine(n.name_embedding, $search_vector) AS score
+RETURN n.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT $limit
+`
+	res, err = exec.Execute(ctx, query, map[string]interface{}{
+		"search_vector": []float64{1, 0, 0, 0},
+		"limit":         1,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "best", res.Rows[0][0])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
+	require.Positive(t, projected.projectedCalls)
+	require.Zero(t, projected.getNodeCalls)
+	require.NotEmpty(t, projected.projectedProps)
+	require.ElementsMatch(t, []string{"uuid"}, projected.projectedProps[0])
+	require.NotContains(t, projected.projectedProps[0], "name_embedding")
 }
 
 func TestMatchVectorCosineFastPath_UsesLiveIndexDuringBackgroundWarmup(t *testing.T) {

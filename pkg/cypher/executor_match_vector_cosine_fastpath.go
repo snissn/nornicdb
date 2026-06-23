@@ -100,7 +100,13 @@ func (e *StorageExecutor) tryFastPathMatchVectorCosine(ctx context.Context, cyph
 		return nil, false
 	}
 
-	nodeScores, ok := e.fetchCosineNodeScores(ctx, indexName, limit, queryExpr, orderDesc)
+	scoreExprIsAlias := make([]bool, len(returnItems))
+	scoreExprIsAlias[cosineIdx] = true
+	projectedProps, projectionOK := nodeProjectionPropertiesForVectorFastPath(varName, vectorProp, returnItems, scoreExprIsAlias, "", "", nil)
+	if !projectionOK {
+		projectedProps = nil
+	}
+	nodeScores, ok := e.fetchCosineNodeScores(ctx, indexName, limit, queryExpr, orderDesc, projectedProps)
 	if !ok {
 		return nil, false
 	}
@@ -280,18 +286,22 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 	}
 
 	candidateLimit := chooseVectorCandidateLimit(limit, preWhereClause != "" || len(matchProps) > 0 || scoreOp != "")
-	nodeScores, ok := e.fetchCosineNodeScores(ctx, indexName, candidateLimit, queryExpr, orderDesc)
+	scoreExprIsAlias := make([]bool, len(returnItems))
+	hasMatchProps := len(matchProps) > 0
+	for i := range returnItems {
+		scoreExprIsAlias[i] = strings.EqualFold(strings.TrimSpace(returnItems[i].expr), scoreRef)
+	}
+	projectedProps, projectionOK := nodeProjectionPropertiesForVectorFastPath(varName, vectorProp, returnItems, scoreExprIsAlias, preWhereClause, preWhereNotNullProp, matchProps)
+	if !projectionOK {
+		projectedProps = nil
+	}
+	nodeScores, ok := e.fetchCosineNodeScores(ctx, indexName, candidateLimit, queryExpr, orderDesc, projectedProps)
 	if !ok {
 		return nil, false
 	}
 
 	rows := make([][]interface{}, 0, min(limit, len(nodeScores)))
 	nodeCtx := map[string]*storage.Node{varName: nil}
-	scoreExprIsAlias := make([]bool, len(returnItems))
-	hasMatchProps := len(matchProps) > 0
-	for i := range returnItems {
-		scoreExprIsAlias[i] = strings.EqualFold(strings.TrimSpace(returnItems[i].expr), scoreRef)
-	}
 	var preWhereFilter func(*storage.Node) bool
 	if preWhereClause != "" && preWhereNotNullProp == "" {
 		preWhereFilter = e.compileNodeWhereFilter(ctx, varName, preWhereClause)
@@ -302,7 +312,11 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 		}
 		if preWhereClause != "" {
 			if preWhereNotNullProp != "" {
-				if val, exists := hit.node.Properties[preWhereNotNullProp]; !exists || val == nil {
+				if preWhereNotNullProp == vectorProp {
+					// The vector index only returns nodes that have an indexed
+					// value for vectorProp, so this predicate does not require
+					// materializing the vector property itself.
+				} else if val, exists := hit.node.Properties[preWhereNotNullProp]; !exists || val == nil {
 					continue
 				}
 			} else if !preWhereFilter(hit.node) {
@@ -648,7 +662,7 @@ func (e *StorageExecutor) tryFastPathAnyMatchVectorCosine(ctx context.Context, c
 	return nil, false
 }
 
-func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName string, limit int, queryExpr string, orderDesc bool) ([]vectorNodeScore, bool) {
+func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName string, limit int, queryExpr string, orderDesc bool, projectedProps []string) ([]vectorNodeScore, bool) {
 	queryVector, ok := e.resolveCosineQueryVector(ctx, queryExpr)
 	if !ok || len(queryVector) == 0 {
 		return nil, false
@@ -699,7 +713,7 @@ func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName s
 
 	out := make([]vectorNodeScore, 0, len(hits))
 	for _, hit := range hits {
-		node, err := e.storage.GetNode(storage.NodeID(hit.ID))
+		node, err := e.getNodeForVectorHit(storage.NodeID(hit.ID), projectedProps)
 		if err != nil || node == nil {
 			continue
 		}
@@ -710,6 +724,124 @@ func (e *StorageExecutor) fetchCosineNodeScores(ctx context.Context, indexName s
 		out = append(out, vectorNodeScore{node: node, score: score})
 	}
 	return out, true
+}
+
+func (e *StorageExecutor) getNodeForVectorHit(id storage.NodeID, projectedProps []string) (*storage.Node, error) {
+	if projectedProps != nil {
+		if reader, ok := e.storage.(storage.ProjectedNodeReader); ok {
+			return reader.GetNodeProjected(id, projectedProps)
+		}
+	}
+	return e.storage.GetNode(id)
+}
+
+func nodeProjectionPropertiesForVectorFastPath(varName string, vectorProp string, returnItems []returnItem, scoreExprIsAlias []bool, preWhereClause string, preWhereNotNullProp string, matchProps map[string]interface{}) ([]string, bool) {
+	props := make(map[string]struct{}, len(matchProps)+len(returnItems))
+	for prop := range matchProps {
+		props[prop] = struct{}{}
+	}
+	if preWhereNotNullProp != "" {
+		if preWhereNotNullProp != vectorProp {
+			props[preWhereNotNullProp] = struct{}{}
+		}
+	} else if preWhereClause != "" {
+		if !collectNodePropertyRefsForProjection(varName, preWhereClause, props) {
+			return nil, false
+		}
+	}
+	for i, item := range returnItems {
+		if i < len(scoreExprIsAlias) && scoreExprIsAlias[i] {
+			continue
+		}
+		if !collectNodePropertyRefsForProjection(varName, item.expr, props) {
+			return nil, false
+		}
+	}
+
+	out := make([]string, 0, len(props))
+	for prop := range props {
+		out = append(out, prop)
+	}
+	sort.Strings(out)
+	return out, true
+}
+
+func collectNodePropertyRefsForProjection(varName string, expr string, props map[string]struct{}) bool {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return true
+	}
+	if expr == "*" || expr == varName {
+		return false
+	}
+	compact := strings.ToLower(strings.ReplaceAll(expr, " ", ""))
+	lowerVar := strings.ToLower(varName)
+	if strings.Contains(compact, "properties("+lowerVar+")") ||
+		strings.Contains(compact, "keys("+lowerVar+")") ||
+		strings.Contains(compact, lowerVar+"{") ||
+		strings.Contains(compact, lowerVar+"[") {
+		return false
+	}
+
+	offset := 0
+	for offset < len(expr) {
+		idx := strings.Index(expr[offset:], varName)
+		if idx < 0 {
+			return true
+		}
+		start := offset + idx
+		end := start + len(varName)
+		if (start > 0 && isCypherIdentByte(expr[start-1])) || (end < len(expr) && isCypherIdentByte(expr[end])) {
+			offset = end
+			continue
+		}
+
+		j := end
+		for j < len(expr) && (expr[j] == ' ' || expr[j] == '\t' || expr[j] == '\n' || expr[j] == '\r') {
+			j++
+		}
+		if j >= len(expr) || expr[j] != '.' {
+			offset = end
+			continue
+		}
+		j++
+		for j < len(expr) && (expr[j] == ' ' || expr[j] == '\t' || expr[j] == '\n' || expr[j] == '\r') {
+			j++
+		}
+		if j >= len(expr) {
+			return false
+		}
+		if expr[j] == '`' {
+			k := strings.IndexByte(expr[j+1:], '`')
+			if k < 0 {
+				return false
+			}
+			prop := expr[j+1 : j+1+k]
+			if prop == "" {
+				return false
+			}
+			props[prop] = struct{}{}
+			offset = j + 1 + k + 1
+			continue
+		}
+		if !isCypherIdentByte(expr[j]) {
+			return false
+		}
+		k := j + 1
+		for k < len(expr) && isCypherIdentByte(expr[k]) {
+			k++
+		}
+		props[expr[j:k]] = struct{}{}
+		offset = k
+	}
+	return true
+}
+
+func isCypherIdentByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') ||
+		b == '_'
 }
 
 func prepareWiredNodeVectorService(ctx context.Context, svc *search.Service, wantDims int) (bool, error) {

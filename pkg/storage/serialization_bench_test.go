@@ -90,6 +90,72 @@ func BenchmarkDecodeTokenizedPropertiesGraphitiVector(b *testing.B) {
 	}
 }
 
+func BenchmarkDeserializeNodeGraphitiVector(b *testing.B) {
+	eng := benchEngine(b)
+	node := benchmarkNode()
+	node.Properties = benchmarkGraphitiProperties()
+	ns := namespaceForNodeID(node.ID)
+	var data []byte
+	if err := eng.withUpdate(func(txn *badger.Txn) error {
+		var encErr error
+		data, _, encErr = eng.encodeNodeInTxn(txn, ns, node)
+		if encErr != nil {
+			return encErr
+		}
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
+	}); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		out, err := eng.decodeNode(ns, data)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if vec, ok := out.Properties["embedding"].([]float64); !ok || len(vec) != 1024 {
+			b.Fatalf("unexpected embedding shape: %T", out.Properties["embedding"])
+		}
+	}
+}
+
+func BenchmarkDeserializeNodeGraphitiVectorProjectedScalars(b *testing.B) {
+	eng := benchEngine(b)
+	node := benchmarkNode()
+	node.Properties = benchmarkGraphitiProperties()
+	ns := namespaceForNodeID(node.ID)
+	var data []byte
+	if err := eng.withUpdate(func(txn *badger.Txn) error {
+		var encErr error
+		data, _, encErr = eng.encodeNodeInTxn(txn, ns, node)
+		if encErr != nil {
+			return encErr
+		}
+		_ = eng.propKeyDict.flushTxnCounters(txn)
+		return nil
+	}); err != nil {
+		b.Fatal(err)
+	}
+	include := propertyProjectionSet([]string{"name", "group_id"})
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		out, err := eng.decodeNodeProjected(ns, data, include)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, ok := out.Properties["embedding"]; ok {
+			b.Fatal("projected decode materialized embedding")
+		}
+		if out.Properties["group_id"] != "episode-100" {
+			b.Fatalf("unexpected group_id: %v", out.Properties["group_id"])
+		}
+	}
+}
+
 func BenchmarkSerializeEdge(b *testing.B) {
 	eng := benchEngine(b)
 	edge := benchmarkEdge()

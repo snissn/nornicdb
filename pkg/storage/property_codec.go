@@ -86,6 +86,21 @@ func (b *BadgerEngine) encodeTokenizedProperties(txn *badger.Txn, namespace stri
 // position tracking explicit because we need to alternate between the
 // two encodings without re-creating the decoder per pair.
 func (b *BadgerEngine) decodeTokenizedProperties(namespace string, data []byte) (map[string]any, error) {
+	return b.decodeTokenizedPropertiesProjected(namespace, data, nil)
+}
+
+func propertyProjectionSet(properties []string) map[string]struct{} {
+	if properties == nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(properties))
+	for _, property := range properties {
+		out[property] = struct{}{}
+	}
+	return out
+}
+
+func (b *BadgerEngine) decodeTokenizedPropertiesProjected(namespace string, data []byte, include map[string]struct{}) (map[string]any, error) {
 	if len(data) == 0 {
 		return map[string]any{}, nil
 	}
@@ -97,7 +112,11 @@ func (b *BadgerEngine) decodeTokenizedProperties(namespace string, data []byte) 
 
 	reader := bytes.NewReader(rest)
 	dec := msgpack.NewDecoder(reader)
-	out := make(map[string]any, count)
+	outSize := int(count)
+	if include != nil && len(include) < outSize {
+		outSize = len(include)
+	}
+	out := make(map[string]any, outSize)
 	for i := uint64(0); i < count; i++ {
 		// reader.Len() tells us how many bytes the msgpack decoder has
 		// not yet consumed. We slice rest from the head by the same
@@ -119,6 +138,14 @@ func (b *BadgerEngine) decodeTokenizedProperties(namespace string, data []byte) 
 		name, ok := b.propKeyDict.lookup(namespace, id)
 		if !ok {
 			return nil, fmt.Errorf("property key id %d not in dictionary for namespace %q", id, namespace)
+		}
+		if include != nil {
+			if _, wanted := include[name]; !wanted {
+				if err := dec.Skip(); err != nil {
+					return nil, fmt.Errorf("decoding tokenized properties: skip key %q value: %w", name, err)
+				}
+				continue
+			}
 		}
 		val, err := decodeStrictTypedValue(dec)
 		if err != nil {

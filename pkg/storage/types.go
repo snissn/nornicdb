@@ -474,6 +474,16 @@ type AdjacentEdgesEngine interface {
 	GetAdjacentEdges(nodeID NodeID) (outgoing, incoming []*Edge, err error)
 }
 
+// ProjectedNodeReader is an optional extension interface for reading a node
+// while decoding only a caller-specified subset of user properties.
+//
+// Implementations still return node metadata such as ID, labels, and timestamps,
+// but Properties contains only the requested keys. A nil properties slice means
+// "full node"; an empty non-nil slice means "no user properties".
+type ProjectedNodeReader interface {
+	GetNodeProjected(id NodeID, properties []string) (*Node, error)
+}
+
 // NamespaceLister is an optional extension interface that reports the known
 // database namespaces stored in an engine.
 //
