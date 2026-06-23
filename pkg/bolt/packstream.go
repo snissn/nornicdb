@@ -1460,6 +1460,19 @@ func decodeStructureFields(data []byte, offset int, fieldCount int, signature by
 		}
 		return map[string]any{"_type": "DateTime", "fields": fields}, fieldsConsumed, nil
 
+	case 0x64: // LocalDateTime: [seconds, nanos]
+		if fieldCount >= 2 {
+			sec, okSec := toInt64Field(fields[0])
+			nsec, okNsec := toInt64Field(fields[1])
+			if okSec && okNsec {
+				// NornicDB's typed temporal param path is time.Time-based. Normalize
+				// naive/local datetimes to UTC on ingress so they round-trip as a
+				// hydratable DateTime instead of leaking an opaque 0x64 structure.
+				return time.Unix(sec, nsec).UTC(), fieldsConsumed, nil
+			}
+		}
+		return map[string]any{"_type": "LocalDateTime", "fields": fields}, fieldsConsumed, nil
+
 	case 0x69, 0x66: // DateTime with zone id: [seconds, nanos, zoneId]
 		if fieldCount >= 3 {
 			sec, okSec := toInt64Field(fields[0])
