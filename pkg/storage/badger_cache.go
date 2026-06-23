@@ -22,6 +22,11 @@ package storage
 // These functions should be the only places that mutate/invalidate the caches
 // in response to successful storage mutations.
 
+type nodeBodyCacheEntry struct {
+	itemVersion uint64
+	node        *Node
+}
+
 func (b *BadgerEngine) cacheStoreNode(node *Node) {
 	if node == nil {
 		return
@@ -37,6 +42,44 @@ func (b *BadgerEngine) cacheStoreNode(node *Node) {
 	normalizePropertyMapShapes(cached.Properties)
 	b.nodeCache[node.ID] = cached
 	b.nodeCacheMu.Unlock()
+
+	b.cacheDeleteNodeBody(node.ID)
+}
+
+func (b *BadgerEngine) cacheLoadNodeBody(id NodeID, itemVersion uint64) (*Node, bool) {
+	if id == "" {
+		return nil, false
+	}
+	b.nodeBodyCacheMu.RLock()
+	entry, ok := b.nodeBodyCache[id]
+	b.nodeBodyCacheMu.RUnlock()
+	if !ok || entry.itemVersion != itemVersion || entry.node == nil {
+		return nil, false
+	}
+	return copyNode(entry.node), true
+}
+
+func (b *BadgerEngine) cacheStoreNodeBody(id NodeID, itemVersion uint64, node *Node) {
+	if id == "" || node == nil {
+		return
+	}
+	cached := copyNode(node)
+	normalizePropertyMapShapes(cached.Properties)
+	b.nodeBodyCacheMu.Lock()
+	if b.nodeCacheMaxEntries > 0 && len(b.nodeBodyCache) > b.nodeCacheMaxEntries {
+		b.nodeBodyCache = make(map[NodeID]nodeBodyCacheEntry, b.nodeCacheMaxEntries)
+	}
+	b.nodeBodyCache[id] = nodeBodyCacheEntry{itemVersion: itemVersion, node: cached}
+	b.nodeBodyCacheMu.Unlock()
+}
+
+func (b *BadgerEngine) cacheDeleteNodeBody(id NodeID) {
+	if id == "" {
+		return
+	}
+	b.nodeBodyCacheMu.Lock()
+	delete(b.nodeBodyCache, id)
+	b.nodeBodyCacheMu.Unlock()
 }
 
 // cacheLoadEdge returns the cached edge pointer if present.
@@ -232,6 +275,7 @@ func (b *BadgerEngine) cacheDeleteNode(id NodeID) {
 	b.nodeCacheMu.Lock()
 	delete(b.nodeCache, id)
 	b.nodeCacheMu.Unlock()
+	b.cacheDeleteNodeBody(id)
 }
 
 func (b *BadgerEngine) cacheOnNodeCreated(node *Node) {

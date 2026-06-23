@@ -102,6 +102,69 @@ func TestBadgerEngine_MVCCNodeLatestSnapshotAndRecreate(t *testing.T) {
 	require.Equal(t, nodeID, nodes[0].ID)
 }
 
+func TestBadgerEngine_GetNodeVisibleAtCurrentHeadCachesByBadgerBodyVersion(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+	nodeID := NodeID(prefixTestID("mvcc-body-cache"))
+	embedding := make([]float64, 1024)
+	for i := range embedding {
+		embedding[i] = float64(i) / 1024
+	}
+
+	_, err := engine.CreateNode(&Node{
+		ID:     nodeID,
+		Labels: []string{"Entity"},
+		Properties: map[string]any{
+			"name":      "v1",
+			"embedding": embedding,
+		},
+	})
+	require.NoError(t, err)
+	v1, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+
+	first, err := engine.GetNodeVisibleAt(nodeID, v1.Version)
+	require.NoError(t, err)
+	require.Equal(t, "v1", first.Properties["name"])
+
+	engine.nodeBodyCacheMu.RLock()
+	entryV1, ok := engine.nodeBodyCache[nodeID]
+	engine.nodeBodyCacheMu.RUnlock()
+	require.True(t, ok, "current-head read should cache the decoded primary body")
+	require.NotZero(t, entryV1.itemVersion)
+	require.Equal(t, "v1", entryV1.node.Properties["name"])
+
+	first.Properties["name"] = "caller-mutated"
+	second, err := engine.GetNodeVisibleAt(nodeID, v1.Version)
+	require.NoError(t, err)
+	require.Equal(t, "v1", second.Properties["name"], "body cache hits must return a copy")
+
+	require.NoError(t, engine.UpdateNode(&Node{
+		ID:     nodeID,
+		Labels: []string{"Entity"},
+		Properties: map[string]any{
+			"name":      "v2",
+			"embedding": embedding,
+		},
+	}))
+	v2, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+
+	latest, err := engine.GetNodeVisibleAt(nodeID, v2.Version)
+	require.NoError(t, err)
+	require.Equal(t, "v2", latest.Properties["name"])
+
+	engine.nodeBodyCacheMu.RLock()
+	entryV2, ok := engine.nodeBodyCache[nodeID]
+	engine.nodeBodyCacheMu.RUnlock()
+	require.True(t, ok)
+	require.NotEqual(t, entryV1.itemVersion, entryV2.itemVersion, "updated primary bodies must not reuse the old cached body")
+	require.Equal(t, "v2", entryV2.node.Properties["name"])
+
+	old, err := engine.GetNodeVisibleAt(nodeID, v1.Version)
+	require.NoError(t, err)
+	require.Equal(t, "v1", old.Properties["name"], "historical reads still resolve from MVCC records")
+}
+
 func TestBadgerEngine_MVCCEdgeLatestSnapshotAndRecreate(t *testing.T) {
 	engine := createMVCCBadgerEngine(t)
 	start := NodeID(prefixTestID("mvcc-edge-start"))

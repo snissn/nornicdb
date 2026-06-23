@@ -154,6 +154,12 @@ type BadgerEngine struct {
 	cacheHits   int64
 	cacheMisses int64
 
+	// Current primary-key body cache for MVCC GetNodeVisibleAt reads. Entries
+	// are tagged with Badger's item version so a snapshot read can only reuse a
+	// decoded body when it has first observed the exact primary-key version.
+	nodeBodyCache   map[NodeID]nodeBodyCacheEntry
+	nodeBodyCacheMu sync.RWMutex
+
 	// Edge type cache for mutual relationship queries
 	// Caches edges by type for O(1) lookup
 	edgeTypeCache   map[string][]*Edge // edgeType -> edges of that type
@@ -765,6 +771,7 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	}
 
 	engine.nodeCache = make(map[NodeID]*Node, engine.nodeCacheMaxEntries)
+	engine.nodeBodyCache = make(map[NodeID]nodeBodyCacheEntry, engine.nodeCacheMaxEntries)
 	engine.edgeTypeCache = make(map[string][]*Edge, engine.edgeTypeCacheMaxTypes)
 	engine.labelFirstNodeCache = make(map[string]NodeID, engine.labelFirstCacheMax)
 	// Mirror the node cache sizing knob unless we add a dedicated tunable.

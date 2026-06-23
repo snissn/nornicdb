@@ -841,6 +841,15 @@ func (b *BadgerEngine) GetNodeVisibleAt(id NodeID, version MVCCVersion) (*Node, 
 		if version.Compare(head.Version) >= 0 && !head.Tombstoned {
 			item, getErr := txn.Get(nodeKey(id))
 			if getErr == nil {
+				itemVersion := item.Version()
+				if cached, ok := b.cacheLoadNodeBody(id, itemVersion); ok {
+					node = cached
+					if b.filterNodeByDecay(node, DecayScoringTime()) {
+						node = nil
+						return ErrNotFound
+					}
+					return nil
+				}
 				return item.Value(func(val []byte) error {
 					decoded, decodeErr := b.decodeNodeWithEmbeddings(txn, val, id)
 					if decodeErr != nil {
@@ -850,6 +859,7 @@ func (b *BadgerEngine) GetNodeVisibleAt(id NodeID, version MVCCVersion) (*Node, 
 						return ErrNotFound
 					}
 					node = decoded
+					b.cacheStoreNodeBody(id, itemVersion, decoded)
 					if b.filterNodeByDecay(node, DecayScoringTime()) {
 						node = nil
 						return ErrNotFound

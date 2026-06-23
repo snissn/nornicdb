@@ -319,6 +319,44 @@ func BenchmarkBadgerEngine_GetNodeVisibleAt(b *testing.B) {
 	}
 }
 
+func BenchmarkBadgerEngine_GetNodeVisibleAt_CurrentHeadGraphitiVector(b *testing.B) {
+	engine := NewMemoryEngine()
+	b.Cleanup(func() { _ = engine.Close() })
+
+	nodeID := NodeID(prefixTestID("bench-mvcc-current-graphiti-vector"))
+	embedding := make([]float64, 1024)
+	for i := range embedding {
+		embedding[i] = float64(i%17) / 17
+	}
+	_, err := engine.CreateNode(&Node{
+		ID:     nodeID,
+		Labels: []string{"Entity"},
+		Properties: map[string]any{
+			"name":      "entity",
+			"embedding": embedding,
+		},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	head, err := engine.GetNodeCurrentHead(nodeID)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		node, err := engine.GetNodeVisibleAt(nodeID, head.Version)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if node.Properties["name"] != "entity" {
+			b.Fatalf("unexpected node name: %v", node.Properties["name"])
+		}
+	}
+}
+
 func BenchmarkBadgerEngine_GetNodesByLabelVisibleAt(b *testing.B) {
 	engine := NewMemoryEngine()
 	b.Cleanup(func() { _ = engine.Close() })
