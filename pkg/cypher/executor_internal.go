@@ -44,6 +44,20 @@ func (e *StorageExecutor) executeInternal(ctx context.Context, cypher string, pa
 		return nil, err
 	}
 
+	if inheritedParams := getParamsFromContext(ctx); inheritedParams != nil {
+		if params == nil {
+			params = inheritedParams
+		} else {
+			mergedParams := make(map[string]interface{}, len(inheritedParams)+len(params))
+			for key, value := range inheritedParams {
+				mergedParams[key] = value
+			}
+			for key, value := range params {
+				mergedParams[key] = value
+			}
+			params = mergedParams
+		}
+	}
 	ctx = context.WithValue(ctx, paramsKey, params)
 	upper := e.cachedUpperQuery(cypher)
 

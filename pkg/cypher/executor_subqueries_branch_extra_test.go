@@ -70,6 +70,52 @@ func TestExecuteChainedCallSubquery_Branches(t *testing.T) {
 	require.Len(t, res.Rows, 2)
 }
 
+func TestExecuteChainedCallSubquery_ImplicitScalarCorrelationOptionalAggregate(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "chain_call_implicit")
+	exec := NewStorageExecutor(store)
+	ctx := withParams(context.Background(), map[string]interface{}{"min_amount": int64(100)})
+
+	_, err := store.CreateNode(&storage.Node{ID: "o1", Labels: []string{"Order"}, Properties: map[string]interface{}{"owner_id": "a1", "order_id": "ORD-001", "amount": int64(125)}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "o2", Labels: []string{"Order"}, Properties: map[string]interface{}{"owner_id": "a2", "order_id": "ORD-002", "amount": int64(90)}})
+	require.NoError(t, err)
+
+	seed := &ExecuteResult{
+		Columns: []string{"person_id", "person_name"},
+		Rows: [][]interface{}{
+			{"a1", "Alice"},
+			{"a2", "Bob"},
+		},
+	}
+
+	res, err := exec.executeChainedCallSubquery(ctx, seed, "CALL { OPTIONAL MATCH (o:Order) WHERE o.owner_id = person_id AND o.amount >= $min_amount RETURN collect(o.order_id) AS order_ids, count(o) AS order_count } RETURN person_id, person_name, order_ids, order_count")
+	require.NoError(t, err)
+	require.Equal(t, []string{"person_id", "person_name", "order_ids", "order_count"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+
+	rowByID := make(map[string][]interface{}, len(res.Rows))
+	for _, row := range res.Rows {
+		require.Len(t, row, 4)
+		id, ok := row[0].(string)
+		require.True(t, ok)
+		rowByID[id] = row
+	}
+	require.Contains(t, rowByID, "a1")
+	require.Contains(t, rowByID, "a2")
+
+	a1Orders, ok := rowByID["a1"][2].([]interface{})
+	require.True(t, ok)
+	require.Len(t, a1Orders, 1)
+	require.Equal(t, "ORD-001", a1Orders[0])
+	require.EqualValues(t, 1, rowByID["a1"][3])
+
+	a2Orders, ok := rowByID["a2"][2].([]interface{})
+	require.True(t, ok)
+	require.Len(t, a2Orders, 0)
+	require.EqualValues(t, 0, rowByID["a2"][3])
+}
+
 func TestSeedNodesFromOuterMatch_Branches(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "seed_outer")

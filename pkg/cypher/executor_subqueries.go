@@ -1842,10 +1842,16 @@ func (e *StorageExecutor) executeChainedCallSubquery(ctx context.Context, seedRe
 	if err != nil {
 		return nil, err
 	}
+	implicitImportVars := detectReferencedCallSubquerySeedColumns(seedResult, subqueryBody)
 
 	combined := &ExecuteResult{Columns: []string{}, Rows: make([][]interface{}, 0)}
 	if hasWith {
 		combined, err = targetExec.executeCorrelatedCallWithSeedRows(ctx, seedResult, innerBody, withVars)
+		if err != nil {
+			return nil, err
+		}
+	} else if len(implicitImportVars) > 0 {
+		combined, err = targetExec.executeCorrelatedCallWithSeedRows(ctx, seedResult, subqueryBody, implicitImportVars)
 		if err != nil {
 			return nil, err
 		}
@@ -1862,6 +1868,23 @@ func (e *StorageExecutor) executeChainedCallSubquery(ctx context.Context, seedRe
 	}
 
 	return combined, nil
+}
+
+func detectReferencedCallSubquerySeedColumns(seedResult *ExecuteResult, subqueryBody string) []string {
+	if seedResult == nil || len(seedResult.Columns) == 0 {
+		return nil
+	}
+	referenced := make([]string, 0, len(seedResult.Columns))
+	for _, col := range seedResult.Columns {
+		name := strings.TrimSpace(col)
+		if name == "" {
+			continue
+		}
+		if isIdentifierReferenced(subqueryBody, name) {
+			referenced = append(referenced, name)
+		}
+	}
+	return referenced
 }
 
 func parseLeadingWithImports(subqueryBody string) (withVars []string, innerBody string, hasWith bool, err error) {
@@ -2275,6 +2298,9 @@ func (e *StorageExecutor) tryExecuteCorrelatedBatchedLookup(
 
 	trimmed := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(innerBody), ";"))
 	if findKeywordIndex(trimmed, "MATCH") != 0 || !containsFold(trimmed, "RETURN ") || callSubqueryQueryIsWrite(trimmed) {
+		return nil, false, nil
+	}
+	if containsFold(trimmed, "OPTIONAL MATCH") {
 		return nil, false, nil
 	}
 

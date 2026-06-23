@@ -94,7 +94,10 @@ func (e *StorageExecutor) getCompiledSimpleWhere(ctx context.Context, variable, 
 	// Parameterized predicates are context-bound and must not be cached by raw
 	// clause text alone; otherwise a prior $param value can bleed into later
 	// executions of the same WHERE shape.
-	if strings.Contains(trimmedClause, "$") {
+	// Fabric APPLY imports are also context-bound: the planner/executor can bind
+	// bare identifiers like `person_id` from outer rows, so caching by clause text
+	// alone can bleed one outer row's value into the next.
+	if strings.Contains(trimmedClause, "$") || len(e.fabricRecordBindings) > 0 {
 		return e.compileSimpleWhere(ctx, variable, trimmedClause)
 	}
 	key := simpleWhereCacheKey{variable: variable, clause: trimmedClause}
@@ -189,6 +192,15 @@ func (e *StorageExecutor) compileSimpleWhere(ctx context.Context, variable, wher
 	getProp := func(node *storage.Node, propName string) (any, bool) {
 		return getNodePropertyValue(node, propName)
 	}
+	resolveValue := func(raw string) interface{} {
+		if v, ok := resolveDirectParamRef(ctx, raw); ok {
+			return v
+		}
+		if v, ok := resolveParamPathRef(ctx, raw); ok {
+			return normalizePropValue(v)
+		}
+		return e.parseValue(ctx, raw)
+	}
 
 	const prefixSep = "."
 	varPrefix := variable + prefixSep
@@ -224,7 +236,7 @@ func (e *StorageExecutor) compileSimpleWhere(ctx context.Context, variable, wher
 		if prop == "" || strings.ContainsAny(prop, " \t\r\n") {
 			return nil, false
 		}
-		expectedRaw := e.parseValue(ctx, right)
+		expectedRaw := resolveValue(right)
 		expected, ok := expectedRaw.(string)
 		if !ok {
 			return nil, false
@@ -274,7 +286,7 @@ func (e *StorageExecutor) compileSimpleWhere(ctx context.Context, variable, wher
 				if isValidIdentifier(right) && len(e.fabricRecordBindings) > 0 {
 					listVal = e.fabricRecordBindings[right]
 				} else {
-					listVal = e.parseValue(ctx, right)
+					listVal = resolveValue(right)
 				}
 				if items, ok := toInterfaceSlice(listVal); ok {
 					comparableSet, nonComparable := buildComparableMembershipIndex(items)
@@ -332,7 +344,7 @@ func (e *StorageExecutor) compileSimpleWhere(ctx context.Context, variable, wher
 			if idVar != variable || right == "" {
 				return nil, false
 			}
-			expected := normalizeNodeIDValue(e.parseValue(ctx, right))
+			expected := normalizeNodeIDValue(resolveValue(right))
 			return func(node *storage.Node) bool {
 				actual := string(node.ID)
 				switch op {
@@ -350,7 +362,7 @@ func (e *StorageExecutor) compileSimpleWhere(ctx context.Context, variable, wher
 			if idVar != variable || right == "" {
 				return nil, false
 			}
-			expected := normalizeNodeIDValue(e.parseValue(ctx, right))
+			expected := normalizeNodeIDValue(resolveValue(right))
 			return func(node *storage.Node) bool {
 				actual := string(node.ID)
 				switch op {
@@ -370,7 +382,7 @@ func (e *StorageExecutor) compileSimpleWhere(ctx context.Context, variable, wher
 		if prop == "" || strings.ContainsAny(prop, " \t\r\n") {
 			return nil, false
 		}
-		expected := e.parseValue(ctx, right)
+		expected := resolveValue(right)
 		return func(node *storage.Node) bool {
 			actual, exists := getProp(node, prop)
 			if !exists {
