@@ -132,11 +132,6 @@ func (e *StorageExecutor) callDbIndexFulltextQueryRelationships(cypher string) (
 		}
 	}
 
-	edges, err := e.storage.AllEdges()
-	if err != nil {
-		return nil, err
-	}
-
 	wildcard := isFulltextWildcard(query)
 	presenceProp, isPresenceQuery := fulltextFieldPresenceQuery(query)
 
@@ -147,20 +142,36 @@ func (e *StorageExecutor) callDbIndexFulltextQueryRelationships(cypher string) (
 	}
 
 	if wildcard || isPresenceQuery {
-		for _, edge := range edges {
+		if opts.limit == 0 {
+			return result, nil
+		}
+		seen := 0
+		err := storage.StreamEdgesWithFallback(context.Background(), e.storage, 1024, func(edge *storage.Edge) error {
 			if !matchesRelationshipTypes(edge, targetTypes) {
-				continue
+				return nil
 			}
 			if wildcard {
-				result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
-				continue
+				if appendFulltextOptionedRow(result, opts, &seen, []interface{}{edgeToMap(edge), 1.0}) {
+					return storage.ErrIterationStopped
+				}
+				return nil
 			}
 			if edgeHasNonEmptyProperty(edge, presenceProp) {
-				result.Rows = append(result.Rows, []interface{}{edgeToMap(edge), 1.0})
+				if appendFulltextOptionedRow(result, opts, &seen, []interface{}{edgeToMap(edge), 1.0}) {
+					return storage.ErrIterationStopped
+				}
 			}
+			return nil
+		})
+		if err != nil && err != storage.ErrIterationStopped {
+			return nil, err
 		}
-		applyFulltextOptions(result, opts)
 		return result, nil
+	}
+
+	edges, err := e.storage.AllEdges()
+	if err != nil {
+		return nil, err
 	}
 
 	queryTerms, excludeTerms, mustHaveTerms := parseFulltextQuery(query)
@@ -346,13 +357,19 @@ func writeFulltextValue(content *strings.Builder, val interface{}) {
 // in one place so the queryRelationships scan and any future relationship
 // surface emit identical shapes.
 func edgeToMap(edge *storage.Edge) map[string]interface{} {
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"_id":        string(edge.ID),
 		"_type":      edge.Type,
 		"_start":     string(edge.StartNode),
 		"_end":       string(edge.EndNode),
 		"properties": edge.Properties,
 	}
+	for key, value := range edge.Properties {
+		if _, exists := result[key]; !exists {
+			result[key] = value
+		}
+	}
+	return result
 }
 
 // callDbIndexVectorQueryRelationships searches relationships using vector similarity - Neo4j db.index.vector.queryRelationships()

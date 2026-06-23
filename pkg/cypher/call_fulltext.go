@@ -416,6 +416,22 @@ func applyFulltextOptions(result *ExecuteResult, opts fulltextQueryOptions) {
 	}
 }
 
+func appendFulltextOptionedRow(result *ExecuteResult, opts fulltextQueryOptions, seen *int, row []interface{}) bool {
+	if result == nil || seen == nil {
+		return false
+	}
+	current := *seen
+	*seen = current + 1
+	if current < opts.skip {
+		return false
+	}
+	if opts.limit >= 0 && len(result.Rows) >= opts.limit {
+		return true
+	}
+	result.Rows = append(result.Rows, row)
+	return opts.limit >= 0 && len(result.Rows) >= opts.limit
+}
+
 // parseFulltextQuery parses a fulltext query into regular terms, exclude terms, and must-have terms
 func parseFulltextQuery(query string) (terms, excludeTerms, mustHaveTerms []string) {
 	query = strings.ToLower(query)

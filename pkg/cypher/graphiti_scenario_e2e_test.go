@@ -483,6 +483,141 @@ LIMIT 15
 	}
 }
 
+func BenchmarkGraphitiRelationshipFulltextCallTail(b *testing.B) {
+	const (
+		dim         = 32
+		entityCount = 256
+		edgeCount   = 1024
+		limit       = 128
+	)
+
+	base := newTestMemoryEngine(b)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	exec.cache = nil
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE FULLTEXT INDEX rel_ft IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON EACH [e.fact, e.name]", nil)
+	require.NoError(b, err)
+
+	payload := buildGraphitiScenarioPayload(entityCount, edgeCount, 0, dim)
+	_, err = exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": payload.nodes})
+	require.NoError(b, err)
+	_, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
+	require.NoError(b, err)
+	edgeTotal, err := ns.EdgeCount()
+	require.NoError(b, err)
+	require.Equal(b, int64(edgeCount), edgeTotal)
+	rawFulltext, err := exec.Execute(ctx, `CALL db.index.fulltext.queryRelationships("rel_ft", "*", {limit: $limit}) YIELD relationship AS rel, score RETURN rel.uuid AS uuid, score`, map[string]interface{}{"limit": limit})
+	require.NoError(b, err)
+	require.Len(b, rawFulltext.Rows, limit)
+
+	query := `
+CALL db.index.fulltext.queryRelationships("rel_ft", "*", {limit: $limit})
+YIELD relationship AS rel, score
+MATCH (n:Entity)-[e:RELATES_TO {uuid: rel.uuid}]->(m:Entity)
+WHERE e.group_id IN $group_ids
+WITH e, score, n, m
+RETURN
+	e.uuid AS uuid,
+	n.uuid AS source_node_uuid,
+	m.uuid AS target_node_uuid,
+	e.group_id AS group_id,
+	e.created_at AS created_at,
+	e.name AS name,
+	e.fact AS fact,
+	e.episodes AS episodes,
+	e.expired_at AS expired_at,
+	e.valid_at AS valid_at,
+	e.invalid_at AS invalid_at,
+	properties(e) AS attributes
+ORDER BY score DESC
+LIMIT $limit
+`
+	params := map[string]interface{}{
+		"group_ids": []string{graphitiGroupID},
+		"limit":     limit,
+	}
+	res, err := exec.Execute(ctx, query, params)
+	require.NoError(b, err)
+	require.Len(b, res.Rows, limit)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err = exec.Execute(ctx, query, params)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(res.Rows) != limit {
+			b.Fatalf("expected %d rows, got %d", limit, len(res.Rows))
+		}
+	}
+}
+
+func BenchmarkGraphitiRelationshipFulltextCallTailProjectionFilter(b *testing.B) {
+	const (
+		dim         = 32
+		entityCount = 256
+		edgeCount   = 1024
+		limit       = 128
+	)
+
+	base := newTestMemoryEngine(b)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	exec.cache = nil
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE FULLTEXT INDEX rel_ft IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON EACH [e.fact, e.name]", nil)
+	require.NoError(b, err)
+
+	payload := buildGraphitiScenarioPayload(entityCount, edgeCount, 0, dim)
+	_, err = exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": payload.nodes})
+	require.NoError(b, err)
+	_, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
+	require.NoError(b, err)
+
+	query := `
+CALL db.index.fulltext.queryRelationships("rel_ft", "*", {limit: $limit})
+YIELD relationship AS rel, score
+WITH rel, score
+WHERE score >= $min_score AND rel.uuid IS NOT NULL
+RETURN
+	rel.uuid AS uuid,
+	rel.group_id AS group_id,
+	rel.name AS name,
+	rel.fact AS fact,
+	rel.episodes AS episodes,
+	rel.expired_at AS expired_at,
+	rel.valid_at AS valid_at,
+	rel.invalid_at AS invalid_at,
+	properties(rel) AS attributes,
+	score
+ORDER BY score DESC
+LIMIT $limit
+`
+	params := map[string]interface{}{
+		"min_score": 0.0,
+		"limit":     limit,
+	}
+	res, err := exec.Execute(ctx, query, params)
+	require.NoError(b, err)
+	require.Len(b, res.Rows, limit)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err = exec.Execute(ctx, query, params)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(res.Rows) != limit {
+			b.Fatalf("expected %d rows, got %d", limit, len(res.Rows))
+		}
+	}
+}
+
 func BenchmarkGraphitiScenarioHotspots(b *testing.B) {
 	base := newTestMemoryEngine(b)
 	ns := storage.NewNamespacedEngine(base, "test")

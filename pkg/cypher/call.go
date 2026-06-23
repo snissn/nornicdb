@@ -441,6 +441,12 @@ func (e *StorageExecutor) executeCallTail(ctx context.Context, seed *ExecuteResu
 		if setBased, ok := e.executeCallTailSetBased(ctx, seed, tail, usedCols, expectedCols); ok {
 			return setBased, nil
 		}
+		if projected, ok, err := e.tryExecuteCallTailRelationshipMatchProjection(ctx, seed, tail, expectedCols); ok || err != nil {
+			return projected, err
+		}
+		if projected, ok, err := e.tryExecuteCallTailProjectionFilter(ctx, seed, tail, expectedCols); ok || err != nil {
+			return projected, err
+		}
 	}
 	// Fallback fast path for read-only tails: execute per-row tails concurrently.
 	// This preserves current semantics while reducing wall-clock fixed cost for
@@ -846,6 +852,1134 @@ func (e *StorageExecutor) executeCallTailSetBased(
 		res.Columns = append([]string{}, expectedCols...)
 	}
 	return res, true
+}
+
+type callTailProjectionPlan struct {
+	withItems     []returnItem
+	whereClause   string
+	returnItems   []returnItem
+	orderBy       string
+	limitToken    string
+	skipToken     string
+	columns       []string
+	whereFilter   callTailValuePredicate
+	withProject   []callTailValueProjector
+	returnProject []callTailValueProjector
+	withIdentity  bool
+}
+
+type callTailValueProjector func(map[string]interface{}) interface{}
+type callTailValuePredicate func(map[string]interface{}, map[string]interface{}) bool
+type callTailValueResolver func(map[string]interface{}, map[string]interface{}) (interface{}, bool)
+
+type callTailRelationshipMatchPlan struct {
+	startVar       string
+	startLabel     string
+	relVar         string
+	relType        string
+	propertyKey    string
+	propertyExpr   string
+	propertyValue  callTailValueProjector
+	propertySource string
+	endVar         string
+	endLabel       string
+	whereFilter    callTailValuePredicate
+	projection     *callTailProjectionPlan
+}
+
+type callTailRelationshipPatternParts struct {
+	startVar     string
+	startLabel   string
+	relVar       string
+	relType      string
+	propertyKey  string
+	propertyExpr string
+	endVar       string
+	endLabel     string
+	rest         string
+}
+
+func (e *StorageExecutor) tryExecuteCallTailProjectionFilter(
+	ctx context.Context,
+	seed *ExecuteResult,
+	tail string,
+	expectedCols []string,
+) (*ExecuteResult, bool, error) {
+	plan, ok := e.parseCallTailProjectionPlan(ctx, tail)
+	if !ok {
+		return nil, false, nil
+	}
+	valueRows := make([]map[string]interface{}, 0, len(seed.Rows))
+	for _, seedRow := range seed.Rows {
+		valueRows = append(valueRows, seedValuesForRow(seed, seedRow))
+	}
+	result, err := e.executeCallTailProjectionPlan(ctx, plan, valueRows, expectedCols)
+	if err != nil {
+		return nil, true, err
+	}
+	e.markCallTailProjectionFastPathUsed()
+	return result, true, nil
+}
+
+func (e *StorageExecutor) executeCallTailProjectionPlan(
+	ctx context.Context,
+	plan *callTailProjectionPlan,
+	valueRows []map[string]interface{},
+	expectedCols []string,
+) (*ExecuteResult, error) {
+	params := getParamsFromContext(ctx)
+	limit, ok := resolveOptionalIntLiteralOrParam(ctx, plan.limitToken)
+	if !ok {
+		return nil, fmt.Errorf("invalid CALL tail LIMIT: %s", plan.limitToken)
+	}
+	skip, ok := resolveOptionalIntLiteralOrParam(ctx, plan.skipToken)
+	if !ok {
+		return nil, fmt.Errorf("invalid CALL tail SKIP: %s", plan.skipToken)
+	}
+
+	result := &ExecuteResult{
+		Columns: append([]string{}, plan.columns...),
+		Rows:    make([][]interface{}, 0, len(valueRows)),
+	}
+	for _, values := range valueRows {
+		projectedValues := values
+		if !plan.withIdentity {
+			projectedValues = make(map[string]interface{}, len(values)+len(plan.withItems))
+			for key, value := range values {
+				projectedValues[key] = value
+			}
+			for i, item := range plan.withItems {
+				alias := item.alias
+				if alias == "" {
+					alias = item.expr
+				}
+				projectedValues[alias] = plan.withProject[i](values)
+			}
+		}
+		if plan.whereFilter != nil && !plan.whereFilter(projectedValues, params) {
+			continue
+		}
+		row := make([]interface{}, len(plan.returnItems))
+		for i := range plan.returnItems {
+			row[i] = plan.returnProject[i](projectedValues)
+		}
+		result.Rows = append(result.Rows, row)
+	}
+	if plan.orderBy != "" {
+		result = e.applyOrderByToResult(result, plan.orderBy)
+	}
+	if skip > 0 {
+		if skip >= len(result.Rows) {
+			result.Rows = [][]interface{}{}
+		} else {
+			result.Rows = result.Rows[skip:]
+		}
+	}
+	if limit >= 0 && limit < len(result.Rows) {
+		result.Rows = result.Rows[:limit]
+	}
+	if len(expectedCols) > 0 && len(expectedCols) == len(result.Columns) {
+		result.Columns = append([]string{}, expectedCols...)
+	}
+	return result, nil
+}
+
+func (e *StorageExecutor) tryExecuteCallTailRelationshipMatchProjection(
+	ctx context.Context,
+	seed *ExecuteResult,
+	tail string,
+	expectedCols []string,
+) (*ExecuteResult, bool, error) {
+	plan, ok := e.parseCallTailRelationshipMatchPlan(ctx, tail)
+	if !ok {
+		return nil, false, nil
+	}
+	params := getParamsFromContext(ctx)
+	valueRows := make([]map[string]interface{}, 0, len(seed.Rows))
+	for _, seedRow := range seed.Rows {
+		values := seedValuesForRow(seed, seedRow)
+		relRaw, ok := values[plan.propertySource]
+		if !ok {
+			continue
+		}
+		relMap, ok := callTailRelationshipMap(relRaw)
+		if !ok {
+			continue
+		}
+		if plan.relType != "" {
+			if relType, _ := callTailMapString(relMap, "_type", "type"); !strings.EqualFold(relType, plan.relType) {
+				continue
+			}
+		}
+		if plan.propertyKey != "" {
+			expected := plan.propertyValue(values)
+			if expected == nil {
+				continue
+			}
+			actual := extractPropertyFromValue(relMap, plan.propertyKey)
+			if !e.compareEqual(actual, expected) {
+				continue
+			}
+		}
+		startID, okStart := callTailMapString(relMap, "_start", "start", "startNode", "start_node")
+		endID, okEnd := callTailMapString(relMap, "_end", "end", "endNode", "end_node")
+		if !okStart || !okEnd || startID == "" || endID == "" {
+			continue
+		}
+		startNode, err := e.storage.GetNode(storage.NodeID(startID))
+		if err != nil || startNode == nil {
+			continue
+		}
+		endNode, err := e.storage.GetNode(storage.NodeID(endID))
+		if err != nil || endNode == nil {
+			continue
+		}
+		if plan.startLabel != "" && !containsString(startNode.Labels, plan.startLabel) {
+			continue
+		}
+		if plan.endLabel != "" && !containsString(endNode.Labels, plan.endLabel) {
+			continue
+		}
+
+		matched := make(map[string]interface{}, len(values)+3)
+		for key, value := range values {
+			matched[key] = value
+		}
+		matched[plan.startVar] = startNode
+		matched[plan.relVar] = relMap
+		matched[plan.endVar] = endNode
+		if plan.whereFilter != nil && !plan.whereFilter(matched, params) {
+			continue
+		}
+		valueRows = append(valueRows, matched)
+	}
+	result, err := e.executeCallTailProjectionPlan(ctx, plan.projection, valueRows, expectedCols)
+	if err != nil {
+		return nil, true, err
+	}
+	e.markCallTailProjectionFastPathUsed()
+	return result, true, nil
+}
+
+func (e *StorageExecutor) parseCallTailRelationshipMatchPlan(ctx context.Context, tail string) (*callTailRelationshipMatchPlan, bool) {
+	trimmed := strings.TrimSpace(tail)
+	if !hasPrefixFoldASCII(trimmed, "MATCH ") || isPotentialWriteTail(trimmed) {
+		return nil, false
+	}
+	parts, ok := parseCallTailRelationshipPattern(trimmed)
+	if !ok {
+		return nil, false
+	}
+	rest := strings.TrimSpace(parts.rest)
+	withIdx := topLevelKeywordIndex(rest, "WITH")
+	if withIdx < 0 {
+		return nil, false
+	}
+	whereClause := strings.TrimSpace(rest[:withIdx])
+	if whereClause != "" {
+		if !hasPrefixFoldASCII(whereClause, "WHERE ") {
+			return nil, false
+		}
+		whereClause = strings.TrimSpace(whereClause[len("WHERE "):])
+	}
+	projection, ok := e.parseCallTailProjectionPlan(ctx, strings.TrimSpace(rest[withIdx:]))
+	if !ok {
+		return nil, false
+	}
+	propertyExpr := strings.TrimSpace(parts.propertyExpr)
+	propertySource := ""
+	if dotIdx := strings.Index(propertyExpr, "."); dotIdx > 0 {
+		propertySource = strings.TrimSpace(propertyExpr[:dotIdx])
+	}
+	if parts.propertyKey == "" || propertySource == "" {
+		return nil, false
+	}
+	propertyProjector, ok := e.compileCallTailValueProjector(propertyExpr)
+	if !ok {
+		return nil, false
+	}
+	var whereFilter callTailValuePredicate
+	if whereClause != "" {
+		predicate, ok := e.tryCompileCallTailValueWhere(ctx, whereClause)
+		if !ok {
+			return nil, false
+		}
+		whereFilter = predicate
+	}
+	return &callTailRelationshipMatchPlan{
+		startVar:       parts.startVar,
+		startLabel:     parts.startLabel,
+		relVar:         parts.relVar,
+		relType:        parts.relType,
+		propertyKey:    parts.propertyKey,
+		propertyExpr:   propertyExpr,
+		propertyValue:  propertyProjector,
+		propertySource: propertySource,
+		endVar:         parts.endVar,
+		endLabel:       parts.endLabel,
+		whereFilter:    whereFilter,
+		projection:     projection,
+	}, true
+}
+
+func parseCallTailRelationshipPattern(tail string) (callTailRelationshipPatternParts, bool) {
+	var parts callTailRelationshipPatternParts
+	rest := strings.TrimSpace(tail)
+	if !hasPrefixFoldASCII(rest, "MATCH") {
+		return parts, false
+	}
+	rest = strings.TrimSpace(rest[len("MATCH"):])
+	startVar, startLabel, rest, ok := parseCallTailNodeToken(rest)
+	if !ok {
+		return parts, false
+	}
+	rest = strings.TrimLeftFunc(rest, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' })
+	if !strings.HasPrefix(rest, "-") {
+		return parts, false
+	}
+	rest = strings.TrimSpace(rest[1:])
+	relInside, rest, ok := parseCallTailDelimited(rest, '[', ']')
+	if !ok {
+		return parts, false
+	}
+	relVar, relType, propertyKey, propertyExpr, ok := parseCallTailRelationshipToken(relInside)
+	if !ok {
+		return parts, false
+	}
+	rest = strings.TrimSpace(rest)
+	if !strings.HasPrefix(rest, "->") {
+		return parts, false
+	}
+	rest = strings.TrimSpace(rest[2:])
+	endVar, endLabel, rest, ok := parseCallTailNodeToken(rest)
+	if !ok {
+		return parts, false
+	}
+	parts.startVar = startVar
+	parts.startLabel = startLabel
+	parts.relVar = relVar
+	parts.relType = relType
+	parts.propertyKey = propertyKey
+	parts.propertyExpr = propertyExpr
+	parts.endVar = endVar
+	parts.endLabel = endLabel
+	parts.rest = rest
+	return parts, true
+}
+
+func parseCallTailNodeToken(input string) (variable, label, rest string, ok bool) {
+	inside, rest, ok := parseCallTailDelimited(strings.TrimSpace(input), '(', ')')
+	if !ok {
+		return "", "", "", false
+	}
+	variable, label, ok = parseCallTailIdentifierAndOptionalType(inside)
+	if !ok || variable == "" {
+		return "", "", "", false
+	}
+	return variable, label, rest, true
+}
+
+func parseCallTailRelationshipToken(input string) (variable, relType, propertyKey, propertyExpr string, ok bool) {
+	rest := strings.TrimSpace(input)
+	variable, rest, ok = parseCallTailIdentifier(rest)
+	if !ok || variable == "" {
+		return "", "", "", "", false
+	}
+	rest = strings.TrimSpace(rest)
+	if strings.HasPrefix(rest, ":") {
+		rest = strings.TrimSpace(rest[1:])
+		relType, rest, ok = parseCallTailIdentifier(rest)
+		if !ok || relType == "" {
+			return "", "", "", "", false
+		}
+		rest = strings.TrimSpace(rest)
+	}
+	if rest == "" {
+		return variable, relType, "", "", true
+	}
+	if !strings.HasPrefix(rest, "{") {
+		return "", "", "", "", false
+	}
+	propertyKey, propertyExpr, rest, ok = parseCallTailSinglePropertyMap(rest)
+	if !ok || strings.TrimSpace(rest) != "" {
+		return "", "", "", "", false
+	}
+	return variable, relType, propertyKey, propertyExpr, true
+}
+
+func parseCallTailIdentifierAndOptionalType(input string) (variable, label string, ok bool) {
+	rest := strings.TrimSpace(input)
+	variable, rest, ok = parseCallTailIdentifier(rest)
+	if !ok || variable == "" {
+		return "", "", false
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return variable, "", true
+	}
+	if !strings.HasPrefix(rest, ":") {
+		return "", "", false
+	}
+	rest = strings.TrimSpace(rest[1:])
+	label, rest, ok = parseCallTailIdentifier(rest)
+	if !ok || label == "" || strings.TrimSpace(rest) != "" {
+		return "", "", false
+	}
+	return variable, label, true
+}
+
+func parseCallTailIdentifier(input string) (string, string, bool) {
+	text := strings.TrimSpace(input)
+	if text == "" || !isIdentifierStart(text[0]) {
+		return "", "", false
+	}
+	i := 1
+	for i < len(text) && isIdentifierPart(text[i]) {
+		i++
+	}
+	return text[:i], text[i:], true
+}
+
+func parseCallTailDelimited(input string, open, close byte) (inside, rest string, ok bool) {
+	text := strings.TrimSpace(input)
+	if text == "" || text[0] != open {
+		return "", "", false
+	}
+	depth := 0
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == open:
+			depth++
+		case ch == close:
+			depth--
+			if depth == 0 {
+				return text[1:i], text[i+1:], true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func parseCallTailSinglePropertyMap(input string) (key, expr, rest string, ok bool) {
+	inside, rest, ok := parseCallTailDelimited(input, '{', '}')
+	if !ok {
+		return "", "", "", false
+	}
+	commaIdx := findTopLevelByte(inside, ',')
+	if commaIdx >= 0 {
+		return "", "", "", false
+	}
+	colonIdx := findTopLevelByte(inside, ':')
+	if colonIdx <= 0 {
+		return "", "", "", false
+	}
+	key = strings.TrimSpace(inside[:colonIdx])
+	expr = strings.TrimSpace(inside[colonIdx+1:])
+	if !isValidIdentifier(key) || expr == "" {
+		return "", "", "", false
+	}
+	return key, expr, rest, true
+}
+
+func findTopLevelByte(input string, target byte) int {
+	inSingle := false
+	inDouble := false
+	parenDepth := 0
+	bracketDepth := 0
+	braceDepth := 0
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '(':
+			parenDepth++
+		case ch == ')':
+			parenDepth--
+		case ch == '[':
+			bracketDepth++
+		case ch == ']':
+			bracketDepth--
+		case ch == '{':
+			braceDepth++
+		case ch == '}':
+			braceDepth--
+		case ch == target && parenDepth == 0 && bracketDepth == 0 && braceDepth == 0:
+			return i
+		}
+	}
+	return -1
+}
+
+func callTailRelationshipMap(raw interface{}) (map[string]interface{}, bool) {
+	switch value := raw.(type) {
+	case map[string]interface{}:
+		return value, true
+	case map[interface{}]interface{}:
+		return normalizeInterfaceMap(value), true
+	case *storage.Edge:
+		if value == nil {
+			return nil, false
+		}
+		return edgeToMap(value), true
+	default:
+		return nil, false
+	}
+}
+
+func callTailMapString(values map[string]interface{}, keys ...string) (string, bool) {
+	for _, key := range keys {
+		value, ok := values[key]
+		if !ok || value == nil {
+			continue
+		}
+		switch v := value.(type) {
+		case string:
+			return v, true
+		case storage.NodeID:
+			return string(v), true
+		case storage.EdgeID:
+			return string(v), true
+		default:
+			return fmt.Sprint(v), true
+		}
+	}
+	return "", false
+}
+
+func (e *StorageExecutor) parseCallTailProjectionPlan(ctx context.Context, tail string) (*callTailProjectionPlan, bool) {
+	trimmed := strings.TrimSpace(tail)
+	if !hasPrefixFoldASCII(trimmed, "WITH ") || isPotentialWriteTail(trimmed) {
+		return nil, false
+	}
+	withIdx := len("WITH ")
+	returnIdx := topLevelKeywordIndex(trimmed, "RETURN")
+	if returnIdx < 0 {
+		return nil, false
+	}
+	beforeReturn := strings.TrimSpace(trimmed[withIdx:returnIdx])
+	returnAndModifiers := strings.TrimSpace(trimmed[returnIdx+len("RETURN"):])
+	if beforeReturn == "" || returnAndModifiers == "" {
+		return nil, false
+	}
+
+	whereClause := ""
+	withProjection := beforeReturn
+	if whereIdx := topLevelKeywordIndex(beforeReturn, "WHERE"); whereIdx >= 0 {
+		withProjection = strings.TrimSpace(beforeReturn[:whereIdx])
+		whereClause = strings.TrimSpace(beforeReturn[whereIdx+len("WHERE"):])
+	}
+	if withProjection == "" {
+		return nil, false
+	}
+	returnProjection, orderBy, limitToken, skipToken := splitCallTailProjectionModifiers(returnAndModifiers)
+	if returnProjection == "" {
+		return nil, false
+	}
+
+	withItems := e.parseReturnItems(withProjection)
+	returnItems := e.parseReturnItems(returnProjection)
+	if len(withItems) == 0 || len(returnItems) == 0 || hasStarReturnItem(withItems) || hasStarReturnItem(returnItems) {
+		return nil, false
+	}
+	withProject := make([]callTailValueProjector, len(withItems))
+	for i, item := range withItems {
+		projector, ok := e.compileCallTailValueProjector(item.expr)
+		if !ok {
+			return nil, false
+		}
+		withProject[i] = projector
+	}
+	returnProject := make([]callTailValueProjector, len(returnItems))
+	columns := make([]string, len(returnItems))
+	for i, item := range returnItems {
+		projector, ok := e.compileCallTailValueProjector(item.expr)
+		if !ok {
+			return nil, false
+		}
+		returnProject[i] = projector
+		if item.alias != "" {
+			columns[i] = item.alias
+		} else {
+			columns[i] = item.expr
+		}
+	}
+	var whereFilter callTailValuePredicate
+	if whereClause != "" {
+		predicate, ok := e.tryCompileCallTailValueWhere(ctx, whereClause)
+		if !ok {
+			return nil, false
+		}
+		whereFilter = predicate
+	}
+	return &callTailProjectionPlan{
+		withItems:     withItems,
+		whereClause:   whereClause,
+		returnItems:   returnItems,
+		orderBy:       orderBy,
+		limitToken:    limitToken,
+		skipToken:     skipToken,
+		columns:       columns,
+		whereFilter:   whereFilter,
+		withProject:   withProject,
+		returnProject: returnProject,
+		withIdentity:  callTailProjectionItemsAreIdentity(withItems),
+	}, true
+}
+
+func (e *StorageExecutor) tryCompileCallTailValueWhere(ctx context.Context, whereClause string) (callTailValuePredicate, bool) {
+	_ = ctx
+	clause := strings.TrimSpace(whereClause)
+	if clause == "" {
+		return func(map[string]interface{}, map[string]interface{}) bool { return true }, true
+	}
+	if idx := findTopLevelKeyword(clause, " AND "); idx > 0 {
+		left, okLeft := e.tryCompileCallTailValueWhere(ctx, clause[:idx])
+		right, okRight := e.tryCompileCallTailValueWhere(ctx, clause[idx+5:])
+		if !okLeft || !okRight {
+			return nil, false
+		}
+		return func(values map[string]interface{}, params map[string]interface{}) bool {
+			return left(values, params) && right(values, params)
+		}, true
+	}
+	if idx := findTopLevelKeyword(clause, " OR "); idx > 0 {
+		left, okLeft := e.tryCompileCallTailValueWhere(ctx, clause[:idx])
+		right, okRight := e.tryCompileCallTailValueWhere(ctx, clause[idx+4:])
+		if !okLeft || !okRight {
+			return nil, false
+		}
+		return func(values map[string]interface{}, params map[string]interface{}) bool {
+			return left(values, params) || right(values, params)
+		}, true
+	}
+	if hasPrefixFoldASCII(clause, "NOT ") {
+		inner, ok := e.tryCompileCallTailValueWhere(ctx, clause[4:])
+		if !ok {
+			return nil, false
+		}
+		return func(values map[string]interface{}, params map[string]interface{}) bool {
+			return !inner(values, params)
+		}, true
+	}
+	if predicate, ok := e.compileCallTailValueNullPredicate(clause, " IS NOT NULL", true); ok {
+		return predicate, true
+	}
+	if predicate, ok := e.compileCallTailValueNullPredicate(clause, " IS NULL", false); ok {
+		return predicate, true
+	}
+	for _, op := range []string{" STARTS WITH ", " ENDS WITH ", " CONTAINS "} {
+		if predicate, ok := e.compileCallTailValueStringPredicate(clause, op); ok {
+			return predicate, true
+		}
+	}
+	if predicate, ok := e.compileCallTailValueInPredicate(clause, " NOT IN ", true); ok {
+		return predicate, true
+	}
+	if predicate, ok := e.compileCallTailValueInPredicate(clause, " IN ", false); ok {
+		return predicate, true
+	}
+	if predicate, ok := e.compileCallTailValueComparisonPredicate(clause); ok {
+		return predicate, true
+	}
+	return nil, false
+}
+
+func (e *StorageExecutor) compileCallTailValueProjector(expr string) (callTailValueProjector, bool) {
+	trimmed := strings.TrimSpace(expr)
+	if trimmed == "" || isAggregateExpression(trimmed) || strings.Contains(trimmed, "[") {
+		return nil, false
+	}
+	if resolver, ok := compileCallTailDirectValueResolver(trimmed); ok {
+		return func(values map[string]interface{}) interface{} {
+			value, _ := resolver(values)
+			return value
+		}, true
+	}
+	return func(values map[string]interface{}) interface{} {
+		return e.evaluateExpressionFromValues(trimmed, values)
+	}, true
+}
+
+func (e *StorageExecutor) compileCallTailValueResolver(expr string) (callTailValueResolver, bool) {
+	trimmed := strings.TrimSpace(expr)
+	if trimmed == "" {
+		return nil, false
+	}
+	if literal, ok := parseLiteralValueFromComputedRow(trimmed); ok {
+		return func(map[string]interface{}, map[string]interface{}) (interface{}, bool) { return literal, true }, true
+	}
+	if strings.HasPrefix(trimmed, "$") {
+		paramName := strings.TrimSpace(strings.TrimPrefix(trimmed, "$"))
+		if paramName == "" {
+			return nil, false
+		}
+		return func(_ map[string]interface{}, params map[string]interface{}) (interface{}, bool) {
+			if params == nil {
+				return nil, false
+			}
+			value, ok := params[paramName]
+			return value, ok
+		}, true
+	}
+	if resolver, ok := compileCallTailDirectValueResolver(trimmed); ok {
+		return func(values map[string]interface{}, _ map[string]interface{}) (interface{}, bool) {
+			return resolver(values)
+		}, true
+	}
+	return func(values map[string]interface{}, params map[string]interface{}) (interface{}, bool) {
+		if value, ok := values[trimmed]; ok {
+			return value, true
+		}
+		if params != nil {
+			if value, ok := params[trimmed]; ok {
+				return value, true
+			}
+		}
+		value := e.evaluateExpressionFromValues(trimmed, values)
+		if value == nil {
+			return nil, false
+		}
+		if s, ok := value.(string); ok && s == trimmed {
+			return nil, false
+		}
+		return value, true
+	}, true
+}
+
+type callTailDirectValueResolver func(map[string]interface{}) (interface{}, bool)
+
+func compileCallTailDirectValueResolver(expr string) (callTailDirectValueResolver, bool) {
+	trimmed := strings.TrimSpace(expr)
+	if trimmed == "" {
+		return nil, false
+	}
+	if isValidIdentifier(trimmed) {
+		name := trimmed
+		return func(values map[string]interface{}) (interface{}, bool) {
+			value, ok := values[name]
+			return value, ok
+		}, true
+	}
+	if variable, property, ok := splitCallTailPropertyAccess(trimmed); ok {
+		return func(values map[string]interface{}) (interface{}, bool) {
+			raw, ok := values[variable]
+			if !ok || raw == nil {
+				return nil, false
+			}
+			return callTailPropertyValue(raw, property)
+		}, true
+	}
+	for _, name := range []string{"properties", "type", "id", "elementId", "labels"} {
+		if !matchFuncStartAndSuffix(trimmed, name) {
+			continue
+		}
+		arg := strings.TrimSpace(extractFuncArgs(trimmed, name))
+		if !isValidIdentifier(arg) {
+			return nil, false
+		}
+		switch strings.ToLower(name) {
+		case "properties":
+			return func(values map[string]interface{}) (interface{}, bool) {
+				raw, ok := values[arg]
+				if !ok || raw == nil {
+					return nil, false
+				}
+				return callTailPropertiesValue(raw)
+			}, true
+		case "type":
+			return func(values map[string]interface{}) (interface{}, bool) {
+				raw, ok := values[arg]
+				if !ok || raw == nil {
+					return nil, false
+				}
+				return callTailTypeValue(raw)
+			}, true
+		case "id", "elementid":
+			return func(values map[string]interface{}) (interface{}, bool) {
+				raw, ok := values[arg]
+				if !ok || raw == nil {
+					return nil, false
+				}
+				return callTailIDValue(raw)
+			}, true
+		case "labels":
+			return func(values map[string]interface{}) (interface{}, bool) {
+				raw, ok := values[arg]
+				if !ok || raw == nil {
+					return nil, false
+				}
+				return callTailLabelsValue(raw)
+			}, true
+		}
+	}
+	return nil, false
+}
+
+func splitCallTailPropertyAccess(expr string) (variable, property string, ok bool) {
+	dotIdx := strings.IndexByte(expr, '.')
+	if dotIdx <= 0 || dotIdx != strings.LastIndexByte(expr, '.') || dotIdx == len(expr)-1 {
+		return "", "", false
+	}
+	variable = strings.TrimSpace(expr[:dotIdx])
+	property = strings.TrimSpace(expr[dotIdx+1:])
+	if !isValidIdentifier(variable) || !isValidIdentifier(property) {
+		return "", "", false
+	}
+	return variable, property, true
+}
+
+func callTailPropertyValue(raw interface{}, property string) (interface{}, bool) {
+	switch value := raw.(type) {
+	case *storage.Node:
+		if value == nil {
+			return nil, false
+		}
+		propertyValue, ok := value.Properties[property]
+		return propertyValue, ok
+	case *storage.Edge:
+		if value == nil {
+			return nil, false
+		}
+		propertyValue, ok := value.Properties[property]
+		return propertyValue, ok
+	case map[string]interface{}:
+		if props, ok := value["properties"].(map[string]interface{}); ok {
+			if propertyValue, exists := props[property]; exists {
+				return propertyValue, true
+			}
+		}
+		propertyValue, ok := value[property]
+		return propertyValue, ok
+	default:
+		return nil, false
+	}
+}
+
+func callTailPropertiesValue(raw interface{}) (interface{}, bool) {
+	switch value := raw.(type) {
+	case *storage.Node:
+		if value == nil {
+			return nil, false
+		}
+		return cloneStringInterfaceMap(value.Properties), true
+	case *storage.Edge:
+		if value == nil {
+			return nil, false
+		}
+		return cloneStringInterfaceMap(value.Properties), true
+	case map[string]interface{}:
+		if props, ok := value["properties"].(map[string]interface{}); ok {
+			return cloneStringInterfaceMap(props), true
+		}
+		out := make(map[string]interface{}, len(value))
+		for key, val := range value {
+			if strings.HasPrefix(key, "_") {
+				continue
+			}
+			out[key] = val
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func cloneStringInterfaceMap(values map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func callTailTypeValue(raw interface{}) (interface{}, bool) {
+	switch value := raw.(type) {
+	case *storage.Edge:
+		if value == nil {
+			return nil, false
+		}
+		return value.Type, true
+	case map[string]interface{}:
+		if relType, ok := value["type"]; ok {
+			return relType, true
+		}
+		relType, ok := value["_type"]
+		return relType, ok
+	default:
+		return nil, false
+	}
+}
+
+func callTailIDValue(raw interface{}) (interface{}, bool) {
+	switch value := raw.(type) {
+	case *storage.Node:
+		if value == nil {
+			return nil, false
+		}
+		return string(value.ID), true
+	case *storage.Edge:
+		if value == nil {
+			return nil, false
+		}
+		return string(value.ID), true
+	case map[string]interface{}:
+		if id, ok := value["id"]; ok {
+			return id, true
+		}
+		id, ok := value["_id"]
+		return id, ok
+	default:
+		return nil, false
+	}
+}
+
+func callTailLabelsValue(raw interface{}) (interface{}, bool) {
+	switch value := raw.(type) {
+	case *storage.Node:
+		if value == nil {
+			return nil, false
+		}
+		labels := make([]interface{}, len(value.Labels))
+		for i, label := range value.Labels {
+			labels[i] = label
+		}
+		return labels, true
+	case map[string]interface{}:
+		labels, ok := value["labels"]
+		return labels, ok
+	default:
+		return nil, false
+	}
+}
+
+func (e *StorageExecutor) compileCallTailValueNullPredicate(clause, op string, expectNotNull bool) (callTailValuePredicate, bool) {
+	idx := findTopLevelKeyword(clause, op)
+	if idx <= 0 {
+		return nil, false
+	}
+	resolver, ok := e.compileCallTailValueResolver(clause[:idx])
+	if !ok {
+		return nil, false
+	}
+	return func(values map[string]interface{}, params map[string]interface{}) bool {
+		value, ok := resolver(values, params)
+		if expectNotNull {
+			return ok && value != nil
+		}
+		return !ok || value == nil
+	}, true
+}
+
+func (e *StorageExecutor) compileCallTailValueStringPredicate(clause, op string) (callTailValuePredicate, bool) {
+	idx := findTopLevelKeyword(clause, op)
+	if idx <= 0 {
+		return nil, false
+	}
+	left, okLeft := e.compileCallTailValueResolver(clause[:idx])
+	right, okRight := e.compileCallTailValueResolver(clause[idx+len(op):])
+	if !okLeft || !okRight {
+		return nil, false
+	}
+	return func(values map[string]interface{}, params map[string]interface{}) bool {
+		leftValue, ok := left(values, params)
+		if !ok {
+			return false
+		}
+		rightValue, ok := right(values, params)
+		if !ok {
+			return false
+		}
+		leftString, okLeft := leftValue.(string)
+		rightString, okRight := rightValue.(string)
+		if !okLeft || !okRight {
+			return false
+		}
+		switch op {
+		case " STARTS WITH ":
+			return strings.HasPrefix(leftString, rightString)
+		case " ENDS WITH ":
+			return strings.HasSuffix(leftString, rightString)
+		case " CONTAINS ":
+			return strings.Contains(leftString, rightString)
+		default:
+			return false
+		}
+	}, true
+}
+
+func (e *StorageExecutor) compileCallTailValueInPredicate(clause, op string, negate bool) (callTailValuePredicate, bool) {
+	idx := findTopLevelKeyword(clause, op)
+	if idx <= 0 {
+		return nil, false
+	}
+	left, ok := e.compileCallTailValueResolver(clause[:idx])
+	if !ok {
+		return nil, false
+	}
+	rightExpr := strings.TrimSpace(clause[idx+len(op):])
+	if literalItems, ok := parseBindingLiteralList(rightExpr); ok {
+		comparableSet, nonComparable := buildComparableMembershipIndex(literalItems)
+		return func(values map[string]interface{}, params map[string]interface{}) bool {
+			leftValue, ok := left(values, params)
+			if !ok {
+				return false
+			}
+			matched := evaluateComparableMembership(leftValue, comparableSet, nonComparable, e.compareEqual)
+			if negate {
+				return !matched
+			}
+			return matched
+		}, true
+	}
+	right, ok := e.compileCallTailValueResolver(rightExpr)
+	if !ok {
+		return nil, false
+	}
+	return func(values map[string]interface{}, params map[string]interface{}) bool {
+		leftValue, ok := left(values, params)
+		if !ok {
+			return false
+		}
+		rightValue, ok := right(values, params)
+		if !ok {
+			return negate
+		}
+		items, ok := toInterfaceSlice(rightValue)
+		if !ok {
+			return negate
+		}
+		comparableSet, nonComparable := buildComparableMembershipIndex(items)
+		matched := evaluateComparableMembership(leftValue, comparableSet, nonComparable, e.compareEqual)
+		if negate {
+			return !matched
+		}
+		return matched
+	}, true
+}
+
+func (e *StorageExecutor) compileCallTailValueComparisonPredicate(clause string) (callTailValuePredicate, bool) {
+	for _, op := range []string{"<=", ">=", "<>", "!=", "<", ">", "="} {
+		idx := findTopLevelKeyword(clause, op)
+		if idx <= 0 {
+			continue
+		}
+		left, okLeft := e.compileCallTailValueResolver(clause[:idx])
+		right, okRight := e.compileCallTailValueResolver(clause[idx+len(op):])
+		if !okLeft || !okRight {
+			return nil, false
+		}
+		return func(values map[string]interface{}, params map[string]interface{}) bool {
+			leftValue, ok := left(values, params)
+			if !ok {
+				return false
+			}
+			rightValue, ok := right(values, params)
+			if !ok {
+				return false
+			}
+			cmpOp := op
+			if cmpOp == "!=" {
+				cmpOp = "<>"
+			}
+			return compareWithOperator(leftValue, rightValue, cmpOp)
+		}, true
+	}
+	return nil, false
+}
+
+func hasStarReturnItem(items []returnItem) bool {
+	for _, item := range items {
+		if strings.TrimSpace(item.expr) == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func callTailProjectionItemsAreIdentity(items []returnItem) bool {
+	for _, item := range items {
+		expr := strings.TrimSpace(item.expr)
+		alias := strings.TrimSpace(item.alias)
+		if !isValidIdentifier(expr) || (alias != "" && alias != expr) {
+			return false
+		}
+	}
+	return true
+}
+
+func splitCallTailProjectionModifiers(returnAndModifiers string) (projection, orderBy, limitToken, skipToken string) {
+	projection = strings.TrimSpace(returnAndModifiers)
+	modifierStart := len(projection)
+	for _, kw := range []string{"ORDER BY", "SKIP", "LIMIT"} {
+		if idx := topLevelKeywordIndex(projection, kw); idx >= 0 && idx < modifierStart {
+			modifierStart = idx
+		}
+	}
+	modifiers := ""
+	if modifierStart < len(projection) {
+		modifiers = strings.TrimSpace(projection[modifierStart:])
+		projection = strings.TrimSpace(projection[:modifierStart])
+	}
+	if modifiers == "" {
+		return projection, "", "", ""
+	}
+	if orderIdx := topLevelKeywordIndex(modifiers, "ORDER BY"); orderIdx >= 0 {
+		end := len(modifiers)
+		for _, kw := range []string{"SKIP", "LIMIT"} {
+			if idx := topLevelKeywordIndex(modifiers[orderIdx:], kw); idx >= 0 {
+				abs := orderIdx + idx
+				if abs > orderIdx && abs < end {
+					end = abs
+				}
+			}
+		}
+		orderBy = strings.TrimSpace(modifiers[orderIdx:end])
+	}
+	limitToken = extractCallTailModifierToken(modifiers, "LIMIT")
+	skipToken = extractCallTailModifierToken(modifiers, "SKIP")
+	return projection, orderBy, limitToken, skipToken
+}
+
+func extractCallTailModifierToken(modifiers, keyword string) string {
+	idx := topLevelKeywordIndex(modifiers, keyword)
+	if idx < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(modifiers[idx+len(keyword):])
+	if rest == "" {
+		return ""
+	}
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 func callTailHasRelationshipTypeConstraint(tail string) bool {
