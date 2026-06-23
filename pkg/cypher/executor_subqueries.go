@@ -94,9 +94,10 @@ func (e *StorageExecutor) executeMatchWithCallProcedure(ctx context.Context, cyp
 			nodes = e.filterNodesByProperties(nodes, nodePattern.properties)
 		}
 		if whereClause != "" {
+			whereFilter := e.compileNodeWhereFilter(ctx, nodePattern.variable, whereClause)
 			var filtered []*storage.Node
 			for _, node := range nodes {
-				if e.evaluateWhere(ctx, node, nodePattern.variable, whereClause) {
+				if whereFilter(node) {
 					filtered = append(filtered, node)
 				}
 			}

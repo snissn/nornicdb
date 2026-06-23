@@ -35,6 +35,12 @@ func TestCompiledBindingWhere_SupportedAndFallback(t *testing.T) {
 	compiled = exec.getCompiledBindingWhere(ctx, "a.missing IS NULL")
 	require.NotNil(t, compiled)
 	assert.True(t, compiled(bindingRow, nil))
+	supported, ok := exec.getCompiledBindingWhereIfSupported(ctx, "a.status IN $statuses AND b.status = a.status AND a.name IS NOT NULL AND b.name IS NOT NULL")
+	require.True(t, ok)
+	assert.True(t, supported(binding{
+		"a": &storage.Node{ID: "n1", Properties: map[string]interface{}{"status": "active", "name": "alice"}},
+		"b": &storage.Node{ID: "n2", Properties: map[string]interface{}{"status": "active", "name": "bob"}},
+	}, params))
 
 	compiled = exec.getCompiledBindingWhere(ctx, "a = b")
 	require.NotNil(t, compiled)

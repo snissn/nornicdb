@@ -744,7 +744,7 @@ func (e *StorageExecutor) executeChainedMatch(ctx context.Context, pattern strin
 // filterBindingsByWhere filters bindings based on WHERE clause
 func (e *StorageExecutor) filterBindingsByWhere(ctx context.Context, bindings []binding, whereClause string, params map[string]interface{}) []binding {
 	compiled := e.getCompiledBindingWhere(ctx, whereClause)
-	var result []binding
+	result := make([]binding, 0, len(bindings))
 
 	for _, b := range bindings {
 		if compiled(b, params) {
@@ -1763,6 +1763,10 @@ func (e *StorageExecutor) evaluateWhereForContext(ctx context.Context, whereClau
 			}
 		}
 		return false
+	}
+
+	if predicate, ok := e.getCompiledBindingWhereIfSupported(ctx, clause); ok {
+		return predicate(binding(nodes), getParamsFromContext(ctx))
 	}
 
 	// If this clause references exactly one bound variable, route through

@@ -829,6 +829,10 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexOrderLimit(
 	}
 
 	hasWhere := strings.TrimSpace(whereClause) != ""
+	var whereFilter func(*storage.Node) bool
+	if hasWhere {
+		whereFilter = e.compileNodeWhereFilter(ctx, nodePattern.variable, whereClause)
+	}
 	nodes := make([]*storage.Node, 0, limit)
 	for _, id := range ids {
 		node, err := e.storage.GetNode(id)
@@ -842,7 +846,7 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexOrderLimit(
 			continue
 		}
 		// Apply WHERE filter if present.
-		if hasWhere && !e.evaluateWhere(ctx, node, nodePattern.variable, whereClause) {
+		if hasWhere && !whereFilter(node) {
 			continue
 		}
 		nodes = append(nodes, node)

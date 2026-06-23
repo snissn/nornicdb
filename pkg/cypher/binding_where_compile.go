@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -9,7 +10,8 @@ import (
 
 type bindingWherePredicate func(binding, map[string]interface{}) bool
 
-var compiledBindingWhereCache sync.Map // map[string]bindingWherePredicate
+var compiledBindingWhereCache sync.Map          // map[string]bindingWherePredicate
+var compiledSupportedBindingWhereCache sync.Map // map[string]bindingWherePredicate
 
 func (e *StorageExecutor) getCompiledBindingWhere(ctx context.Context, whereClause string) bindingWherePredicate {
 	key := normalizeBindingWhereClause(whereClause)
@@ -32,62 +34,93 @@ func normalizeBindingWhereClause(whereClause string) string {
 }
 
 func (e *StorageExecutor) compileBindingWhere(ctx context.Context, whereClause string) bindingWherePredicate {
+	if predicate, ok := e.tryCompileBindingWhere(ctx, whereClause); ok {
+		return predicate
+	}
 	clause := strings.TrimSpace(whereClause)
-	if clause == "" {
-		return func(binding, map[string]interface{}) bool { return true }
-	}
-
-	if andIdx := findTopLevelKeyword(clause, " AND "); andIdx > 0 {
-		left := e.getCompiledBindingWhere(ctx, clause[:andIdx])
-		right := e.getCompiledBindingWhere(ctx, clause[andIdx+5:])
-		return func(b binding, params map[string]interface{}) bool {
-			return left(b, params) && right(b, params)
-		}
-	}
-	if orIdx := findTopLevelKeyword(clause, " OR "); orIdx > 0 {
-		left := e.getCompiledBindingWhere(ctx, clause[:orIdx])
-		right := e.getCompiledBindingWhere(ctx, clause[orIdx+4:])
-		return func(b binding, params map[string]interface{}) bool {
-			return left(b, params) || right(b, params)
-		}
-	}
-	if hasPrefixFold(clause, "NOT ") {
-		inner := e.getCompiledBindingWhere(ctx, clause[4:])
-		return func(b binding, params map[string]interface{}) bool {
-			return !inner(b, params)
-		}
-	}
-
-	if predicate, ok := e.compileBindingNullPredicate(clause, " IS NOT NULL ", true); ok {
-		return predicate
-	}
-	if predicate, ok := e.compileBindingNullPredicate(clause, " IS NULL ", false); ok {
-		return predicate
-	}
-
-	if predicate, ok := e.compileBindingStringPredicate(clause, " STARTS WITH "); ok {
-		return predicate
-	}
-	if predicate, ok := e.compileBindingStringPredicate(clause, " ENDS WITH "); ok {
-		return predicate
-	}
-	if predicate, ok := e.compileBindingStringPredicate(clause, " CONTAINS "); ok {
-		return predicate
-	}
-	if predicate, ok := e.compileBindingInPredicate(clause, " IN ", false); ok {
-		return predicate
-	}
-	if predicate, ok := e.compileBindingInPredicate(clause, " NOT IN ", true); ok {
-		return predicate
-	}
-
-	if predicate, ok := e.compileBindingComparisonPredicate(clause); ok {
-		return predicate
-	}
-
 	return func(b binding, params map[string]interface{}) bool {
 		return e.evaluateBindingWhereGeneric(ctx, b, clause, params)
 	}
+}
+
+func (e *StorageExecutor) getCompiledBindingWhereIfSupported(ctx context.Context, whereClause string) (bindingWherePredicate, bool) {
+	key := normalizeBindingWhereClause(whereClause)
+	if cached, ok := compiledSupportedBindingWhereCache.Load(key); ok {
+		if predicate, ok := cached.(bindingWherePredicate); ok {
+			return predicate, true
+		}
+	}
+	predicate, ok := e.tryCompileBindingWhere(ctx, key)
+	if ok {
+		compiledSupportedBindingWhereCache.Store(key, predicate)
+	}
+	return predicate, ok
+}
+
+func (e *StorageExecutor) tryCompileBindingWhere(ctx context.Context, whereClause string) (bindingWherePredicate, bool) {
+	clause := strings.TrimSpace(whereClause)
+	if clause == "" {
+		return func(binding, map[string]interface{}) bool { return true }, true
+	}
+
+	if andIdx := findTopLevelKeyword(clause, " AND "); andIdx > 0 {
+		left, okLeft := e.getCompiledBindingWhereIfSupported(ctx, clause[:andIdx])
+		right, okRight := e.getCompiledBindingWhereIfSupported(ctx, clause[andIdx+5:])
+		if !okLeft || !okRight {
+			return nil, false
+		}
+		return func(b binding, params map[string]interface{}) bool {
+			return left(b, params) && right(b, params)
+		}, true
+	}
+	if orIdx := findTopLevelKeyword(clause, " OR "); orIdx > 0 {
+		left, okLeft := e.getCompiledBindingWhereIfSupported(ctx, clause[:orIdx])
+		right, okRight := e.getCompiledBindingWhereIfSupported(ctx, clause[orIdx+4:])
+		if !okLeft || !okRight {
+			return nil, false
+		}
+		return func(b binding, params map[string]interface{}) bool {
+			return left(b, params) || right(b, params)
+		}, true
+	}
+	if hasPrefixFold(clause, "NOT ") {
+		inner, ok := e.getCompiledBindingWhereIfSupported(ctx, clause[4:])
+		if !ok {
+			return nil, false
+		}
+		return func(b binding, params map[string]interface{}) bool {
+			return !inner(b, params)
+		}, true
+	}
+
+	if predicate, ok := e.compileBindingNullPredicate(clause, " IS NOT NULL", true); ok {
+		return predicate, true
+	}
+	if predicate, ok := e.compileBindingNullPredicate(clause, " IS NULL", false); ok {
+		return predicate, true
+	}
+
+	if predicate, ok := e.compileBindingStringPredicate(clause, " STARTS WITH "); ok {
+		return predicate, true
+	}
+	if predicate, ok := e.compileBindingStringPredicate(clause, " ENDS WITH "); ok {
+		return predicate, true
+	}
+	if predicate, ok := e.compileBindingStringPredicate(clause, " CONTAINS "); ok {
+		return predicate, true
+	}
+	if predicate, ok := e.compileBindingInPredicate(clause, " IN ", false); ok {
+		return predicate, true
+	}
+	if predicate, ok := e.compileBindingInPredicate(clause, " NOT IN ", true); ok {
+		return predicate, true
+	}
+
+	if predicate, ok := e.compileBindingComparisonPredicate(clause); ok {
+		return predicate, true
+	}
+
+	return nil, false
 }
 
 func (e *StorageExecutor) compileBindingStringPredicate(clause, op string) (bindingWherePredicate, bool) {
@@ -216,17 +249,17 @@ func (e *StorageExecutor) compileBindingComparisonPredicate(clause string) (bind
 			}
 			switch op {
 			case "=":
-				return e.compareEqual(leftValue, rightValue)
+				return e.compareBindingValuesEqual(leftValue, rightValue)
 			case "<>", "!=":
-				return !e.compareEqual(leftValue, rightValue)
+				return !e.compareBindingValuesEqual(leftValue, rightValue)
 			case ">":
 				return e.compareGreater(leftValue, rightValue)
 			case ">=":
-				return e.compareGreater(leftValue, rightValue) || e.compareEqual(leftValue, rightValue)
+				return e.compareGreater(leftValue, rightValue) || e.compareBindingValuesEqual(leftValue, rightValue)
 			case "<":
 				return e.compareLess(leftValue, rightValue)
 			case "<=":
-				return e.compareLess(leftValue, rightValue) || e.compareEqual(leftValue, rightValue)
+				return e.compareLess(leftValue, rightValue) || e.compareBindingValuesEqual(leftValue, rightValue)
 			default:
 				return false
 			}
@@ -249,6 +282,13 @@ func (e *StorageExecutor) compileBindingInPredicate(clause, op string, negate bo
 
 	if listValues, ok := parseBindingLiteralList(rightExpr); ok {
 		return e.makeCompiledBindingMembershipPredicate(leftResolver, listValues, negate), true
+	}
+	if strings.HasPrefix(rightExpr, "$") {
+		paramName := strings.TrimSpace(strings.TrimPrefix(rightExpr, "$"))
+		if paramName == "" {
+			return nil, false
+		}
+		return e.makeCompiledParamMembershipPredicate(leftResolver, paramName, negate), true
 	}
 
 	rightResolver, ok := e.compileBindingValueResolver(rightExpr)
@@ -314,6 +354,79 @@ func (e *StorageExecutor) makeCompiledBindingMembershipPredicate(leftResolver bi
 		}
 		return matched
 	}
+}
+
+type bindingParamMembershipCache struct {
+	sync.RWMutex
+	firstElement  *interface{}
+	length        int
+	comparable    map[interface{}]struct{}
+	nonComparable []interface{}
+}
+
+func (e *StorageExecutor) makeCompiledParamMembershipPredicate(leftResolver bindingValueResolver, paramName string, negate bool) bindingWherePredicate {
+	cache := &bindingParamMembershipCache{length: -1}
+	return func(bindingRow binding, params map[string]interface{}) bool {
+		if params == nil {
+			return negate
+		}
+		rightValue, ok := params[paramName]
+		if !ok {
+			return negate
+		}
+		items, ok := toInterfaceSlice(rightValue)
+		if !ok {
+			return negate
+		}
+		leftValue, ok := leftResolver(bindingRow, params)
+		if !ok {
+			return false
+		}
+		firstElement := firstInterfaceElement(items)
+		comparableSet, nonComparable := cache.get(items, firstElement)
+		matched := evaluateComparableMembership(leftValue, comparableSet, nonComparable, e.compareBindingValuesEqual)
+		if negate {
+			return !matched
+		}
+		return matched
+	}
+}
+
+func (cache *bindingParamMembershipCache) get(items []interface{}, firstElement *interface{}) (map[interface{}]struct{}, []interface{}) {
+	cache.RLock()
+	if cache.length == len(items) && cache.firstElement == firstElement && cache.comparable != nil {
+		comparableSet := cache.comparable
+		nonComparable := cache.nonComparable
+		cache.RUnlock()
+		return comparableSet, nonComparable
+	}
+	cache.RUnlock()
+
+	comparableSet, nonComparable := buildComparableMembershipIndex(items)
+	cache.Lock()
+	cache.length = len(items)
+	cache.firstElement = firstElement
+	cache.comparable = comparableSet
+	cache.nonComparable = nonComparable
+	cache.Unlock()
+	return comparableSet, nonComparable
+}
+
+func firstInterfaceElement(items []interface{}) *interface{} {
+	if len(items) == 0 {
+		return nil
+	}
+	return &items[0]
+}
+
+func (e *StorageExecutor) compareBindingValuesEqual(leftValue, rightValue interface{}) bool {
+	if leftValue == nil || rightValue == nil {
+		return leftValue == nil && rightValue == nil
+	}
+	if reflect.TypeOf(leftValue) == reflect.TypeOf(rightValue) && isComparableValue(leftValue) {
+		return leftValue == rightValue
+	}
+	return e.compareEqual(leftValue, rightValue)
 }
 
 func parseBindingLiteralList(raw string) ([]interface{}, bool) {

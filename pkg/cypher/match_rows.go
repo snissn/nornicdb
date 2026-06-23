@@ -230,9 +230,7 @@ func (e *StorageExecutor) filterNodesByWhereClause(ctx context.Context, nodes []
 		return nodes
 	}
 
-	filterFn := func(node *storage.Node) bool {
-		return e.evaluateWhere(ctx, node, variable, whereClause)
-	}
+	filterFn := e.compileNodeWhereFilter(ctx, variable, whereClause)
 
 	return parallelFilterNodes(nodes, filterFn)
 }

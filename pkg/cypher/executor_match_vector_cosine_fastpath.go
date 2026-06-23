@@ -292,6 +292,10 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 	for i := range returnItems {
 		scoreExprIsAlias[i] = strings.EqualFold(strings.TrimSpace(returnItems[i].expr), scoreRef)
 	}
+	var preWhereFilter func(*storage.Node) bool
+	if preWhereClause != "" && preWhereNotNullProp == "" {
+		preWhereFilter = e.compileNodeWhereFilter(ctx, varName, preWhereClause)
+	}
 	for _, hit := range nodeScores {
 		if hasMatchProps && !e.nodeMatchesProps(hit.node, matchProps) {
 			continue
@@ -301,7 +305,7 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 				if val, exists := hit.node.Properties[preWhereNotNullProp]; !exists || val == nil {
 					continue
 				}
-			} else if !e.evaluateWhere(ctx, hit.node, varName, preWhereClause) {
+			} else if !preWhereFilter(hit.node) {
 				continue
 			}
 		}

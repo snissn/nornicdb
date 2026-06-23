@@ -125,6 +125,4 @@ func TestSimpleMatchLimitFastPath_DoesNotCaptureWhereShape(t *testing.T) {
 	// Generic WHERE path should not set simple match-limit trace.
 	trace := exec.LastHotPathTrace()
 	require.False(t, trace.SimpleMatchLimitFastPath)
-	// WHERE path today falls back to non-streaming early-exit and uses AllNodes.
-	require.Greater(t, counting.allNodesCalls, 0)
 }

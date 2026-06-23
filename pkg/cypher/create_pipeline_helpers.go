@@ -397,9 +397,10 @@ func (e *StorageExecutor) executeMatchWithPipelineToRows(ctx context.Context, ma
 		nodes = filtered
 	}
 	if whereClause != "" {
+		whereFilter := e.compileNodeWhereFilter(ctx, nodeInfo.variable, whereClause)
 		var filtered []*storage.Node
 		for _, n := range nodes {
-			if e.evaluateWhere(ctx, n, nodeInfo.variable, whereClause) {
+			if whereFilter(n) {
 				filtered = append(filtered, n)
 			}
 		}

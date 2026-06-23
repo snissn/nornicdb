@@ -9,7 +9,12 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
-var compiledSimpleWhereCache sync.Map // map[string]func(*storage.Node) bool
+type simpleWhereCacheKey struct {
+	variable string
+	clause   string
+}
+
+var compiledSimpleWhereCache sync.Map // map[simpleWhereCacheKey]func(*storage.Node) bool
 
 func (e *StorageExecutor) filterNodes(ctx context.Context, nodes []*storage.Node, variable, whereClause string) []*storage.Node {
 	if fastIN, ok := e.buildBoundInFastFilter(variable, whereClause); ok {
@@ -92,7 +97,7 @@ func (e *StorageExecutor) getCompiledSimpleWhere(ctx context.Context, variable, 
 	if strings.Contains(trimmedClause, "$") {
 		return e.compileSimpleWhere(ctx, variable, trimmedClause)
 	}
-	key := variable + "\x00" + trimmedClause
+	key := simpleWhereCacheKey{variable: variable, clause: trimmedClause}
 	if cached, ok := compiledSimpleWhereCache.Load(key); ok {
 		if fn, okFn := cached.(func(*storage.Node) bool); okFn {
 			return fn, true
@@ -105,17 +110,78 @@ func (e *StorageExecutor) getCompiledSimpleWhere(ctx context.Context, variable, 
 	return fn, ok
 }
 
+func (e *StorageExecutor) compileNodeWhereFilter(ctx context.Context, variable, whereClause string) func(*storage.Node) bool {
+	if compiled, ok := e.getCompiledSimpleWhere(ctx, variable, whereClause); ok {
+		return compiled
+	}
+	return func(node *storage.Node) bool {
+		return e.evaluateWhere(ctx, node, variable, whereClause)
+	}
+}
+
 func (e *StorageExecutor) compileSimpleWhere(ctx context.Context, variable, whereClause string) (func(*storage.Node) bool, bool) {
 	whereClause = strings.TrimSpace(whereClause)
+	if whereClause == "" {
+		return func(*storage.Node) bool { return true }, true
+	}
+
+	if strings.HasPrefix(whereClause, "(") && strings.HasSuffix(whereClause, ")") {
+		depth := 0
+		outer := true
+		for i, ch := range whereClause {
+			switch ch {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+			if depth == 0 && i < len(whereClause)-1 {
+				outer = false
+				break
+			}
+		}
+		if outer {
+			return e.compileSimpleWhere(ctx, variable, strings.TrimSpace(whereClause[1:len(whereClause)-1]))
+		}
+	}
+
+	if andIdx := findTopLevelKeyword(whereClause, " AND "); andIdx > 0 {
+		left, okLeft := e.compileSimpleWhere(ctx, variable, strings.TrimSpace(whereClause[:andIdx]))
+		right, okRight := e.compileSimpleWhere(ctx, variable, strings.TrimSpace(whereClause[andIdx+5:]))
+		if okLeft && okRight {
+			return func(node *storage.Node) bool {
+				return left(node) && right(node)
+			}, true
+		}
+		return nil, false
+	}
+
+	if orIdx := findTopLevelKeyword(whereClause, " OR "); orIdx > 0 {
+		leftExpr := strings.TrimSpace(whereClause[:orIdx])
+		rightExpr := strings.TrimSpace(whereClause[orIdx+4:])
+		if isConstantTrueEquality(leftExpr) || isConstantTrueEquality(rightExpr) {
+			return func(*storage.Node) bool { return true }, true
+		}
+		left, okLeft := e.compileSimpleWhere(ctx, variable, leftExpr)
+		right, okRight := e.compileSimpleWhere(ctx, variable, rightExpr)
+		if okLeft && okRight {
+			return func(node *storage.Node) bool {
+				return left(node) || right(node)
+			}, true
+		}
+		return nil, false
+	}
+
+	if hasPrefixFold(whereClause, "NOT ") {
+		inner, ok := e.compileSimpleWhere(ctx, variable, strings.TrimSpace(whereClause[4:]))
+		if ok {
+			return func(node *storage.Node) bool { return !inner(node) }, true
+		}
+		return nil, false
+	}
 
 	// Keep this fast path strict to avoid semantic drift.
-	if containsFold(whereClause, " AND ") ||
-		containsFold(whereClause, " OR ") ||
-		hasPrefixFold(whereClause, "NOT ") ||
-		containsFold(whereClause, " CONTAINS ") ||
-		containsFold(whereClause, " STARTS WITH ") ||
-		containsFold(whereClause, " ENDS WITH ") ||
-		strings.Contains(whereClause, "(") ||
+	if strings.Contains(whereClause, "(") ||
 		strings.Contains(whereClause, ")") {
 		return nil, false
 	}
@@ -126,6 +192,74 @@ func (e *StorageExecutor) compileSimpleWhere(ctx context.Context, variable, wher
 
 	const prefixSep = "."
 	varPrefix := variable + prefixSep
+
+	if colonIdx := strings.Index(whereClause, ":"); colonIdx > 0 {
+		labelVar := strings.TrimSpace(whereClause[:colonIdx])
+		labelName := strings.TrimSpace(whereClause[colonIdx+1:])
+		if labelVar == variable && labelName != "" &&
+			!strings.ContainsAny(labelVar, " .(") &&
+			!strings.ContainsAny(labelName, " .(=<>") {
+			return func(node *storage.Node) bool {
+				for _, label := range node.Labels {
+					if label == labelName {
+						return true
+					}
+				}
+				return false
+			}, true
+		}
+	}
+
+	compileStringOp := func(op string) (func(*storage.Node) bool, bool) {
+		idx := findTopLevelKeyword(whereClause, " "+op+" ")
+		if idx <= 0 {
+			return nil, false
+		}
+		left := strings.TrimSpace(whereClause[:idx])
+		right := strings.TrimSpace(whereClause[idx+len(op)+2:])
+		if !strings.HasPrefix(left, varPrefix) {
+			return nil, false
+		}
+		prop := strings.TrimSpace(left[len(varPrefix):])
+		if prop == "" || strings.ContainsAny(prop, " \t\r\n") {
+			return nil, false
+		}
+		expectedRaw := e.parseValue(ctx, right)
+		expected, ok := expectedRaw.(string)
+		if !ok {
+			return nil, false
+		}
+		return func(node *storage.Node) bool {
+			actualRaw, exists := getProp(node, prop)
+			if !exists {
+				return false
+			}
+			actual, ok := actualRaw.(string)
+			if !ok {
+				return false
+			}
+			switch op {
+			case "CONTAINS":
+				return strings.Contains(actual, expected)
+			case "STARTS WITH":
+				return strings.HasPrefix(actual, expected)
+			case "ENDS WITH":
+				return strings.HasSuffix(actual, expected)
+			default:
+				return false
+			}
+		}, true
+	}
+
+	if fn, ok := compileStringOp("CONTAINS"); ok {
+		return fn, true
+	}
+	if fn, ok := compileStringOp("STARTS WITH"); ok {
+		return fn, true
+	}
+	if fn, ok := compileStringOp("ENDS WITH"); ok {
+		return fn, true
+	}
 
 	// Simple IN fast-path: <var>.<prop> IN [<literal-list>]
 	// Keeps semantics for the common membership predicate while avoiding
@@ -186,30 +320,49 @@ func (e *StorageExecutor) compileSimpleWhere(ctx context.Context, variable, wher
 		}, true
 	}
 
-	// Restrict fast-path binary compilation to plain equality/inequality only.
-	// Regex and comparison operators must use the full evaluator to preserve
-	// Cypher semantics (e.g. "=~", "<", ">", "<=", ">="). Keep "<>"/"!="
-	// in fast-path because they are simple inequality checks.
-	hasNotEqual := e.hasOperatorOutsideQuotes(whereClause, "<>")
-	hasLessEq := e.hasOperatorOutsideQuotes(whereClause, "<=")
-	hasGreaterEq := e.hasOperatorOutsideQuotes(whereClause, ">=")
-	hasBareLess := e.hasOperatorOutsideQuotes(whereClause, "<") && !hasNotEqual && !hasLessEq
-	hasBareGreater := e.hasOperatorOutsideQuotes(whereClause, ">") && !hasNotEqual && !hasGreaterEq
-	if e.hasOperatorOutsideQuotes(whereClause, "=~") ||
-		hasLessEq ||
-		hasGreaterEq ||
-		hasBareLess ||
-		hasBareGreater {
-		return nil, false
-	}
-
-	parseBinary := func(op string, neg bool) (func(*storage.Node) bool, bool) {
+	parseBinary := func(op string) (func(*storage.Node) bool, bool) {
 		idx := strings.Index(whereClause, op)
 		if idx < 0 {
 			return nil, false
 		}
 		left := strings.TrimSpace(whereClause[:idx])
 		right := strings.TrimSpace(whereClause[idx+len(op):])
+		if hasPrefixFold(left, "id(") && strings.HasSuffix(left, ")") {
+			idVar := strings.TrimSpace(left[3 : len(left)-1])
+			if idVar != variable || right == "" {
+				return nil, false
+			}
+			expected := normalizeNodeIDValue(e.parseValue(ctx, right))
+			return func(node *storage.Node) bool {
+				actual := string(node.ID)
+				switch op {
+				case "=":
+					return e.compareEqual(actual, expected)
+				case "<>", "!=":
+					return !e.compareEqual(actual, expected)
+				default:
+					return true
+				}
+			}, true
+		}
+		if hasPrefixFold(left, "elementid(") && strings.HasSuffix(left, ")") {
+			idVar := strings.TrimSpace(left[10 : len(left)-1])
+			if idVar != variable || right == "" {
+				return nil, false
+			}
+			expected := normalizeNodeIDValue(e.parseValue(ctx, right))
+			return func(node *storage.Node) bool {
+				actual := string(node.ID)
+				switch op {
+				case "=":
+					return e.compareEqual(actual, expected)
+				case "<>", "!=":
+					return !e.compareEqual(actual, expected)
+				default:
+					return true
+				}
+			}, true
+		}
 		if !strings.HasPrefix(left, varPrefix) || right == "" {
 			return nil, false
 		}
@@ -223,29 +376,41 @@ func (e *StorageExecutor) compileSimpleWhere(ctx context.Context, variable, wher
 			if !exists {
 				return false
 			}
-			eq := e.compareEqual(actual, expected)
-			if neg {
-				return !eq
+			switch op {
+			case "=":
+				return e.compareEqual(actual, expected)
+			case "<>", "!=":
+				return !e.compareEqual(actual, expected)
+			case ">":
+				return e.compareGreater(actual, expected)
+			case ">=":
+				return e.compareGreater(actual, expected) || e.compareEqual(actual, expected)
+			case "<":
+				return e.compareLess(actual, expected)
+			case "<=":
+				return e.compareLess(actual, expected) || e.compareEqual(actual, expected)
+			case "=~":
+				return e.compareRegex(actual, expected)
+			default:
+				return true
 			}
-			return eq
 		}, true
 	}
 
-	// Order matters so we don't mis-split on "<>" / "!=".
-	if fn, ok := parseBinary("<>", true); ok {
-		return fn, true
-	}
-	if fn, ok := parseBinary("!=", true); ok {
-		return fn, true
-	}
-	if fn, ok := parseBinary("=", false); ok {
-		return fn, true
+	// Order matters so we don't mis-split multi-byte operators.
+	for _, op := range []string{"<>", "!=", ">=", "<=", "=~", ">", "<", "="} {
+		if fn, ok := parseBinary(op); ok {
+			return fn, true
+		}
 	}
 	return nil, false
 }
 
 func (e *StorageExecutor) evaluateWhere(ctx context.Context, node *storage.Node, variable, whereClause string) bool {
 	whereClause = strings.TrimSpace(whereClause)
+	if compiled, ok := e.getCompiledSimpleWhere(ctx, variable, whereClause); ok {
+		return compiled(node)
+	}
 
 	// Handle parenthesized expressions - strip outer parens and recurse
 	if strings.HasPrefix(whereClause, "(") && strings.HasSuffix(whereClause, ")") {
