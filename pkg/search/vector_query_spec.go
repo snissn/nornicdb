@@ -243,11 +243,7 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 
 	normalizedQuery := vector.Normalize(queryEmbedding)
 
-	type scoredNode struct {
-		id    string
-		score float64
-	}
-	out := make([]scoredNode, 0, min(len(candidateNodes), spec.Limit*2))
+	out := make([]vectorQueryScoredNode, 0, min(len(candidateNodes), spec.Limit*2))
 	meta := s.snapshotVectorQueryCandidateMeta(candidateNodes)
 
 	for nodeID := range candidateNodes {
@@ -317,10 +313,18 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 		}
 
 		if bestScore >= -1.0 {
-			out = append(out, scoredNode{id: nodeID, score: bestScore})
+			out = append(out, vectorQueryScoredNode{id: nodeID, score: bestScore})
 		}
 	}
 
+	if spec.Property != "" {
+		supplement, err := s.exactPropertyVectorNodeScores(ctx, normalizedQuery, spec.Label, spec.Property)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, supplement...)
+	}
+	out = collapseScoredNodesByID(out)
 	sort.Slice(out, func(i, j int) bool { return out[i].score > out[j].score })
 	if len(out) > spec.Limit {
 		out = out[:spec.Limit]
@@ -331,6 +335,72 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 		hits = append(hits, VectorQueryHit{ID: r.id, Score: r.score})
 	}
 	return hits, nil
+}
+
+type vectorQueryScoredNode struct {
+	id    string
+	score float64
+}
+
+func collapseScoredNodesByID(nodes []vectorQueryScoredNode) []vectorQueryScoredNode {
+	if len(nodes) == 0 {
+		return nil
+	}
+	best := make(map[string]float64, len(nodes))
+	for _, node := range nodes {
+		if prev, ok := best[node.id]; !ok || node.score > prev {
+			best[node.id] = node.score
+		}
+	}
+	out := make([]vectorQueryScoredNode, 0, len(best))
+	for id, score := range best {
+		out = append(out, vectorQueryScoredNode{id: id, score: score})
+	}
+	return out
+}
+
+func (s *Service) exactPropertyVectorNodeScores(ctx context.Context, normalizedQuery []float32, label, property string) ([]vectorQueryScoredNode, error) {
+	type candidate struct {
+		nodeID string
+		vecID  string
+	}
+	candidates := make([]candidate, 0, 64)
+	s.mu.RLock()
+	for nodeID, props := range s.nodePropVector {
+		vecID, ok := props[property]
+		if !ok {
+			continue
+		}
+		if label != "" {
+			hasLabel := false
+			for _, nodeLabel := range s.nodeLabels[nodeID] {
+				if nodeLabel == label {
+					hasLabel = true
+					break
+				}
+			}
+			if !hasLabel {
+				continue
+			}
+		}
+		candidates = append(candidates, candidate{nodeID: nodeID, vecID: vecID})
+	}
+	s.mu.RUnlock()
+
+	out := make([]vectorQueryScoredNode, 0, len(candidates))
+	for _, cand := range candidates {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		score, ok := s.scoreVectorIDDot(normalizedQuery, cand.vecID)
+		if !ok {
+			continue
+		}
+		out = append(out, vectorQueryScoredNode{id: cand.nodeID, score: score})
+	}
+	return out, nil
 }
 
 type vectorQueryCandidateMeta struct {

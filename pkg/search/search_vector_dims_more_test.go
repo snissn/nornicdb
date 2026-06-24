@@ -117,6 +117,52 @@ func TestService_VectorQueryNodes_FileStorePropertyVectors(t *testing.T) {
 	require.InDelta(t, 1.0, hits[0].Score, 1e-5)
 }
 
+func TestService_VectorQueryNodes_FileStorePropertyVectorsSupplementsStaleHNSW(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 4)
+	vfs, err := NewVectorFileStore(t.TempDir()+"/vectors", 4)
+	require.NoError(t, err)
+	defer func() { _ = vfs.Close() }()
+	svc.vectorFileStore = vfs
+
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:     "joe-existing",
+		Labels: []string{"Entity"},
+		Properties: map[string]any{
+			"name":           "Joe",
+			"name_embedding": []float64{1, 0, 0, 0},
+		},
+	}))
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:     "claude-existing",
+		Labels: []string{"Entity"},
+		Properties: map[string]any{
+			"name":           "Claude",
+			"name_embedding": []float64{0, 1, 0, 0},
+		},
+	}))
+	require.Equal(t, 2, svc.CountPropertyVectorEntries("name_embedding"))
+	require.Equal(t, 2, svc.EmbeddingCount())
+
+	// Simulate a candidate-generation visibility/recall miss: the file-backed
+	// vector store can score Joe exactly, but the active HNSW pipeline only
+	// returns Claude. This mirrors high-frequency entities being present in the
+	// file store while candidate generation misses them during ingest.
+	staleHNSW := NewHNSWIndex(4, DefaultHNSWConfig())
+	require.NoError(t, staleHNSW.Add("claude-existing-prop-name_embedding", []float32{0, 1, 0, 0}))
+	svc.vectorPipeline = NewVectorSearchPipeline(NewHNSWCandidateGen(staleHNSW), NewCPUExactScorer(vfs))
+	svc.hnswIndex = staleHNSW
+
+	hits, err := svc.VectorQueryNodes(context.Background(), []float32{1, 0, 0, 0}, VectorQuerySpec{
+		Label:    "Entity",
+		Property: "name_embedding",
+		Limit:    1,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	require.Equal(t, "joe-existing", hits[0].ID)
+	require.InDelta(t, 1.0, hits[0].Score, 1e-5)
+}
+
 func TestService_MinSimilarityAndCountDimensionFallbacks(t *testing.T) {
 	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 3)
 
