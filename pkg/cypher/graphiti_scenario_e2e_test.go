@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/search"
@@ -80,6 +81,50 @@ type graphitiScenarioPayload struct {
 	nodes  []map[string]interface{}
 	edges  []map[string]interface{}
 	chunks []map[string]interface{}
+}
+
+type graphitiCopyCountingEngine struct {
+	storage.Engine
+	nodeUpdates int64
+	edgeUpdates int64
+	nodeGets    int64
+	edgeGets    int64
+}
+
+func (e *graphitiCopyCountingEngine) GetNode(id storage.NodeID) (*storage.Node, error) {
+	atomic.AddInt64(&e.nodeGets, 1)
+	return e.Engine.GetNode(id)
+}
+
+func (e *graphitiCopyCountingEngine) GetEdge(id storage.EdgeID) (*storage.Edge, error) {
+	atomic.AddInt64(&e.edgeGets, 1)
+	return e.Engine.GetEdge(id)
+}
+
+func (e *graphitiCopyCountingEngine) UpdateNode(node *storage.Node) error {
+	atomic.AddInt64(&e.nodeUpdates, 1)
+	return e.Engine.UpdateNode(node)
+}
+
+func (e *graphitiCopyCountingEngine) UpdateEdge(edge *storage.Edge) error {
+	atomic.AddInt64(&e.edgeUpdates, 1)
+	return e.Engine.UpdateEdge(edge)
+}
+
+func (e *graphitiCopyCountingEngine) NodeUpdateCount() int64 {
+	return atomic.LoadInt64(&e.nodeUpdates)
+}
+
+func (e *graphitiCopyCountingEngine) EdgeUpdateCount() int64 {
+	return atomic.LoadInt64(&e.edgeUpdates)
+}
+
+func (e *graphitiCopyCountingEngine) NodeGetCount() int64 {
+	return atomic.LoadInt64(&e.nodeGets)
+}
+
+func (e *graphitiCopyCountingEngine) EdgeGetCount() int64 {
+	return atomic.LoadInt64(&e.edgeGets)
 }
 
 func TestGraphitiScenarioE2E_LargePayloads(t *testing.T) {
@@ -173,6 +218,37 @@ func TestGraphitiScenarioE2E_LargePayloads(t *testing.T) {
 	res, err = exec.Execute(ctx, `CALL db.index.fulltext.queryRelationships("rel_ft", "relates", {limit: 10, skip: 1}) YIELD relationship, score RETURN relationship.uuid AS uuid, score`, nil)
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(res.Rows), 10)
+}
+
+func TestGraphitiScenarioE2E_VerbatimCopySkipsRedundantVectorPropertyUpdates(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &graphitiCopyCountingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	const dim = 16
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX ent_idx FOR (n:Entity) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 16, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE VECTOR INDEX rel_idx FOR ()-[e:RELATES_TO]-() ON (e.fact_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 16, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	searchSvc := search.NewServiceWithDimensions(counting, dim)
+	exec.SetSearchService(searchSvc)
+
+	payload := buildGraphitiScenarioPayload(12, 24, 0, dim)
+	res, err := exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": payload.nodes})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(payload.nodes))
+	require.Equal(t, int64(len(payload.nodes)), counting.NodeUpdateCount(), "node copy should only pay the SET n = row update, not an extra vector setter update")
+	require.Equal(t, int64(2*len(payload.nodes)), counting.NodeGetCount(), "node copy should only read once for setNodeVectorProperty and once for live search indexing")
+	require.Equal(t, len(payload.nodes), searchSvc.CountPropertyVectorEntries("name_embedding"))
+
+	res, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(payload.edges))
+	require.Equal(t, int64(0), counting.EdgeUpdateCount(), "setRelationshipVectorProperty must no-op when SET e = row already stored the same vector")
+	require.True(t, searchSvc.HasRelationshipVectorEntries("RELATES_TO", "fact_embedding"))
 }
 
 func TestGraphitiScenarioE2E_BulkEdgeSaveIndexedRepeatedEntityMatches(t *testing.T) {
@@ -683,6 +759,59 @@ func BenchmarkGraphitiScenarioHotspots(b *testing.B) {
 			require.NoError(b, err)
 		}
 	})
+}
+
+func BenchmarkGraphitiVerbatimCopyNodeBatch(b *testing.B) {
+	const (
+		dim       = 1024
+		batchSize = 50
+	)
+	base := newTestMemoryEngine(b)
+	ns := storage.NewNamespacedEngine(base, "bench")
+	exec := NewStorageExecutor(ns)
+	exec.cache = nil
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX ent_idx FOR (n:Entity) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 1024, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(b, err)
+
+	searchSvc := search.NewServiceWithDimensions(ns, dim)
+	exec.SetSearchService(searchSvc)
+	seed := buildGraphitiScenarioPayload(batchSize, 0, 0, dim)
+	_, err = exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": seed.nodes})
+	require.NoError(b, err)
+	require.NoError(b, searchSvc.BuildIndexes(ctx))
+	require.True(b, searchSvc.IsReady())
+
+	batches := make([][]map[string]interface{}, b.N)
+	for i := 0; i < b.N; i++ {
+		start := (i + 1) * batchSize
+		nodes := make([]map[string]interface{}, 0, batchSize)
+		for j := 0; j < batchSize; j++ {
+			global := start + j
+			nodes = append(nodes, map[string]interface{}{
+				"uuid":           fmt.Sprintf("copy-entity-%06d", global),
+				"name":           fmt.Sprintf("copy entity %06d", global),
+				"summary":        fmt.Sprintf("copy summary %06d", global),
+				"group_id":       graphitiGroupID,
+				"labels":         []string{"Entity"},
+				"name_embedding": deterministicVectorF64(global, dim),
+			})
+		}
+		batches[i] = nodes
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": batches[i]})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(res.Rows) != batchSize {
+			b.Fatalf("unexpected rows: got %d want %d", len(res.Rows), batchSize)
+		}
+	}
 }
 
 func BenchmarkGraphitiBulkEdgeSaveIncompleteIndex(b *testing.B) {

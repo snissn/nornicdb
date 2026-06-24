@@ -2347,12 +2347,23 @@ func (s *Service) indexNodeLocked(node *storage.Node, skipFulltext bool) error {
 	if err != nil {
 		return err
 	}
+	vectorOn := s.vectorEnabled.Load()
+	skipVectorMutation := false
+	if vectorOn && nodeIDStr != "" && !skipFulltext && shouldIndex {
+		skipVectorMutation = s.nodeVectorStateUnchangedLocked(node)
+	}
 	if nodeIDStr != "" && !skipFulltext {
 		// CRITICAL: IndexNode is called for both creates and updates.
 		// When a node is re-indexed with fewer chunks or fewer named vectors,
 		// we must remove the old vector IDs first, otherwise they become orphaned
 		// in the in-memory index and EmbeddingCount() will drift upward over time.
-		s.removeNodeLocked(nodeIDStr)
+		if skipVectorMutation {
+			if s.fulltextIndex != nil {
+				s.fulltextIndex.Remove(nodeIDStr)
+			}
+		} else {
+			s.removeNodeLocked(nodeIDStr)
+		}
 	}
 	if !shouldIndex {
 		return nil
@@ -2369,7 +2380,7 @@ func (s *Service) indexNodeLocked(node *storage.Node, skipFulltext bool) error {
 	// addVectorLocked returns ErrVectorDisabled in that case, but we also
 	// short-circuit at this top level so we don't even iterate node
 	// properties looking for vector-shaped values.
-	vectorOn := s.vectorEnabled.Load()
+	indexVectorState := vectorOn && !skipVectorMutation
 
 	// When building from storage with a vector path, use file-backed store to bound RAM.
 	if vectorOn && skipFulltext && s.persistEnabled.Load() && s.vectorIndexPath != "" {
@@ -2384,7 +2395,7 @@ func (s *Service) indexNodeLocked(node *storage.Node, skipFulltext bool) error {
 	// Embeddings are stored in struct fields (opaque to users), not in properties
 
 	// Index NamedEmbeddings (each named vector gets its own index entry)
-	if vectorOn && len(node.NamedEmbeddings) > 0 {
+	if indexVectorState && len(node.NamedEmbeddings) > 0 {
 		for vectorName, embedding := range node.NamedEmbeddings {
 			if len(embedding) == 0 {
 				continue
@@ -2432,7 +2443,7 @@ func (s *Service) indexNodeLocked(node *storage.Node, skipFulltext bool) error {
 	// chunk IDs back to a unique node ID. The "main" embedding is an additional
 	// node-level entry used by some call paths and for compatibility.
 	// Chunk embeddings are stored in struct field (opaque to users), not in properties
-	if vectorOn && len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
+	if indexVectorState && len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 		chunkIDs := make([]string, 0, len(node.ChunkEmbeddings)+1)
 		// Always index a main embedding at the node ID (using first chunk)
 		mainEmbedding := node.ChunkEmbeddings[0]
@@ -2497,7 +2508,7 @@ func (s *Service) indexNodeLocked(node *storage.Node, skipFulltext bool) error {
 
 	// Index vector-shaped property values for Cypher compatibility.
 	// These are indexed under IDs: "node-id-prop-{propertyKey}".
-	if vectorOn && node.Properties != nil {
+	if indexVectorState && node.Properties != nil {
 		dim := s.vectorIndex.GetDimensions()
 		if s.vectorFileStore != nil {
 			dim = s.vectorFileStore.GetDimensions()
@@ -2534,6 +2545,133 @@ func (s *Service) indexNodeLocked(node *storage.Node, skipFulltext bool) error {
 	}
 
 	return nil
+}
+
+// nodeVectorStateUnchangedLocked reports whether re-indexing node would produce
+// exactly the vector IDs and normalized vectors already present in the active
+// vector store. Caller must hold s.indexMu.
+func (s *Service) nodeVectorStateUnchangedLocked(node *storage.Node) bool {
+	if node == nil || node.ID == "" {
+		return false
+	}
+	dim := s.vectorIndex.GetDimensions()
+	if s.vectorFileStore != nil {
+		dim = s.vectorFileStore.GetDimensions()
+	}
+	if dim <= 0 {
+		return false
+	}
+
+	nodeIDStr := string(node.ID)
+	expected := make(map[string][]float32, len(node.NamedEmbeddings)+len(node.ChunkEmbeddings)+4)
+	expectedNamed := make(map[string]string, len(node.NamedEmbeddings))
+	expectedChunks := make([]string, 0, len(node.ChunkEmbeddings)+1)
+	expectedProps := make(map[string]string, 4)
+	for vectorName, embedding := range node.NamedEmbeddings {
+		if len(embedding) == 0 {
+			continue
+		}
+		if len(embedding) != dim {
+			return false
+		}
+		id := fmt.Sprintf("%s-named-%s", node.ID, vectorName)
+		expected[id] = embedding
+		expectedNamed[vectorName] = id
+	}
+	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
+		if len(node.ChunkEmbeddings[0]) != dim {
+			return false
+		}
+		expected[nodeIDStr] = node.ChunkEmbeddings[0]
+		expectedChunks = append(expectedChunks, nodeIDStr)
+		if len(node.ChunkEmbeddings) > 1 {
+			for i, embedding := range node.ChunkEmbeddings {
+				if len(embedding) == 0 {
+					continue
+				}
+				if len(embedding) != dim {
+					return false
+				}
+				id := fmt.Sprintf("%s-chunk-%d", node.ID, i)
+				expected[id] = embedding
+				expectedChunks = append(expectedChunks, id)
+			}
+		}
+	}
+	if node.Properties != nil {
+		for key, value := range node.Properties {
+			vec, ok := vectorFromPropertyValue(value, dim)
+			if !ok {
+				continue
+			}
+			id := fmt.Sprintf("%s-prop-%s", nodeIDStr, key)
+			expected[id] = vec
+			expectedProps[key] = id
+		}
+	}
+
+	if !sameStringMap(expectedNamed, s.nodeNamedVector[nodeIDStr]) {
+		return false
+	}
+	if !sameStringSlice(expectedChunks, s.nodeChunkVectors[nodeIDStr]) {
+		return false
+	}
+	if !sameStringMap(expectedProps, s.nodePropVector[nodeIDStr]) {
+		return false
+	}
+	for id, vec := range expected {
+		if !s.storedVectorEqualsLocked(id, vec) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringMap(expected, indexed map[string]string) bool {
+	if len(expected) != len(indexed) {
+		return false
+	}
+	for key, want := range expected {
+		if indexed[key] != want {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringSlice(expected, indexed []string) bool {
+	if len(expected) != len(indexed) {
+		return false
+	}
+	for i := range expected {
+		if expected[i] != indexed[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) storedVectorEqualsLocked(id string, vec []float32) bool {
+	var stored []float32
+	var ok bool
+	if s.vectorFileStore != nil {
+		stored, ok = s.vectorFileStore.GetVector(id)
+	} else if s.vectorIndex != nil {
+		stored, ok = s.vectorIndex.GetVector(id)
+	}
+	if !ok {
+		return false
+	}
+	normalized := vector.Normalize(vec)
+	if len(stored) != len(normalized) {
+		return false
+	}
+	for i := range stored {
+		if stored[i] != normalized[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // removeNodeLocked removes a node from all search indexes.
