@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -274,6 +275,58 @@ LIMIT $limit
 	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
 	require.False(t, searchSvc.IsReady(), "scalar cosine fast path should not force full warmup when live indexed vectors can answer")
 	require.Equal(t, int32(0), atomic.LoadInt32(&warmCalls), "Graphiti-style scalar cosine reads must not trigger lazy BuildIndexes/k-means warmup")
+	require.Equal(t, 0, counting.allNodesCalls)
+	require.Equal(t, 0, counting.labelCalls)
+	require.Equal(t, 0, counting.streamNodesCalls)
+}
+
+func TestMatchVectorCosineFastPath_FileBackedPropertyVectors(t *testing.T) {
+	t.Setenv("NORNICDB_VECTOR_CPU_BRUTE_MAX_N", "1000")
+
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX entity_name_idx FOR (n:Entity) ON (n.name_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'best', group_id:'g', name:'FalkorDB', name_embedding:[1.0,0.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Entity {uuid:'other', group_id:'g', name:'NornicDB', name_embedding:[0.0,1.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+
+	searchSvc := search.NewServiceWithDimensions(ns, 4)
+	searchSvc.SetPersistenceEnabled(true)
+	t.Cleanup(func() { searchSvc.SetPersistenceEnabled(false) })
+	searchSvc.SetVectorIndexPath(filepath.Join(t.TempDir(), "vectors"))
+	require.NoError(t, searchSvc.BuildIndexes(ctx))
+	require.True(t, searchSvc.IsReady())
+	require.Equal(t, 2, searchSvc.CountPropertyVectorEntries("name_embedding"))
+	require.Equal(t, 2, searchSvc.EmbeddingCount())
+	exec.SetSearchService(searchSvc)
+
+	counting.allNodesCalls = 0
+	counting.labelCalls = 0
+	counting.streamNodesCalls = 0
+
+	query := `
+MATCH (n:Entity)
+WHERE n.group_id = $group_id
+WITH n, vector.similarity.cosine(n.name_embedding, $search_vector) AS score
+RETURN n.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT $limit
+`
+	res, err := exec.Execute(ctx, query, map[string]interface{}{
+		"group_id":      "g",
+		"search_vector": []float64{1, 0, 0, 0},
+		"limit":         1,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "best", res.Rows[0][0])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath)
 	require.Equal(t, 0, counting.allNodesCalls)
 	require.Equal(t, 0, counting.labelCalls)
 	require.Equal(t, 0, counting.streamNodesCalls)

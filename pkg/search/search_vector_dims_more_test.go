@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/gpu"
@@ -74,6 +75,46 @@ func TestService_GetVectorForCypher_MoreBranches(t *testing.T) {
 	// Missing id returns false.
 	_, ok = svc.getVectorForCypher("missing")
 	require.False(t, ok)
+}
+
+func TestService_VectorQueryNodes_FileStorePropertyVectors(t *testing.T) {
+	t.Setenv("NORNICDB_VECTOR_CPU_BRUTE_MAX_N", "1000")
+
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 4)
+	vfs, err := NewVectorFileStore(t.TempDir()+"/vectors", 4)
+	require.NoError(t, err)
+	defer func() { _ = vfs.Close() }()
+	svc.vectorFileStore = vfs
+
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:     "best",
+		Labels: []string{"Entity"},
+		Properties: map[string]any{
+			"name":           "FalkorDB",
+			"name_embedding": []float64{1, 0, 0, 0},
+		},
+	}))
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:     "other",
+		Labels: []string{"Entity"},
+		Properties: map[string]any{
+			"name":           "NornicDB",
+			"name_embedding": []float64{0, 1, 0, 0},
+		},
+	}))
+	require.Equal(t, 2, svc.CountPropertyVectorEntries("name_embedding"))
+	require.Equal(t, 2, svc.EmbeddingCount())
+	require.Equal(t, 0, svc.vectorIndex.Count(), "regression requires vectors to live only in the file store")
+
+	hits, err := svc.VectorQueryNodes(context.Background(), []float32{1, 0, 0, 0}, VectorQuerySpec{
+		Label:    "Entity",
+		Property: "name_embedding",
+		Limit:    1,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	require.Equal(t, "best", hits[0].ID)
+	require.InDelta(t, 1.0, hits[0].Score, 1e-5)
 }
 
 func TestService_MinSimilarityAndCountDimensionFallbacks(t *testing.T) {

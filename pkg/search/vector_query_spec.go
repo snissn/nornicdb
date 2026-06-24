@@ -106,8 +106,9 @@ func (s *Service) VectorQueryNodes(ctx context.Context, queryEmbedding []float32
 	}
 
 	// If the query dimensions don't match the configured index dimensions, Cypher expects
-	// an empty result set (not an error).
-	if s.vectorIndex != nil && s.vectorIndex.Count() > 0 && len(queryEmbedding) != s.vectorIndex.GetDimensions() {
+	// an empty result set (not an error). The active vector backing may be either the
+	// in-memory VectorIndex or the file-backed VectorFileStore.
+	if dims := s.VectorIndexDimensions(); dims > 0 && s.EmbeddingCount() > 0 && len(queryEmbedding) != dims {
 		return nil, nil
 	}
 
@@ -207,7 +208,7 @@ func (s *Service) VectorQueryRelationships(ctx context.Context, queryEmbedding [
 }
 
 func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []float32, spec VectorQuerySpec, vectorName string) ([]VectorQueryHit, error) {
-	if s.vectorIndex == nil || s.vectorIndex.Count() == 0 {
+	if s.EmbeddingCount() == 0 {
 		return nil, nil
 	}
 
@@ -359,17 +360,30 @@ func (s *Service) snapshotVectorQueryCandidateMeta(candidateNodes map[string]str
 }
 
 func (s *Service) scoreVectorIDDot(normalizedQuery []float32, vecID string) (float64, bool) {
-	if s.vectorIndex == nil {
+	s.mu.RLock()
+	vfs := s.vectorFileStore
+	vi := s.vectorIndex
+	s.mu.RUnlock()
+
+	var vec []float32
+	if vfs != nil {
+		if stored, ok := vfs.GetVector(vecID); ok {
+			vec = stored
+		}
+	}
+	if len(vec) == 0 && vi != nil {
+		vi.mu.RLock()
+		stored, ok := vi.vectors[vecID]
+		if ok {
+			vec = stored
+		}
+		vi.mu.RUnlock()
+	}
+	if len(vec) == 0 {
 		return 0, false
 	}
-	s.vectorIndex.mu.RLock()
-	vec, ok := s.vectorIndex.vectors[vecID]
-	if !ok {
-		s.vectorIndex.mu.RUnlock()
-		return 0, false
-	}
+
 	score := float64(vector.DotProductSIMD(normalizedQuery, vec))
-	s.vectorIndex.mu.RUnlock()
 	// SIMD float32 accumulation can drift slightly outside cosine bounds.
 	// Clamp to preserve Cypher cosine semantics and avoid dropping boundary hits
 	// (for example, opposite vectors drifting to <-1 on ASC fast-path queries).
@@ -393,10 +407,10 @@ func cloneStringMap(src map[string]string) map[string]string {
 }
 
 func (s *Service) vectorQueryNodesExact(ctx context.Context, queryEmbedding []float32, spec VectorQuerySpec, vectorName string, similarity string) ([]VectorQueryHit, error) {
-	if s.vectorIndex == nil || s.vectorIndex.Count() == 0 {
+	if s.EmbeddingCount() == 0 {
 		return nil, nil
 	}
-	if len(queryEmbedding) != s.vectorIndex.GetDimensions() {
+	if dims := s.VectorIndexDimensions(); dims > 0 && len(queryEmbedding) != dims {
 		return nil, nil
 	}
 
@@ -408,9 +422,6 @@ func (s *Service) vectorQueryNodesExact(ctx context.Context, queryEmbedding []fl
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	s.vectorIndex.mu.RLock()
-	defer s.vectorIndex.mu.RUnlock()
 
 	for nodeID, labels := range s.nodeLabels {
 		select {
