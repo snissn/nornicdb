@@ -288,6 +288,16 @@ func TestSmartQueryCache_LabelExtraction(t *testing.T) {
 			query:    "MATCH (u:User)-[:FOLLOWS]->(p:Post)-[:HAS_TAG]->(t:Tag) WHERE u.name = 'Alice' RETURN p",
 			expected: []string{"User", "FOLLOWS", "Post", "HAS_TAG", "Tag"},
 		},
+		{
+			name:     "relationship type alternatives",
+			query:    "MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]->(m) WHERE e.uuid IN $uuids DELETE e",
+			expected: []string{"MENTIONS", "RELATES_TO", "HAS_MEMBER"},
+		},
+		{
+			name:     "relationship type alternatives with repeated colons",
+			query:    "MATCH (n)-[e:MENTIONS|:RELATES_TO | HAS_MEMBER]->(m) RETURN e",
+			expected: []string{"MENTIONS", "RELATES_TO", "HAS_MEMBER"},
+		},
 	}
 
 	for _, tt := range tests {

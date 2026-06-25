@@ -153,11 +153,39 @@ func hasSubqueryPattern(query string, pattern string) bool {
 	case countSubqueryRe:
 		return hasKeywordFollowedByBrace(query, "COUNT")
 	case callSubqueryRe:
-		return hasKeywordFollowedByBrace(query, "CALL")
+		return hasCallSubqueryPattern(query)
 	case collectSubqueryRe:
 		return hasKeywordFollowedByBrace(query, "COLLECT")
 	}
 	return false
+}
+
+func hasCallSubqueryPattern(query string) bool {
+	for i := 0; i < len(query); i++ {
+		if !matchKeywordAt(query, i, "CALL") {
+			continue
+		}
+		j := skipSpaces(query, i+len("CALL"))
+		if j < len(query) && query[j] == '{' {
+			return true
+		}
+		if j >= len(query) || query[j] != '(' {
+			continue
+		}
+		close := findMatchingCallParen(query, j)
+		if close < 0 {
+			continue
+		}
+		k := skipSpaces(query, close+1)
+		if k < len(query) && query[k] == '{' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCallInTransactions(query string) bool {
+	return hasCallSubqueryPattern(query) && findKeywordIndex(query, "IN TRANSACTIONS") >= 0
 }
 
 func hasNotExistsFollowedByBrace(query string) bool {
@@ -1924,6 +1952,9 @@ func (e *StorageExecutor) executeImplicitAsync(ctx context.Context, cypher strin
 	// For write operations, use implicit transaction for atomicity
 	// This ensures partial writes are rolled back on error
 	if isWrite {
+		if hasCallInTransactions(cypher) {
+			return e.executeWithoutTransaction(ctx, cypher, upperQuery)
+		}
 		engines := e.resolveImplicitTxEngines()
 		if engines.asyncEngine != nil {
 			if result, err, handled := e.tryAsyncCreateNodeBatch(ctx, cypher); handled {

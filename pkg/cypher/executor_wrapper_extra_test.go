@@ -161,6 +161,47 @@ func TestTransactionStorageWrapper_BulkOps_WithNamespace(t *testing.T) {
 	assert.Equal(t, storage.NodeID("tenant:n2"), createdEdge.EndNode)
 }
 
+func TestTransactionStorageWrapper_BulkDeleteEdges_WithNamespaceInvalidatesPreloadedCaches(t *testing.T) {
+	eng := newTestMemoryEngine(t)
+	defer eng.Close()
+
+	ns := storage.NewNamespacedEngine(eng, "tenant")
+	_, err := ns.CreateNode(&storage.Node{ID: "a", Labels: []string{"Entity"}})
+	require.NoError(t, err)
+	_, err = ns.CreateNode(&storage.Node{ID: "b", Labels: []string{"Entity"}})
+	require.NoError(t, err)
+	_, err = ns.CreateNode(&storage.Node{ID: "ep", Labels: []string{"Episodic"}})
+	require.NoError(t, err)
+	require.NoError(t, ns.CreateEdge(&storage.Edge{ID: "r1", StartNode: "a", EndNode: "b", Type: "RELATES_TO", Properties: map[string]interface{}{"uuid": "r1"}}))
+	require.NoError(t, ns.CreateEdge(&storage.Edge{ID: "m1", StartNode: "ep", EndNode: "a", Type: "MENTIONS", Properties: map[string]interface{}{"uuid": "m1"}}))
+
+	byType, err := ns.GetEdgesByType("RELATES_TO")
+	require.NoError(t, err)
+	require.Len(t, byType, 1)
+	outgoingA, err := ns.GetOutgoingEdges("a")
+	require.NoError(t, err)
+	require.Len(t, outgoingA, 1)
+	outgoingEP, err := ns.GetOutgoingEdges("ep")
+	require.NoError(t, err)
+	require.Len(t, outgoingEP, 1)
+
+	tx, err := eng.BeginTransaction()
+	require.NoError(t, err)
+	w := &transactionStorageWrapper{tx: tx, underlying: eng, namespace: "tenant", separator: ":"}
+	require.NoError(t, w.BulkDeleteEdges([]storage.EdgeID{"r1", "m1"}))
+	require.NoError(t, tx.Commit())
+
+	byType, err = ns.GetEdgesByType("RELATES_TO")
+	require.NoError(t, err)
+	require.Empty(t, byType)
+	outgoingA, err = ns.GetOutgoingEdges("a")
+	require.NoError(t, err)
+	require.Empty(t, outgoingA)
+	outgoingEP, err = ns.GetOutgoingEdges("ep")
+	require.NoError(t, err)
+	require.Empty(t, outgoingEP)
+}
+
 func TestTransactionStorageWrapper_ToUserNode_NilSafe(t *testing.T) {
 	w := &transactionStorageWrapper{namespace: "tenant", separator: ":"}
 	assert.Nil(t, w.toUserNode(nil))

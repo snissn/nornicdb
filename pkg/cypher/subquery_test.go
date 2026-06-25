@@ -819,6 +819,35 @@ func TestCallSubqueryInTransactions(t *testing.T) {
 	})
 }
 
+func TestCallSubqueryVariableScopeInTransactionsDetachDelete(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (:ScopedTxDelete {uuid:'a', group_id:'g'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:ScopedTxDelete {uuid:'b', group_id:'g'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "MATCH (a:ScopedTxDelete {uuid:'a'}), (b:ScopedTxDelete {uuid:'b'}) CREATE (a)-[:SCOPED_TX_REL]->(b)", nil)
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, `
+		MATCH (n:ScopedTxDelete {group_id: $group_id})
+		CALL (n) {
+			DETACH DELETE n
+		} IN TRANSACTIONS OF $batch_size ROWS
+	`, map[string]interface{}{"group_id": "g", "batch_size": int64(1)})
+	require.NoError(t, err)
+	require.NotNil(t, res.Stats)
+	require.Equal(t, 2, res.Stats.NodesDeleted)
+	require.Equal(t, 1, res.Stats.RelationshipsDeleted)
+
+	count, err := exec.Execute(ctx, "MATCH (n:ScopedTxDelete) RETURN count(n)", nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), count.Rows[0][0])
+}
+
 // ========================================
 // Additional EXISTS {} Subquery Tests
 // ========================================

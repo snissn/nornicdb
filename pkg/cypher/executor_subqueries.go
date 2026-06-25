@@ -407,7 +407,8 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 
 	// Parse the CALL {} subquery and what comes after
 	callPart := strings.TrimSpace(cypher[callIdx:])
-	subqueryBody, afterCall, _, _ := e.parseCallSubquery(callPart)
+	callImportVars := parseCallSubqueryImportVariables(callPart)
+	subqueryBody, afterCall, inTransactions, batchSize := e.parseCallSubquery(callPart)
 	if subqueryBody == "" {
 		return nil, fmt.Errorf("invalid CALL {} subquery: empty body")
 	}
@@ -439,6 +440,13 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 	}
 	// Check if subquery starts with "WITH <variable>" - this imports outer context
 	upperBody := strings.ToUpper(strings.TrimSpace(subqueryBody))
+	if len(callImportVars) > 0 && !strings.HasPrefix(upperBody, "WITH ") {
+		subqueryBody = "WITH " + strings.Join(callImportVars, ", ") + " " + subqueryBody
+		upperBody = strings.ToUpper(strings.TrimSpace(subqueryBody))
+	}
+	if inTransactions && importsVariable(callImportVars, nodePattern.variable) {
+		return subqueryExecutor.executeVariableScopeCallInTransactions(ctx, seedNodes, nodePattern.variable, subqueryBody, afterCall, batchSize)
+	}
 	if !strings.HasPrefix(upperBody, "WITH ") {
 		// No WITH clause - execute as standalone subquery for each seed
 		return subqueryExecutor.executeCallSubquery(ctx, "CALL { "+subqueryBody+" }")
@@ -458,6 +466,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		findKeywordIndex(subqueryBody, "MERGE"),
 		findKeywordIndex(subqueryBody, "CREATE"),
 		findKeywordIndex(subqueryBody, "SET"),
+		findKeywordIndex(subqueryBody, "DETACH DELETE"),
 		findKeywordIndex(subqueryBody, "DELETE"),
 		findKeywordIndex(subqueryBody, "REMOVE"),
 		findKeywordIndex(subqueryBody, "CALL"),
@@ -790,6 +799,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		if strings.HasPrefix(upperRest, "MERGE ") ||
 			strings.HasPrefix(upperRest, "CREATE ") ||
 			strings.HasPrefix(upperRest, "SET ") ||
+			strings.HasPrefix(upperRest, "DETACH DELETE ") ||
 			strings.HasPrefix(upperRest, "DELETE ") ||
 			strings.HasPrefix(upperRest, "REMOVE ") {
 			substitutedBody = "MATCH (" + nodePattern.variable + ") WHERE id(" + nodePattern.variable + ") = $" + seedIDParamName + " " + restOfSubquery
@@ -1457,6 +1467,123 @@ func (e *StorageExecutor) parseCallSubquery(cypher string) (body, afterCall stri
 	return body, afterCall, inTransactions, batchSize
 }
 
+func parseCallSubqueryImportVariables(cypher string) []string {
+	trimmed := strings.TrimSpace(cypher)
+	if findKeywordIndex(trimmed, "CALL") != 0 {
+		return nil
+	}
+	idx := skipSpaces(trimmed, len("CALL"))
+	if idx >= len(trimmed) || trimmed[idx] != '(' {
+		return nil
+	}
+	close := findMatchingCallParen(trimmed, idx)
+	if close < 0 {
+		return nil
+	}
+	body := strings.TrimSpace(trimmed[idx+1 : close])
+	if body == "" {
+		return nil
+	}
+	parts := splitProcedureTopLevelComma(body)
+	vars := make([]string, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		name = strings.Trim(name, "`")
+		if !isSimpleIdentifier(name) {
+			continue
+		}
+		vars = append(vars, name)
+	}
+	return vars
+}
+
+func importsVariable(vars []string, variable string) bool {
+	for _, v := range vars {
+		if strings.EqualFold(strings.TrimSpace(v), strings.TrimSpace(variable)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *StorageExecutor) executeVariableScopeCallInTransactions(ctx context.Context, seedNodes []*storage.Node, seedVar, subqueryBody, afterCall string, batchSize int) (*ExecuteResult, error) {
+	if batchSize <= 0 {
+		batchSize = 1000
+	}
+	if len(seedNodes) == 0 {
+		empty := &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}, Stats: &QueryStats{}}
+		if strings.TrimSpace(afterCall) != "" {
+			return e.processAfterCallSubquery(ctx, empty, afterCall)
+		}
+		return empty, nil
+	}
+
+	withVars, innerBody, hasWith, err := parseLeadingWithImports(subqueryBody)
+	if err != nil {
+		return nil, err
+	}
+	if !hasWith || len(withVars) != 1 || !strings.EqualFold(strings.TrimSpace(withVars[0]), strings.TrimSpace(seedVar)) {
+		return nil, fmt.Errorf("unsupported CALL (%s) IN TRANSACTIONS import shape", seedVar)
+	}
+	innerBody = strings.TrimSpace(innerBody)
+	if innerBody == "" {
+		return nil, fmt.Errorf("invalid CALL (%s) IN TRANSACTIONS: empty body", seedVar)
+	}
+
+	combined := &ExecuteResult{Columns: []string{}, Rows: make([][]interface{}, 0), Stats: &QueryStats{}}
+	for start := 0; start < len(seedNodes); start += batchSize {
+		end := start + batchSize
+		if end > len(seedNodes) {
+			end = len(seedNodes)
+		}
+		ids := make([]string, 0, end-start)
+		for _, node := range seedNodes[start:end] {
+			if node == nil || node.ID == "" {
+				continue
+			}
+			ids = append(ids, string(node.ID))
+		}
+		if len(ids) == 0 {
+			continue
+		}
+
+		batchQuery := fmt.Sprintf("MATCH (%s) WHERE id(%s) IN $__call_in_tx_ids %s", seedVar, seedVar, innerBody)
+		batchParams := map[string]interface{}{"__call_in_tx_ids": ids}
+		if inherited := getParamsFromContext(ctx); inherited != nil {
+			batchParams = make(map[string]interface{}, len(inherited)+1)
+			for key, value := range inherited {
+				batchParams[key] = value
+			}
+			batchParams["__call_in_tx_ids"] = ids
+		}
+		batchCtx := context.WithValue(ctx, paramsKey, batchParams)
+		batchResult, err := e.executeWithImplicitTransaction(batchCtx, batchQuery, strings.ToUpper(batchQuery))
+		if err != nil {
+			return nil, fmt.Errorf("CALL (%s) IN TRANSACTIONS batch %d failed: %w", seedVar, start/batchSize+1, err)
+		}
+		if batchResult == nil {
+			continue
+		}
+		if len(combined.Columns) == 0 && len(batchResult.Columns) > 0 {
+			combined.Columns = append([]string{}, batchResult.Columns...)
+		}
+		combined.Rows = append(combined.Rows, batchResult.Rows...)
+		if batchResult.Stats != nil {
+			combined.Stats.NodesCreated += batchResult.Stats.NodesCreated
+			combined.Stats.NodesDeleted += batchResult.Stats.NodesDeleted
+			combined.Stats.RelationshipsCreated += batchResult.Stats.RelationshipsCreated
+			combined.Stats.RelationshipsDeleted += batchResult.Stats.RelationshipsDeleted
+			combined.Stats.PropertiesSet += batchResult.Stats.PropertiesSet
+			combined.Stats.LabelsAdded += batchResult.Stats.LabelsAdded
+		}
+	}
+
+	if strings.TrimSpace(afterCall) != "" {
+		return e.processAfterCallSubquery(ctx, combined, afterCall)
+	}
+	return combined, nil
+}
+
 // executeCallInTransactions executes a CALL {} IN TRANSACTIONS query
 // This batches operations for large datasets by processing results in separate transactions.
 //
@@ -1902,6 +2029,10 @@ func parseLeadingWithImports(subqueryBody string) (withVars []string, innerBody 
 		findKeywordIndex(afterWith, "UNWIND"),
 		findKeywordIndex(afterWith, "MERGE"),
 		findKeywordIndex(afterWith, "CREATE"),
+		findKeywordIndex(afterWith, "SET"),
+		findKeywordIndex(afterWith, "DETACH DELETE"),
+		findKeywordIndex(afterWith, "DELETE"),
+		findKeywordIndex(afterWith, "REMOVE"),
 		findKeywordIndex(afterWith, "CALL"),
 		findKeywordIndex(afterWith, "RETURN"),
 		findKeywordIndex(afterWith, "WITH"),

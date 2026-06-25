@@ -187,6 +187,7 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 	rowCount := len(matchResult.Rows)
 	deletedNodeIDs := make(map[string]struct{}, rowCount)
 	deletedEdgeIDs := make(map[string]struct{}, rowCount)
+	edgeIDsToDelete := make([]storage.EdgeID, 0, rowCount)
 
 	for _, row := range matchResult.Rows {
 		for _, val := range row {
@@ -214,10 +215,8 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 				if _, seen := deletedEdgeIDs[edgeID]; seen {
 					continue
 				}
-				if err := store.DeleteEdge(storage.EdgeID(edgeID)); err == nil {
-					result.Stats.RelationshipsDeleted++
-					deletedEdgeIDs[edgeID] = struct{}{}
-				}
+				deletedEdgeIDs[edgeID] = struct{}{}
+				edgeIDsToDelete = append(edgeIDsToDelete, storage.EdgeID(edgeID))
 				continue
 			}
 
@@ -253,6 +252,13 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 				}
 			}
 		}
+	}
+
+	if len(edgeIDsToDelete) > 0 {
+		if err := store.BulkDeleteEdges(edgeIDsToDelete); err != nil {
+			return nil, err
+		}
+		result.Stats.RelationshipsDeleted += len(edgeIDsToDelete)
 	}
 
 	e.applyDeleteReturnProjection(result, cypher, deleteVars)

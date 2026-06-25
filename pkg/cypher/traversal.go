@@ -2270,6 +2270,22 @@ func (e *StorageExecutor) evaluateWhereOnPath(ctx context.Context, whereClause s
 		return !e.evaluateWhereOnPath(ctx, inner, pathCtx)
 	}
 
+	// Handle membership predicates before comparison operators so list literals
+	// are not mistaken for scalar comparison right-hand sides.
+	if inIdx := findTopLevelKeyword(whereClause, " IN "); inIdx > 0 {
+		leftExpr := strings.TrimSpace(whereClause[:inIdx])
+		rightExpr := strings.TrimSpace(whereClause[inIdx+4:])
+
+		leftVal := e.evaluateExpressionWithPathContext(ctx, leftExpr, pathCtx)
+		rightVal := e.parseValue(ctx, rightExpr)
+		items, ok := toInterfaceSlice(rightVal)
+		if !ok {
+			return false
+		}
+		comparableSet, nonComparable := buildComparableMembershipIndex(items)
+		return evaluateComparableMembership(leftVal, comparableSet, nonComparable, e.compareEqual)
+	}
+
 	// Handle relationship patterns (n)-[:TYPE]->() or (n)<-[:TYPE]-() before operator check
 	hasRelPattern := (strings.Contains(whereClause, "-[") && (strings.Contains(whereClause, "]->") || strings.Contains(whereClause, "<-")))
 	if hasRelPattern && pathCtx.nodes != nil {
@@ -2353,6 +2369,21 @@ func (e *StorageExecutor) evaluatePathValue(expr string) interface{} {
 		if (first == '\'' && last == '\'') || (first == '"' && last == '"') {
 			return expr[1 : len(expr)-1]
 		}
+	}
+
+	// Handle list literals used by traversal WHERE predicates, for example
+	// e.uuid IN ['r1', 'm1'] after parameter substitution.
+	if strings.HasPrefix(expr, "[") && strings.HasSuffix(expr, "]") {
+		inner := strings.TrimSpace(expr[1 : len(expr)-1])
+		if inner == "" {
+			return []interface{}{}
+		}
+		parts := splitOutsideParens(inner, ',')
+		items := make([]interface{}, 0, len(parts))
+		for _, part := range parts {
+			items = append(items, e.evaluatePathValue(part))
+		}
+		return items
 	}
 
 	// Handle numbers

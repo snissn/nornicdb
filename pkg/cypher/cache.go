@@ -733,12 +733,22 @@ func (sc *SmartQueryCache) evictOldestLRU() {
 	}
 }
 
-// extractLabelsFromQuery extracts node labels from a Cypher query string.
-// It scans for label tokens like :Label and :Label:AnotherLabel while skipping
-// quoted string content.
+// extractLabelsFromQuery extracts node labels and relationship type tokens from
+// a Cypher query string. It scans for label/type tokens like :Label,
+// :Label:AnotherLabel, and :TYPE_A|TYPE_B while skipping quoted string content.
 func extractLabelsFromQuery(cypher string) []string {
 	seen := make(map[string]struct{})
 	var labels []string
+	addLabel := func(label string) {
+		if label == "RETURN" || label == "WHERE" || label == "AND" || label == "OR" {
+			return
+		}
+		if _, ok := seen[label]; ok {
+			return
+		}
+		seen[label] = struct{}{}
+		labels = append(labels, label)
+	}
 
 	inSingle := false
 	inDouble := false
@@ -782,17 +792,46 @@ func extractLabelsFromQuery(cypher string) []string {
 			}
 			break
 		}
-		label := cypher[start:end]
-		// Skip common non-label patterns
-		if label == "RETURN" || label == "WHERE" || label == "AND" || label == "OR" {
-			i = end - 1
-			continue
+		addLabel(cypher[start:end])
+
+		scan := end
+		for scan < len(cypher) {
+			j := scan
+			for j < len(cypher) && (cypher[j] == ' ' || cypher[j] == '\t' || cypher[j] == '\n' || cypher[j] == '\r') {
+				j++
+			}
+			if j >= len(cypher) || cypher[j] != '|' {
+				break
+			}
+			j++
+			for j < len(cypher) && (cypher[j] == ' ' || cypher[j] == '\t' || cypher[j] == '\n' || cypher[j] == '\r') {
+				j++
+			}
+			if j < len(cypher) && cypher[j] == ':' {
+				j++
+			}
+			if j >= len(cypher) {
+				break
+			}
+			first := cypher[j]
+			if first < 'A' || first > 'Z' {
+				break
+			}
+			altStart := j
+			j++
+			for j < len(cypher) {
+				c := cypher[j]
+				if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+					j++
+					continue
+				}
+				break
+			}
+			addLabel(cypher[altStart:j])
+			scan = j
 		}
-		if _, ok := seen[label]; !ok {
-			seen[label] = struct{}{}
-			labels = append(labels, label)
-		}
-		i = end - 1
+
+		i = scan - 1
 	}
 
 	return labels
