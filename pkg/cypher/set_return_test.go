@@ -73,6 +73,32 @@ func TestSetReturnSingleVariable(t *testing.T) {
 	assert.Equal(t, "Alice", returnedNode.Properties["name"], "Node should retain original properties")
 }
 
+func TestSetReturnRelationshipCount(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (:SetCountNode {id:'a'})-[:REL {group_id:'old'}]->(:SetCountNode {id:'b'})", nil)
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `
+		MATCH ()-[r:REL]->()
+		WHERE r.group_id = 'old'
+		WITH r LIMIT 1
+		SET r.group_id = 'new'
+		RETURN count(r) AS updated
+	`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"updated"}, result.Columns)
+	require.Equal(t, [][]interface{}{{int64(1)}}, result.Rows)
+
+	verify, err := exec.Execute(ctx, "MATCH ()-[r:REL]->() WHERE r.group_id = 'new' RETURN count(r)", nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), verify.Rows[0][0])
+}
+
 // TestSetReturnMultipleVariables tests MATCH...SET...RETURN n, m
 // Tests SET with multiple node variables in a relationship pattern
 func TestSetReturnMultipleVariables(t *testing.T) {

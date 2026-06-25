@@ -1322,23 +1322,40 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 					}
 					for _, row := range matchResult.Rows {
 						varMap := make(map[string]*storage.Node, len(matchResult.Columns))
+						relMap := make(map[string]*storage.Edge, len(matchResult.Columns))
 						for i, colName := range matchResult.Columns {
-							if i < len(row) {
-								if node, ok := row[i].(*storage.Node); ok && node != nil {
-									varMap[colName] = node
+							if i >= len(row) {
+								continue
+							}
+							switch entity := row[i].(type) {
+							case *storage.Node:
+								if entity != nil {
+									varMap[colName] = entity
+								}
+							case *storage.Edge:
+								if entity != nil {
+									relMap[colName] = entity
 								}
 							}
 						}
-						node := varMap[varName]
-						if node == nil {
+						if node := varMap[varName]; node != nil {
+							if propName == "" {
+								count++
+								continue
+							}
+							if v, ok := node.Properties[propName]; ok && v != nil {
+								count++
+							}
 							continue
 						}
-						if propName == "" {
-							count++
-							continue
-						}
-						if v, ok := node.Properties[propName]; ok && v != nil {
-							count++
+						if rel := relMap[varName]; rel != nil {
+							if propName == "" {
+								count++
+								continue
+							}
+							if v, ok := rel.Properties[propName]; ok && v != nil {
+								count++
+							}
 						}
 					}
 					aggRow[j] = count
@@ -1349,11 +1366,19 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 						continue
 					}
 					varMap := make(map[string]*storage.Node, len(matchResult.Columns))
+					relMap := make(map[string]*storage.Edge, len(matchResult.Columns))
 					first := matchResult.Rows[0]
 					for i, colName := range matchResult.Columns {
 						if i < len(first) {
-							if node, ok := first[i].(*storage.Node); ok && node != nil {
-								varMap[colName] = node
+							switch entity := first[i].(type) {
+							case *storage.Node:
+								if entity != nil {
+									varMap[colName] = entity
+								}
+							case *storage.Edge:
+								if entity != nil {
+									relMap[colName] = entity
+								}
 							}
 						}
 					}
@@ -1362,8 +1387,12 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 							aggRow[j] = e.resolveReturnItem(ctx, item, variable, node)
 							continue
 						}
+						if _, ok := relMap[variable]; ok {
+							aggRow[j] = e.evaluateExpressionWithContext(ctx, item.expr, varMap, relMap)
+							continue
+						}
 					}
-					aggRow[j] = e.evaluateExpressionWithContext(ctx, item.expr, varMap, make(map[string]*storage.Edge))
+					aggRow[j] = e.evaluateExpressionWithContext(ctx, item.expr, varMap, relMap)
 				}
 			}
 			result.Rows = [][]interface{}{aggRow}
@@ -1376,10 +1405,18 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 		for _, row := range matchResult.Rows {
 			// Map column names to values in this row
 			varMap := make(map[string]*storage.Node)
+			relMap := make(map[string]*storage.Edge)
 			for i, colName := range matchResult.Columns {
 				if i < len(row) {
-					if node, ok := row[i].(*storage.Node); ok && node != nil {
-						varMap[colName] = node
+					switch entity := row[i].(type) {
+					case *storage.Node:
+						if entity != nil {
+							varMap[colName] = entity
+						}
+					case *storage.Edge:
+						if entity != nil {
+							relMap[colName] = entity
+						}
 					}
 				}
 			}
@@ -1395,6 +1432,10 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 						newRow[j] = e.resolveReturnItem(ctx, item, varName, node)
 						continue
 					}
+					if _, ok := relMap[varName]; ok {
+						newRow[j] = e.evaluateExpressionWithContext(ctx, item.expr, varMap, relMap)
+						continue
+					}
 				}
 				// Fallback: try to resolve with the first variable (for backward compatibility)
 				if variable != "" {
@@ -1402,9 +1443,13 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 						newRow[j] = e.resolveReturnItem(ctx, item, variable, node)
 						continue
 					}
+					if _, ok := relMap[variable]; ok {
+						newRow[j] = e.evaluateExpressionWithContext(ctx, item.expr, varMap, relMap)
+						continue
+					}
 				}
 				// If no variable matches, try to evaluate expression with all variables
-				newRow[j] = e.evaluateExpressionWithContext(ctx, item.expr, varMap, make(map[string]*storage.Edge))
+				newRow[j] = e.evaluateExpressionWithContext(ctx, item.expr, varMap, relMap)
 			}
 			result.Rows = append(result.Rows, newRow)
 		}
