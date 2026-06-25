@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -264,13 +265,27 @@ func TestNewAuditLogger(t *testing.T) {
 	}
 }
 
+// mockAuditSink is the test sink used to assert audit log deliveries. The
+// underlying AuditLogger dispatches each Log call on its own goroutine
+// (fire-and-forget), so the sink must be safe for concurrent calls.
 type mockAuditSink struct {
+	mu     sync.Mutex
 	events []MCPAuditEvent
 }
 
 func (m *mockAuditSink) Log(event MCPAuditEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.events = append(m.events, event)
 	return nil
+}
+
+func (m *mockAuditSink) Events() []MCPAuditEvent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]MCPAuditEvent, len(m.events))
+	copy(out, m.events)
+	return out
 }
 
 func TestAuditLoggerAddSink(t *testing.T) {
@@ -285,11 +300,14 @@ func TestAuditLoggerAddSink(t *testing.T) {
 		UserID: "user1",
 	})
 
-	// Give goroutine time to execute
-	time.Sleep(10 * time.Millisecond)
+	// Deterministically wait for every in-flight sink invocation to drain.
+	// (Previously this relied on a 10ms time.Sleep, which is racy and was
+	// flagged by `go test -race -shuffle=on -count=2`.)
+	logger.Flush()
 
-	if len(sink.events) != 1 {
-		t.Errorf("Expected 1 event, got %d", len(sink.events))
+	events := sink.Events()
+	if len(events) != 1 {
+		t.Errorf("Expected 1 event, got %d", len(events))
 	}
 }
 
@@ -750,14 +768,16 @@ func TestLogToolCall(t *testing.T) {
 
 	middleware.LogToolCall(ctx, "store", "create", "memory", "node-123", true, "", time.Second, nil)
 
-	// Give goroutine time
-	time.Sleep(10 * time.Millisecond)
+	// Deterministic: wait for the dispatched sink goroutine instead of
+	// sleeping for an unrelated wall-clock duration.
+	middleware.auditLogger.Flush()
 
-	if len(sink.events) != 1 {
-		t.Fatalf("Expected 1 event, got %d", len(sink.events))
+	events := sink.Events()
+	if len(events) != 1 {
+		t.Fatalf("Expected 1 event, got %d", len(events))
 	}
 
-	event := sink.events[0]
+	event := events[0]
 	if event.Tool != "store" {
 		t.Errorf("Expected tool=store, got %s", event.Tool)
 	}
@@ -786,10 +806,12 @@ func TestLogToolCallDisabled(t *testing.T) {
 
 	middleware.LogToolCall(context.Background(), "store", "create", "", "", true, "", 0, nil)
 
-	time.Sleep(10 * time.Millisecond)
+	// Even though audit is disabled, Flush is still safe — it returns
+	// immediately when no work was queued.
+	middleware.auditLogger.Flush()
 
-	if len(sink.events) != 0 {
-		t.Error("Expected no events when audit disabled")
+	if events := sink.Events(); len(events) != 0 {
+		t.Errorf("Expected no events when audit disabled, got %d", len(events))
 	}
 }
 

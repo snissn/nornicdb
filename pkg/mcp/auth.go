@@ -344,8 +344,9 @@ type MCPAuditEvent struct {
 
 // AuditLogger manages multi-sink audit logging.
 type AuditLogger struct {
-	mu    sync.RWMutex
-	sinks []AuditSink
+	mu      sync.RWMutex
+	sinks   []AuditSink
+	pending sync.WaitGroup
 }
 
 // NewAuditLogger creates a new audit logger.
@@ -363,16 +364,35 @@ func (a *AuditLogger) AddSink(sink AuditSink) {
 }
 
 // Log logs an event to all sinks asynchronously (fire-and-forget).
+//
+// Each in-flight sink invocation is tracked by an internal WaitGroup so that
+// callers (or tests) can call Flush to deterministically observe the
+// resulting writes. Without Flush, Log retains its original fire-and-forget
+// semantics — callers that did not call Flush before this change still
+// observe identical behavior.
 func (a *AuditLogger) Log(event MCPAuditEvent) {
 	a.mu.RLock()
 	sinks := a.sinks
 	a.mu.RUnlock()
 
 	for _, sink := range sinks {
+		a.pending.Add(1)
 		go func(s AuditSink) {
+			defer a.pending.Done()
 			_ = s.Log(event) // Best effort, non-blocking
 		}(sink)
 	}
+}
+
+// Flush blocks until every audit event handed to Log so far has been
+// delivered to its sink. Safe to call concurrently with Log; in that case
+// it waits for events submitted strictly before the Flush call.
+//
+// Intended for graceful shutdown and deterministic test assertions —
+// production hot paths should continue to use Log and let the sinks drain
+// in the background.
+func (a *AuditLogger) Flush() {
+	a.pending.Wait()
 }
 
 // ConsoleSink is an audit sink that logs to console.

@@ -916,6 +916,29 @@ else
 endif
 
 # ==============================================================================
+# Coverage
+# ==============================================================================
+# Three modes:
+#   coverage           - regenerate coverage.out + plans/coverage-current.txt
+#   coverage-baseline  - regenerate and write plans/coverage-baseline.txt
+#   coverage-gate      - enforce per-package floor (90% / 95% for cypher,storage)
+#   coverage-ratchet   - record current per-package coverage as the new floor
+#
+# All four reuse scripts/generate-coverage.sh (same exclusion list as CI).
+
+coverage:
+	bash scripts/coverage/report.sh
+
+coverage-baseline:
+	bash scripts/coverage/report.sh --baseline
+
+coverage-gate:
+	bash scripts/coverage/gate.sh
+
+coverage-ratchet:
+	bash scripts/coverage/gate.sh --ratchet
+
+# ==============================================================================
 # Cross-Compilation (native binaries for other platforms)
 # ==============================================================================
 # Build from macOS for: Linux servers, Raspberry Pi, Windows, etc.

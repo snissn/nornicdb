@@ -1700,6 +1700,20 @@ func normalizeNodeElementID(id string) string {
 	return nodeElementIDPrefix + id
 }
 
+// localNodeIDFromAny converts an arbitrary node identifier into the local
+// (per-database) id form expected by the storage layer. Three input shapes
+// are handled deterministically:
+//
+//  1. The NornicDB prefixed form ("4:nornicdb:<id>")  → strip the prefix.
+//  2. A Neo4j-style 3-segment elementId ("4:<db>:<id>") → strip both
+//     segments and return the trailing id.
+//  3. Anything else (bare id, malformed prefix, garbage) → return the
+//     trimmed input unchanged.
+//
+// The 3-segment requirement makes the parse unambiguous: a string like
+// "4:foo" is treated as a bare id (returned as-is) rather than being
+// silently mangled into "foo". That avoids losing information when a
+// caller hands in an id that coincidentally starts with "4:".
 func localNodeIDFromAny(id string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -1708,10 +1722,13 @@ func localNodeIDFromAny(id string) string {
 	if strings.HasPrefix(id, nodeElementIDPrefix) {
 		return strings.TrimPrefix(id, nodeElementIDPrefix)
 	}
-	// Best-effort: for other elementId formats, take the final segment.
 	if strings.HasPrefix(id, "4:") {
-		if idx := strings.LastIndex(id, ":"); idx != -1 && idx+1 < len(id) {
-			return id[idx+1:]
+		// Require exactly the 3-segment Neo4j elementId shape: "4:db:id".
+		// Two colons is the minimum unambiguous form; anything less is a
+		// bare id that happens to start with "4:".
+		rest := id[len("4:"):]
+		if colon := strings.IndexByte(rest, ':'); colon != -1 && colon+1 < len(rest) {
+			return rest[colon+1:]
 		}
 	}
 	return id

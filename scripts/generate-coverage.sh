@@ -39,8 +39,11 @@ run_pkg_with_retry() {
 	local extra_flags=("$@")
 	local attempts=3
 
+	# Portable "expand-if-set" pattern: ${arr[@]+"${arr[@]}"} so set -u does
+	# not trip on an empty array (notably on macOS bash 3.2, where empty
+	# array expansion under set -u is treated as unbound).
 	for attempt in $(seq 1 "$attempts"); do
-		if go test -p 1 -parallel 4 -timeout 30m -coverprofile="$prof" "${extra_flags[@]}" "$pkg"; then
+		if go test -p 1 -parallel 4 -timeout 30m -coverprofile="$prof" ${extra_flags[@]+"${extra_flags[@]}"} "$pkg"; then
 			return 0
 		fi
 		if [ "$attempt" -lt "$attempts" ]; then
@@ -123,7 +126,7 @@ append_group() {
 		[ -n "$pkg" ] || continue
 		i=$((i + 1))
 		local prof="$tmp_dir/$i.cover"
-		run_pkg_with_retry "$pkg" "$prof" "${extra_flags[@]}"
+		run_pkg_with_retry "$pkg" "$prof" ${extra_flags[@]+"${extra_flags[@]}"}
 		# Skip the per-package mode line; append statement blocks.
 		tail -n +2 "$prof" >> "$raw_out"
 	done <<< "$pkgs"
