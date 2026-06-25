@@ -131,8 +131,8 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 	// Extract LIMIT/SKIP from WITH section (e.g., "WITH path, connected LIMIT 10")
 	var withLimitVal, withSkipVal int
 	upperWithSection := strings.ToUpper(withSection)
-	if idx := findKeywordNotInBrackets(upperWithSection, " LIMIT "); idx > 0 {
-		limitPart := strings.TrimSpace(withSection[idx+7:])
+	if idx := findKeywordNotInBrackets(upperWithSection, "LIMIT"); idx >= 0 {
+		limitPart := strings.TrimSpace(withSection[idx+len("LIMIT"):])
 		// Find end of LIMIT value (at SKIP or end)
 		endIdx := len(limitPart)
 		if skipIdx := findKeywordNotInBrackets(strings.ToUpper(limitPart), " SKIP "); skipIdx >= 0 && skipIdx < endIdx {
@@ -142,8 +142,8 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 		withSection = strings.TrimSpace(withSection[:idx])
 		upperWithSection = strings.ToUpper(withSection)
 	}
-	if idx := findKeywordNotInBrackets(upperWithSection, " SKIP "); idx > 0 {
-		skipPart := strings.TrimSpace(withSection[idx+6:])
+	if idx := findKeywordNotInBrackets(upperWithSection, "SKIP"); idx >= 0 {
+		skipPart := strings.TrimSpace(withSection[idx+len("SKIP"):])
 		endIdx := len(skipPart)
 		if limIdx := findKeywordNotInBrackets(strings.ToUpper(skipPart), " LIMIT "); limIdx >= 0 && limIdx < endIdx {
 			endIdx = limIdx

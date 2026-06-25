@@ -1139,6 +1139,10 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 		validAssignments++
 		if len(parts) != 2 {
 			variable = strings.TrimSpace(left)
+			targetIdx, hasTargetIdx := colIndex[variable]
+			if !hasTargetIdx {
+				return nil, fmt.Errorf("unknown variable in SET clause: %s", variable)
+			}
 			// Replace properties on matched entities: SET n = { ... }
 			for _, row := range matchResult.Rows {
 				propValue, err := resolvePropValue(row)
@@ -1149,51 +1153,17 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 				if err != nil {
 					return nil, fmt.Errorf("invalid SET assignment: %q (expected variable.property = value or variable = {property: value}): %w", assignment, err)
 				}
-				for _, val := range row {
-					switch entity := val.(type) {
-					case *storage.Node:
-						if entity == nil {
-							continue
-						}
-						entity.Properties = cloneStringAnyMap(props)
-						if err := store.UpdateNode(entity); err != nil {
-							return nil, fmt.Errorf("SET %s =: %w", variable, err)
-						}
-						result.Stats.PropertiesSet++
-						e.notifyNodeMutated(string(entity.ID))
-					case *storage.Edge:
-						if entity == nil {
-							continue
-						}
-						entity.Properties = cloneStringAnyMap(props)
-						if err := store.UpdateEdge(entity); err != nil {
-							return nil, fmt.Errorf("SET %s =: %w", variable, err)
-						}
-						result.Stats.PropertiesSet++
-						e.notifyEdgeMutated(string(entity.ID))
-					}
+				if targetIdx >= len(row) {
+					continue
 				}
-			}
-			continue
-		}
-		variable = parts[0]
-		propName := parts[1]
-
-		// Update matched nodes
-		for _, row := range matchResult.Rows {
-			propValue, err := resolvePropValue(row)
-			if err != nil {
-				return nil, err
-			}
-			for _, val := range row {
-				switch entity := val.(type) {
+				switch entity := row[targetIdx].(type) {
 				case *storage.Node:
 					if entity == nil {
 						continue
 					}
-					setNodeProperty(entity, propName, propValue)
+					entity.Properties = cloneStringAnyMap(props)
 					if err := store.UpdateNode(entity); err != nil {
-						return nil, fmt.Errorf("SET %s.%s: %w", variable, propName, err)
+						return nil, fmt.Errorf("SET %s =: %w", variable, err)
 					}
 					result.Stats.PropertiesSet++
 					e.notifyNodeMutated(string(entity.ID))
@@ -1201,16 +1171,60 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 					if entity == nil {
 						continue
 					}
-					if entity.Properties == nil {
-						entity.Properties = make(map[string]interface{})
-					}
-					entity.Properties[propName] = propValue
+					entity.Properties = cloneStringAnyMap(props)
 					if err := store.UpdateEdge(entity); err != nil {
-						return nil, fmt.Errorf("SET %s.%s: %w", variable, propName, err)
+						return nil, fmt.Errorf("SET %s =: %w", variable, err)
 					}
 					result.Stats.PropertiesSet++
 					e.notifyEdgeMutated(string(entity.ID))
+				default:
+					return nil, fmt.Errorf("SET %s = requires a node or relationship", variable)
 				}
+			}
+			continue
+		}
+		variable = parts[0]
+		propName := parts[1]
+		targetIdx, hasTargetIdx := colIndex[variable]
+		if !hasTargetIdx {
+			return nil, fmt.Errorf("unknown variable in SET clause: %s", variable)
+		}
+
+		// Update the target variable only; other entities may be carried in row scope.
+		for _, row := range matchResult.Rows {
+			propValue, err := resolvePropValue(row)
+			if err != nil {
+				return nil, err
+			}
+			if targetIdx >= len(row) {
+				continue
+			}
+			switch entity := row[targetIdx].(type) {
+			case *storage.Node:
+				if entity == nil {
+					continue
+				}
+				setNodeProperty(entity, propName, propValue)
+				if err := store.UpdateNode(entity); err != nil {
+					return nil, fmt.Errorf("SET %s.%s: %w", variable, propName, err)
+				}
+				result.Stats.PropertiesSet++
+				e.notifyNodeMutated(string(entity.ID))
+			case *storage.Edge:
+				if entity == nil {
+					continue
+				}
+				if entity.Properties == nil {
+					entity.Properties = make(map[string]interface{})
+				}
+				entity.Properties[propName] = propValue
+				if err := store.UpdateEdge(entity); err != nil {
+					return nil, fmt.Errorf("SET %s.%s: %w", variable, propName, err)
+				}
+				result.Stats.PropertiesSet++
+				e.notifyEdgeMutated(string(entity.ID))
+			default:
+				return nil, fmt.Errorf("SET %s.%s requires a node or relationship", variable, propName)
 			}
 		}
 	}

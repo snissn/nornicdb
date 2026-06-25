@@ -251,6 +251,84 @@ func TestGraphitiScenarioE2E_VerbatimCopySkipsRedundantVectorPropertyUpdates(t *
 	require.True(t, searchSvc.HasRelationshipVectorEntries("RELATES_TO", "fact_embedding"))
 }
 
+func TestGraphitiScenarioE2E_RelationshipSetWithLimitBoundsMVCCCommitState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large-vector MVCC regression")
+	}
+
+	base, err := storage.NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = base.Close() })
+
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	const (
+		nodeCount      = 100
+		edgeCount      = 3000
+		dim            = 1024
+		edgeBatchSize  = 100
+		oldGroupID     = "old"
+		updatedGroupID = "new"
+	)
+
+	_, err = exec.Execute(ctx, "CREATE INDEX t_uuid_idx IF NOT EXISTS FOR (n:T) ON (n.uuid)", nil)
+	require.NoError(t, err)
+
+	nodes := make([]map[string]interface{}, 0, nodeCount)
+	for i := 0; i < nodeCount; i++ {
+		nodes = append(nodes, map[string]interface{}{
+			"uuid": fmt.Sprintf("t%d", i),
+		})
+	}
+	_, err = exec.Execute(ctx, "UNWIND $nodes AS node CREATE (:T {uuid: node.uuid})", map[string]interface{}{"nodes": nodes})
+	require.NoError(t, err)
+
+	vec := deterministicVectorF64(42, dim)
+	for start := 0; start < edgeCount; start += edgeBatchSize {
+		end := start + edgeBatchSize
+		if end > edgeCount {
+			end = edgeCount
+		}
+		edges := make([]map[string]interface{}, 0, end-start)
+		for i := start; i < end; i++ {
+			edges = append(edges, map[string]interface{}{
+				"uuid":           fmt.Sprintf("r%d", i),
+				"source_uuid":    fmt.Sprintf("t%d", i%nodeCount),
+				"target_uuid":    fmt.Sprintf("t%d", (i+1)%nodeCount),
+				"group_id":       oldGroupID,
+				"fact_embedding": vec,
+			})
+		}
+		_, err = exec.Execute(ctx, `
+UNWIND $edges AS edge
+MATCH (source:T {uuid: edge.source_uuid})
+MATCH (target:T {uuid: edge.target_uuid})
+CREATE (source)-[:REL {uuid: edge.uuid, group_id: edge.group_id, fact_embedding: edge.fact_embedding}]->(target)
+`, map[string]interface{}{"edges": edges})
+		require.NoError(t, err)
+	}
+	require.Equal(t, int64(edgeCount), mustCountRows(t, exec, ctx, "MATCH ()-[r:REL]->() WHERE r.group_id='old' RETURN count(r)", nil))
+
+	nodeRes, err := exec.Execute(ctx, "MATCH (n:T) WITH n LIMIT 1 SET n.tag='x' RETURN n.tag", nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]interface{}{{"x"}}, nodeRes.Rows)
+
+	preWriteRows, err := exec.Execute(ctx, "MATCH ()-[r:REL]->() WHERE r.group_id='old' WITH r LIMIT 1 RETURN r", nil)
+	require.NoError(t, err)
+	require.Len(t, preWriteRows.Rows, 1)
+
+	relRes, err := exec.Execute(ctx, `
+MATCH ()-[r:REL]->() WHERE r.group_id='old' WITH r LIMIT 1
+SET r.group_id='new' RETURN 1
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, relRes.Rows, 1)
+	require.Equal(t, int64(1), mustCountRows(t, exec, ctx, "MATCH ()-[r:REL]->() WHERE r.group_id='new' RETURN count(r)", nil))
+	require.Equal(t, int64(edgeCount-1), mustCountRows(t, exec, ctx, "MATCH ()-[r:REL]->() WHERE r.group_id='old' RETURN count(r)", nil))
+}
+
 func TestGraphitiScenarioE2E_BulkEdgeSaveIndexedRepeatedEntityMatches(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")
