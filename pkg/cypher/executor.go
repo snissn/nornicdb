@@ -373,10 +373,21 @@ type StorageExecutor struct {
 	unwindMergeChainPlanCache *unwindMergeChainPlanCache
 	// upperQueryCache memoizes uppercase routing forms for exact query text
 	// to avoid repeated strings.ToUpper allocations on hot query shapes.
-	upperQueryCache *upperQueryCache
+	//
+	// Initialized lazily via upperQueryCacheOnce so concurrent CALL { ... }
+	// subqueries that share an executor pointer don't race on the lazy
+	// install. See ensureUpperQueryCache for the matching helper.
+	upperQueryCache     *upperQueryCache
+	upperQueryCacheOnce sync.Once
 	// syntaxValidationCache memoizes successful Nornic-parser syntax checks
 	// for exact query text to avoid repeated bracket/string scans on hot loops.
+	//
+	// The cache pointer is lazily installed via syntaxValidationOnce so that
+	// concurrent callers in parallel CALL { ... } / executeCallTailParallel
+	// do not race on the pointer write — the goroutine fanout in call.go
+	// previously triggered a data race detected by `go test -race`.
 	syntaxValidationCache *syntaxValidationCache
+	syntaxValidationOnce  sync.Once
 
 	// log is the structured logger used for slow-query and operational log
 	// emission. Threaded via SetLogger after construction (D-01 non-breaking
@@ -1612,18 +1623,27 @@ func isLikelyPlainASCIICypher(query string) bool {
 	return true
 }
 
+// ensureUpperQueryCache lazily installs the upper-query cache pointer with
+// sync.Once so concurrent CALL { ... } subqueries cannot race on the
+// pointer assignment. The cache itself is mutex-guarded for entry access.
+func (e *StorageExecutor) ensureUpperQueryCache() *upperQueryCache {
+	e.upperQueryCacheOnce.Do(func() {
+		if e.upperQueryCache == nil {
+			e.upperQueryCache = &upperQueryCache{
+				cache: make(map[string]string, 1024),
+				max:   4096,
+			}
+		}
+	})
+	return e.upperQueryCache
+}
+
 func (e *StorageExecutor) cachedUpperQuery(query string) string {
 	trimmed := strings.TrimSpace(query)
 	if trimmed == "" {
 		return ""
 	}
-	if e.upperQueryCache == nil {
-		e.upperQueryCache = &upperQueryCache{
-			cache: make(map[string]string, 1024),
-			max:   4096,
-		}
-	}
-	c := e.upperQueryCache
+	c := e.ensureUpperQueryCache()
 	c.mu.RLock()
 	if upper, ok := c.cache[trimmed]; ok {
 		c.mu.RUnlock()
@@ -3663,17 +3683,28 @@ func hasValidStartKeyword(cypher string) bool {
 	return false
 }
 
+// ensureSyntaxValidationCache lazily installs the syntax-validation cache
+// pointer using sync.Once so concurrent CALL { ... } subqueries (which fan
+// out via executeCallTailParallel) cannot race on the pointer write. The
+// underlying cache itself is already mutex-guarded; the race was on the
+// initial pointer assignment.
+func (e *StorageExecutor) ensureSyntaxValidationCache() *syntaxValidationCache {
+	e.syntaxValidationOnce.Do(func() {
+		if e.syntaxValidationCache == nil {
+			e.syntaxValidationCache = &syntaxValidationCache{
+				cache: make(map[string]struct{}, 1024),
+				max:   4096,
+			}
+		}
+	})
+	return e.syntaxValidationCache
+}
+
 func (e *StorageExecutor) hasCachedValidSyntax(cypher string) bool {
 	if cypher == "" {
 		return false
 	}
-	if e.syntaxValidationCache == nil {
-		e.syntaxValidationCache = &syntaxValidationCache{
-			cache: make(map[string]struct{}, 1024),
-			max:   4096,
-		}
-	}
-	c := e.syntaxValidationCache
+	c := e.ensureSyntaxValidationCache()
 	c.mu.RLock()
 	_, ok := c.cache[cypher]
 	c.mu.RUnlock()
@@ -3684,13 +3715,7 @@ func (e *StorageExecutor) markCachedValidSyntax(cypher string) {
 	if cypher == "" {
 		return
 	}
-	if e.syntaxValidationCache == nil {
-		e.syntaxValidationCache = &syntaxValidationCache{
-			cache: make(map[string]struct{}, 1024),
-			max:   4096,
-		}
-	}
-	c := e.syntaxValidationCache
+	c := e.ensureSyntaxValidationCache()
 	c.mu.Lock()
 	if len(c.cache) >= c.max {
 		for k := range c.cache {
