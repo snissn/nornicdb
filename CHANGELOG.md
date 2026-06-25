@@ -5,6 +5,71 @@ All notable changes to NornicDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.1.8]
+
+### Changed
+
+- **Cypher hot paths were tightened across execution, planning, and clause handling**:
+  - structural expression evaluation now uses dedicated fast paths for common operators and property/literal forms;
+  - hot candidate paths compile `WHERE` predicates earlier;
+  - `CALL`-tail retrieval and composite subquery binding preservation were both corrected and optimized;
+  - keyword scanning now caches results and narrows stale-index fallback behavior.
+- **Vector-search execution was made more selective and more passive during ingest**:
+  - query-time vector index warmups are avoided on read paths;
+  - vector fast paths now use owned search-readiness gates instead of forcing full warmup semantics;
+  - Graphiti ingest keeps vector reads and writes passive where appropriate;
+  - exact file-store candidates are now included for property-vector node queries so dedup and ingest paths do not depend solely on HNSW recall.
+- **Storage fast paths were extended for vector-heavy workloads**:
+  - node properties are projected for vector fast paths;
+  - current-head node body decodes are cached for MVCC reads;
+  - tokenized property decode overhead was reduced;
+  - async flush now blocks prefix counts while data is in flight to preserve correctness.
+- **Search write-path behavior was refined for live updates and shutdown safety**:
+  - unchanged vector reindexing is skipped during HNSW live writes;
+  - write-side indexing now respects lazy warming;
+  - background vector work stops cleanly after shutdown;
+  - CPU brute-force vector search remains opt-in rather than being enabled implicitly.
+- **Bolt compatibility was extended for modern temporal values**:
+  - `localDateTime` PackStream encoding was added so typed temporal round-trips behave correctly with newer driver payloads.
+- **Documentation and release-facing notes were refreshed**:
+  - README and vector-search docs were updated alongside the execution changes;
+  - configuration and environment-variable docs were aligned with the latest search and vector behavior.
+
+### Fixed
+
+- **Cypher vector and mutation correctness issues were resolved**:
+  - relationship-bound `WITH ... CALL` vector-property paths now execute side effects and bind relationship variables correctly;
+  - node mutation indexing now updates properly;
+  - relationship batch match paths preserve indexed matches instead of dropping them;
+  - stale indexed MATCH buckets are verified before hot-path reuse;
+  - temporal values expanded from nested parameter maps now round-trip as typed Cypher literals instead of stringified timestamps.
+- **Graphiti compatibility and subquery binding behavior were hardened**:
+  - correlated bindings now survive composite subqueries;
+  - vector reads stay passive during Graphiti ingest rather than forcing storage-scan fallbacks.
+- **Search lifecycle and readiness edge cases were corrected**:
+  - write-side lazy warming is honored;
+  - live vector-query capability is separated from full ONLINE readiness;
+  - unchanged HNSW reindex work is skipped on live writes;
+  - file-backed property-vector queries now use the Cypher vector path consistently.
+- **Storage and async-engine regressions were addressed**:
+  - prefix-count operations no longer race against async flush state;
+  - MVCC and node-body decode paths are stable under hot read/write workloads.
+
+### Tests
+
+- Expanded regression coverage across Cypher, search, storage, Bolt, and Graphiti-specific scenarios, including:
+  - vector query shape coverage;
+  - subquery and clause-boundary regressions;
+  - property-vector file-store lookup behavior;
+  - MVCC and async flush correctness;
+  - temporal encoding round-trip verification.
+
+### Technical Details
+
+- **Range covered**: `v1.1.7..HEAD`
+- **Commits in range**: 30 (non-merge)
+- **Repository delta**: 111 files changed, +7,692 / -904 lines
+
 ## [v1.1.7]
 
 ### Changed
