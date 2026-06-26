@@ -181,6 +181,45 @@ func TestMatchVectorCosineFastPath_RequiresMatchingIndex(t *testing.T) {
 	require.Greater(t, counting.labelCalls, 0, "fallback path should use normal MATCH scanning")
 }
 
+func TestMatchWithVectorCosineProjection_NoIndex_UsesExactFastPath(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	const dim = 1024
+	for i := 0; i < 56; i++ {
+		vec := make([]float64, dim)
+		vec[i%dim] = 1.0
+		if i == 1 {
+			vec[0] = 0.8
+			vec[1] = 0.6
+		}
+		_, err := exec.Execute(ctx, fmt.Sprintf("CREATE (:Chunk {uuid:'chunk-%02d', group_id:'gid-1', emb:%s, text:'chunk text %02d'})", i, formatInlineFloat64Vector(vec), i), nil)
+		require.NoError(t, err)
+	}
+
+	counting.allNodesCalls = 0
+	counting.labelCalls = 0
+	counting.streamNodesCalls = 0
+
+	res, err := exec.Execute(ctx, `
+MATCH (c:Chunk) WHERE c.group_id = $gid
+WITH c, vector.similarity.cosine(c.emb, $q) AS sim
+RETURN c.text, c.uuid, sim ORDER BY sim DESC LIMIT $limit
+`, map[string]interface{}{
+		"gid":   "gid-1",
+		"q":     unitVectorF64(0, dim),
+		"limit": 5,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 5)
+	require.Equal(t, "chunk-00", res.Rows[0][1])
+	require.Equal(t, "chunk-01", res.Rows[1][1])
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath, "strict chunk cosine projection should use the dedicated exact fast path even without a vector index")
+}
+
 func TestMatchVectorCosineFastPath_WriteThenSearchLoop_NoScanRegression(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")

@@ -280,11 +280,6 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 		return &ExecuteResult{Columns: columns, Rows: [][]interface{}{}, Stats: &QueryStats{}}, true
 	}
 
-	indexName, hasIndex := findCosineVectorIndexName(e.storage.GetSchema(), label, vectorProp, storage.ConstraintEntityNode)
-	if !hasIndex {
-		return nil, false
-	}
-
 	candidateLimit := chooseVectorCandidateLimit(limit, preWhereClause != "" || len(matchProps) > 0 || scoreOp != "")
 	scoreExprIsAlias := make([]bool, len(returnItems))
 	hasMatchProps := len(matchProps) > 0
@@ -295,7 +290,13 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 	if !projectionOK {
 		projectedProps = nil
 	}
-	nodeScores, ok := e.fetchCosineNodeScores(ctx, indexName, candidateLimit, queryExpr, orderDesc, projectedProps)
+	indexName, hasIndex := findCosineVectorIndexName(e.storage.GetSchema(), label, vectorProp, storage.ConstraintEntityNode)
+	var nodeScores []vectorNodeScore
+	if hasIndex {
+		nodeScores, ok = e.fetchCosineNodeScores(ctx, indexName, candidateLimit, queryExpr, orderDesc, projectedProps)
+	} else {
+		nodeScores, ok = e.fetchCosineNodeScoresNoIndexExact(ctx, label, vectorProp, candidateLimit, queryExpr, orderDesc)
+	}
 	if !ok {
 		return nil, false
 	}
@@ -343,6 +344,14 @@ func (e *StorageExecutor) tryFastPathMatchWithVectorCosineProjection(ctx context
 
 	e.markCosineVectorIndexFastPathUsed()
 	return &ExecuteResult{Columns: columns, Rows: rows, Stats: &QueryStats{}}, true
+}
+
+func (e *StorageExecutor) fetchCosineNodeScoresNoIndexExact(ctx context.Context, label string, property string, limit int, queryExpr string, orderDesc bool) ([]vectorNodeScore, bool) {
+	queryVector, ok := e.resolveCosineQueryVector(ctx, queryExpr)
+	if !ok || len(queryVector) == 0 {
+		return nil, false
+	}
+	return e.fetchCosineNodeScoresExact(ctx, label, property, "cosine", limit, queryVector, orderDesc, len(queryVector))
 }
 
 // tryFastPathMatchRelationshipVectorCosine handles relationship direct-return shape:

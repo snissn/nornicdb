@@ -488,6 +488,46 @@ func TestGraphitiScenarioE2E_ExternalVectorIngestDoesNotUseExactScanFallbackBefo
 	}
 }
 
+func TestGraphitiScenarioE2E_ChunkSimilarityWithoutVectorIndex_UsesExactFastPathDuringFreshIngest(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	counting := &countingStreamingEngine{Engine: ns}
+	exec := NewStorageExecutor(counting)
+	ctx := context.Background()
+
+	const dim = 1024
+	payload := buildGraphitiScenarioPayload(110, 127, 56, dim)
+
+	res, err := exec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": payload.nodes})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(payload.nodes))
+
+	res, err = exec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(payload.edges))
+
+	res, err = exec.Execute(ctx, graphitiBulkChunkSaveQuery, map[string]interface{}{
+		"anchor": "entity-000000",
+		"chunks": payload.chunks,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(payload.chunks))
+
+	counting.allNodesCalls = 0
+	counting.labelCalls = 0
+	counting.streamNodesCalls = 0
+
+	res, err = exec.Execute(ctx, graphitiChunkSimilarityQuery, map[string]interface{}{
+		"group_id":      graphitiGroupID,
+		"search_vector": unitVectorF64(0, dim),
+		"limit":         10,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+	require.True(t, exec.LastHotPathTrace().CosineVectorIndexFastPath, "chunk recall should use the dedicated exact cosine fast path even when Chunk.emb has no vector index")
+	assertNonIncreasingScores(t, res.Rows, 1)
+}
+
 func TestGraphitiScenarioE2E_RelationshipFulltextMultiTokenFacts(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")
