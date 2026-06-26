@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -561,6 +562,192 @@ LIMIT 5
 `, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, short.Rows)
+}
+
+func TestGraphitiScenarioE2E_RelationshipFulltextTemporalTail_FreshIngestAndAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	const (
+		entityCount = 110
+		edgeCount   = 127
+		chunkCount  = 56
+		dim         = 1024
+		limit       = 10
+	)
+
+	callOnlyQuery := `CALL db.index.fulltext.queryRelationships("edge_name_and_fact", $q, {limit: $limit})
+YIELD relationship AS rel, score
+RETURN rel.uuid AS uuid, score
+ORDER BY score DESC
+LIMIT $limit`
+
+	tailNoTemporalQuery := `CALL db.index.fulltext.queryRelationships("edge_name_and_fact", $q, {limit: $limit})
+YIELD relationship AS rel, score
+MATCH (n:Entity)-[e:RELATES_TO {uuid: rel.uuid}]->(m:Entity)
+WHERE e.group_id IN $g
+WITH e, score, n, m
+RETURN e.uuid AS uuid, properties(e) AS attributes, score
+ORDER BY score DESC
+LIMIT $limit`
+
+	tailTemporalQuery := `CALL db.index.fulltext.queryRelationships("edge_name_and_fact", $q, {limit: $limit}) YIELD relationship AS rel, score
+MATCH (n:Entity)-[e:RELATES_TO {uuid: rel.uuid}]->(m:Entity)
+WHERE ((e.invalid_at IS NULL) OR (e.invalid_at > $dt)) AND e.group_id IN $g
+WITH e, score, n, m
+RETURN e.uuid AS uuid, properties(e) AS attributes, score
+ORDER BY score DESC
+LIMIT $limit`
+
+	type phaseStats struct {
+		callOnlyRows    [][]interface{}
+		tailNoTempRows  [][]interface{}
+		tailTempRows    [][]interface{}
+		trace           HotPathTrace
+		allNodesCalls   int
+		allEdgesCalls   int
+		labelCalls      int
+		streamNodeCalls int
+		callOnlyDur     time.Duration
+		noTempDur       time.Duration
+		tempDur         time.Duration
+	}
+
+	extractUUIDs := func(rows [][]interface{}) []string {
+		uuids := make([]string, 0, len(rows))
+		for _, row := range rows {
+			if len(row) == 0 {
+				continue
+			}
+			uuid, ok := row[0].(string)
+			require.True(t, ok)
+			uuids = append(uuids, uuid)
+		}
+		return uuids
+	}
+
+	runPhase := func(base storage.Engine) phaseStats {
+		ns := storage.NewNamespacedEngine(base, "test")
+		counting := &countingStreamingEngine{Engine: ns}
+		exec := NewStorageExecutor(counting)
+		exec.cache = nil
+
+		params := map[string]interface{}{
+			"q":     "relates",
+			"g":     []string{graphitiGroupID},
+			"dt":    "2024-01-01T00:00:00Z",
+			"limit": int64(limit),
+		}
+
+		start := time.Now()
+		callOnlyRes, err := exec.Execute(ctx, callOnlyQuery, params)
+		require.NoError(t, err)
+		callOnlyDur := time.Since(start)
+		require.Len(t, callOnlyRes.Rows, limit)
+
+		start = time.Now()
+		noTempRes, err := exec.Execute(ctx, tailNoTemporalQuery, params)
+		require.NoError(t, err)
+		noTempDur := time.Since(start)
+		require.Len(t, noTempRes.Rows, limit)
+		require.True(t, exec.LastHotPathTrace().CallTailProjectionFastPath)
+
+		start = time.Now()
+		tempRes, err := exec.Execute(ctx, tailTemporalQuery, params)
+		require.NoError(t, err)
+		tempDur := time.Since(start)
+		require.NotEmpty(t, tempRes.Rows)
+		require.LessOrEqual(t, len(tempRes.Rows), limit)
+
+		return phaseStats{
+			callOnlyRows:    callOnlyRes.Rows,
+			tailNoTempRows:  noTempRes.Rows,
+			tailTempRows:    tempRes.Rows,
+			trace:           exec.LastHotPathTrace(),
+			allNodesCalls:   counting.allNodesCalls,
+			allEdgesCalls:   counting.allEdgesCalls,
+			labelCalls:      counting.labelCalls,
+			streamNodeCalls: counting.streamNodesCalls,
+			callOnlyDur:     callOnlyDur,
+			noTempDur:       noTempDur,
+			tempDur:         tempDur,
+		}
+	}
+
+	base1, err := storage.NewBadgerEngine(dir)
+	require.NoError(t, err)
+	store1 := storage.NewNamespacedEngine(base1, "test")
+	seedExec := NewStorageExecutor(store1)
+	seedExec.cache = nil
+
+	_, err = seedExec.Execute(ctx, "CREATE FULLTEXT INDEX edge_name_and_fact IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON EACH [e.name, e.fact, e.group_id]", nil)
+	require.NoError(t, err)
+
+	payload := buildGraphitiScenarioPayload(entityCount, edgeCount, chunkCount, dim)
+	for i := range payload.edges {
+		payload.edges[i]["created_at"] = "2024-01-01T00:00:00Z"
+		payload.edges[i]["valid_at"] = "2024-01-01T00:00:00Z"
+		payload.edges[i]["expired_at"] = nil
+		payload.edges[i]["episodes"] = []string{fmt.Sprintf("episode-%02d", i%10)}
+		payload.edges[i]["fact"] = fmt.Sprintf("entity-%06d relates entity-%06d across graphiti episode %02d", i%entityCount, (i+(i%7)+1)%entityCount, i%10)
+		switch i % 3 {
+		case 0:
+			payload.edges[i]["invalid_at"] = nil
+		case 1:
+			payload.edges[i]["invalid_at"] = "2026-01-01T00:00:00Z"
+		default:
+			payload.edges[i]["invalid_at"] = "2023-01-01T00:00:00Z"
+		}
+	}
+
+	res, err := seedExec.Execute(ctx, graphitiBulkNodeSaveQuery, map[string]interface{}{"nodes": payload.nodes})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(payload.nodes))
+	res, err = seedExec.Execute(ctx, graphitiBulkEdgeSaveQuery, map[string]interface{}{"entity_edges": payload.edges})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(payload.edges))
+	res, err = seedExec.Execute(ctx, graphitiBulkChunkSaveQuery, map[string]interface{}{"anchor": "entity-000000", "chunks": payload.chunks})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, len(payload.chunks))
+
+	freshFirst := runPhase(base1)
+	freshRepeat := runPhase(base1)
+	require.True(t, freshFirst.trace.CallTailProjectionFastPath)
+	require.True(t, freshRepeat.trace.CallTailProjectionFastPath)
+	require.Equal(t, extractUUIDs(freshFirst.callOnlyRows), extractUUIDs(freshRepeat.callOnlyRows))
+	require.Equal(t, extractUUIDs(freshFirst.tailNoTempRows), extractUUIDs(freshRepeat.tailNoTempRows))
+	require.Equal(t, extractUUIDs(freshFirst.tailTempRows), extractUUIDs(freshRepeat.tailTempRows))
+
+	require.NoError(t, base1.Close())
+
+	base2, err := storage.NewBadgerEngine(dir)
+	require.NoError(t, err)
+	defer base2.Close()
+
+	restartFirst := runPhase(base2)
+	restartRepeat := runPhase(base2)
+	require.True(t, restartFirst.trace.CallTailProjectionFastPath)
+	require.True(t, restartRepeat.trace.CallTailProjectionFastPath)
+
+	require.Equal(t, extractUUIDs(freshFirst.callOnlyRows), extractUUIDs(restartFirst.callOnlyRows))
+	require.Equal(t, extractUUIDs(freshFirst.tailNoTempRows), extractUUIDs(restartFirst.tailNoTempRows))
+	require.Equal(t, extractUUIDs(freshFirst.tailTempRows), extractUUIDs(restartFirst.tailTempRows))
+	require.Equal(t, extractUUIDs(restartFirst.callOnlyRows), extractUUIDs(restartRepeat.callOnlyRows))
+	require.Equal(t, extractUUIDs(restartFirst.tailNoTempRows), extractUUIDs(restartRepeat.tailNoTempRows))
+	require.Equal(t, extractUUIDs(restartFirst.tailTempRows), extractUUIDs(restartRepeat.tailTempRows))
+
+	t.Logf("fresh ingest first: call-only=%s tail-no-invalid=%s tail-invalid=%s scans(nodes=%d edges=%d labels=%d streamNodes=%d)",
+		freshFirst.callOnlyDur, freshFirst.noTempDur, freshFirst.tempDur,
+		freshFirst.allNodesCalls, freshFirst.allEdgesCalls, freshFirst.labelCalls, freshFirst.streamNodeCalls)
+	t.Logf("fresh ingest repeat: call-only=%s tail-no-invalid=%s tail-invalid=%s scans(nodes=%d edges=%d labels=%d streamNodes=%d)",
+		freshRepeat.callOnlyDur, freshRepeat.noTempDur, freshRepeat.tempDur,
+		freshRepeat.allNodesCalls, freshRepeat.allEdgesCalls, freshRepeat.labelCalls, freshRepeat.streamNodeCalls)
+	t.Logf("restart first: call-only=%s tail-no-invalid=%s tail-invalid=%s scans(nodes=%d edges=%d labels=%d streamNodes=%d)",
+		restartFirst.callOnlyDur, restartFirst.noTempDur, restartFirst.tempDur,
+		restartFirst.allNodesCalls, restartFirst.allEdgesCalls, restartFirst.labelCalls, restartFirst.streamNodeCalls)
+	t.Logf("restart repeat: call-only=%s tail-no-invalid=%s tail-invalid=%s scans(nodes=%d edges=%d labels=%d streamNodes=%d)",
+		restartRepeat.callOnlyDur, restartRepeat.noTempDur, restartRepeat.tempDur,
+		restartRepeat.allNodesCalls, restartRepeat.allEdgesCalls, restartRepeat.labelCalls, restartRepeat.streamNodeCalls)
 }
 
 func BenchmarkGraphitiRelationshipFulltextMultiTokenFacts(b *testing.B) {

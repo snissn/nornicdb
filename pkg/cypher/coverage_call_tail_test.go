@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
@@ -499,6 +500,44 @@ func TestTryCompileCallTailValueWhere_AndOrNot(t *testing.T) {
 	t.Run("unparseable clause returns ok=false", func(t *testing.T) {
 		_, ok := e.tryCompileCallTailValueWhere(ctx, "definitely not a where clause")
 		require.False(t, ok)
+	})
+
+	t.Run("graphiti grouped temporal predicate", func(t *testing.T) {
+		pred, ok := e.tryCompileCallTailValueWhere(ctx, "((e.invalid_at IS NULL) OR (e.invalid_at > $dt)) AND e.group_id IN $g")
+		require.True(t, ok)
+
+		params := map[string]interface{}{
+			"dt": time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC),
+			"g":  []string{"group-a", "group-b"},
+		}
+
+		require.True(t, pred(map[string]interface{}{
+			"e": map[string]interface{}{
+				"invalid_at": nil,
+				"group_id":   "group-a",
+			},
+		}, params))
+
+		require.True(t, pred(map[string]interface{}{
+			"e": map[string]interface{}{
+				"invalid_at": time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC),
+				"group_id":   "group-b",
+			},
+		}, params))
+
+		require.False(t, pred(map[string]interface{}{
+			"e": map[string]interface{}{
+				"invalid_at": time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC),
+				"group_id":   "group-a",
+			},
+		}, params))
+
+		require.False(t, pred(map[string]interface{}{
+			"e": map[string]interface{}{
+				"invalid_at": nil,
+				"group_id":   "other-group",
+			},
+		}, params))
 	})
 }
 

@@ -1331,6 +1331,44 @@ func TestGraphitiExactShape_Search_EdgeFulltext_NoFilter(t *testing.T) {
 	_ = res
 }
 
+func TestGraphitiExactShape_Search_EdgeFulltext_TemporalFilterUsesCallTailFastPath(t *testing.T) {
+	f := newGraphitiExactShapeFixture(t)
+	_, err := f.exec.Execute(f.ctx,
+		"CREATE FULLTEXT INDEX edge_name_and_fact IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON EACH [e.name, e.fact, e.group_id]",
+		nil)
+	require.NoError(t, err)
+
+	res := f.run(t, `CALL db.index.fulltext.queryRelationships("edge_name_and_fact", $query, {limit: $limit})
+            YIELD relationship AS rel, score
+            MATCH (n:Entity)-[e:RELATES_TO {uuid: rel.uuid}]->(m:Entity)
+            WHERE ((e.invalid_at IS NULL) OR (e.invalid_at > $dt)) AND e.group_id IN $group_ids
+            WITH e, score, n, m
+            RETURN
+            e.uuid AS uuid,
+        n.uuid AS source_node_uuid,
+        m.uuid AS target_node_uuid,
+        e.group_id AS group_id,
+        e.created_at AS created_at,
+        e.name AS name,
+        e.fact AS fact,
+        e.episodes AS episodes,
+        e.expired_at AS expired_at,
+        e.valid_at AS valid_at,
+        e.invalid_at AS invalid_at,
+    properties(e) AS attributes,
+            score
+            ORDER BY score DESC
+            LIMIT $limit
+            `, map[string]interface{}{
+		"query":     "knows",
+		"dt":        "2024-01-01T00:00:00Z",
+		"group_ids": []string{"g1"},
+		"limit":     int64(5),
+	})
+	require.NotEmpty(t, res.Rows)
+	require.True(t, f.exec.LastHotPathTrace().CallTailProjectionFastPath)
+}
+
 func TestGraphitiExactShape_Search_EdgeSimilarity_NoFilter(t *testing.T) {
 	f := newGraphitiExactShapeFixture(t)
 	res := f.run(t, `MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)

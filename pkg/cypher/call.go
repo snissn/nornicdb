@@ -1458,6 +1458,17 @@ func (e *StorageExecutor) tryCompileCallTailValueWhere(ctx context.Context, wher
 	if clause == "" {
 		return func(map[string]interface{}, map[string]interface{}) bool { return true }, true
 	}
+	for strings.HasPrefix(clause, "(") && strings.HasSuffix(clause, ")") {
+		closeIdx := findMatchingParen(clause, 0)
+		if closeIdx != len(clause)-1 {
+			break
+		}
+		inner := strings.TrimSpace(clause[1:closeIdx])
+		if inner == "" || inner == clause {
+			break
+		}
+		clause = inner
+	}
 	if idx := findTopLevelKeyword(clause, " AND "); idx > 0 {
 		left, okLeft := e.tryCompileCallTailValueWhere(ctx, clause[:idx])
 		right, okRight := e.tryCompileCallTailValueWhere(ctx, clause[idx+5:])
