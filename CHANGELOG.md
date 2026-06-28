@@ -212,7 +212,7 @@ Post-`v1.1.4` stabilization focused on Cypher/Bolt correctness, storage resilien
 
 ## [v1.1.3] - 2026-05-29
 
-Maintenance release: **llama.cpp upgraded to b9644** with configurable per-model context features, plus several storage and Bolt correctness fixes discovered through expanded test coverage. No on-disk format changes; existing databases upgrade transparently.
+Maintenance release: **llama.cpp upgraded to b9835** with configurable per-model context features, plus several storage and Bolt correctness fixes discovered through expanded test coverage. No on-disk format changes; existing databases upgrade transparently.
 
 ### Added
 
@@ -223,7 +223,7 @@ Maintenance release: **llama.cpp upgraded to b9644** with configurable per-model
 
 ### Changed
 
-- **llama.cpp upgraded from b9106 → b9644.** Build scripts and Dockerfiles now disable the new `app/` and `tools/` targets (`-DLLAMA_BUILD_TOOLS=OFF`, `--target llama --target ggml`) to avoid link errors against `llama-server-impl`. Context creation explicitly sets `ctx_type = LLAMA_CONTEXT_TYPE_DEFAULT` to prevent struct-layout mismatches from accidentally enabling MTP on non-MTP models.
+- **llama.cpp upgraded from b9106 → b9835.** Build scripts and Dockerfiles now disable the new `app/` and `tools/` targets (`-DLLAMA_BUILD_TOOLS=OFF`, `--target llama --target ggml`) to avoid link errors against `llama-server-impl`. Context creation explicitly sets `ctx_type = LLAMA_CONTEXT_TYPE_DEFAULT` to prevent struct-layout mismatches from accidentally enabling MTP on non-MTP models.
 
 ### Fixed
 
