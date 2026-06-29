@@ -873,6 +873,50 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 	viewport, hasViewport := TemporalViewportFromContext(ctx)
 	checker, canCheckViewport := store.(temporalCurrentNodeChecker)
 
+	// Pattern-inline property fast-path: when the pattern carries inline
+	// equality on one or more indexed properties (labelled or labelless), we
+	// can probe the property index instead of streaming or scanning the full
+	// label population. This is the generic, shape-agnostic counterpart of
+	// the WHERE-clause index fast-paths in executeMatch — it covers patterns
+	// like `MATCH (n:Code {id:$x})`, `MATCH (n {id:$x})` (graphify's labelless
+	// edge MATCH), and N-ary `MATCH (n:Code {id:$x, sku:$y})`. The residual
+	// property filter and viewport / system-node filters below are still
+	// applied so semantics match the scan path exactly.
+	if len(properties) > 0 && strings.TrimSpace(whereClause) == "" {
+		nodeInfo := nodePatternInfo{labels: labels, properties: properties}
+		if indexed, ok := e.lookupPatternCandidatesUsingPropertyIndex(nodeInfo, store); ok {
+			out := indexed
+			// Residual property / viewport / system-node filters.
+			hideSystemNodes := shouldHideSystemNodes(store)
+			filtered := out[:0]
+			for _, n := range out {
+				if hideSystemNodes && isSystemNode(n) {
+					continue
+				}
+				if len(labels) > 0 && !mergeNodeHasLabels(n, labels) {
+					continue
+				}
+				if !e.nodeMatchesProps(n, properties) {
+					continue
+				}
+				if hasViewport && canCheckViewport {
+					visible, err := checker.IsCurrentTemporalNode(n, viewport.AsOf)
+					if err != nil {
+						return nil, err
+					}
+					if !visible {
+						continue
+					}
+				}
+				filtered = append(filtered, n)
+				if limit > 0 && len(filtered) >= limit {
+					break
+				}
+			}
+			return filtered, nil
+		}
+	}
+
 	// For label-constrained LIMIT queries, prefer direct label lookup over full
 	// graph streaming. This avoids scanning unrelated labels until LIMIT is met
 	// (a major latency issue for sparse labels like SystemPrompt).
@@ -1063,13 +1107,29 @@ func (e *StorageExecutor) executeCartesianProductMatch(
 		var nodes []*storage.Node
 		var err error
 
-		if len(nodeInfo.labels) > 0 {
-			nodes, err = e.loadNodesWithTemporalViewport(ctx, nodeInfo.labels)
-		} else {
-			nodes, err = e.loadNodesWithTemporalViewport(ctx, nil)
+		// Pattern-inline property fast-path: when the pattern carries inline
+		// equality on an indexed property, probe the property index per
+		// cartesian leg instead of loading the full label population. This
+		// is the path that fires for graphify's labelless edge MATCH —
+		// `MATCH (a {id:$src}),(b {id:$tgt})` — and turns each leg into an
+		// O(1) lookup. The residual property filter below is still applied
+		// to enforce any non-indexed inline props identically to the scan.
+		usedPatternIndex := false
+		if len(nodeInfo.properties) > 0 {
+			if indexed, ok := e.lookupPatternCandidatesUsingPropertyIndex(nodeInfo, e.getStorage(ctx)); ok {
+				nodes = indexed
+				usedPatternIndex = true
+			}
 		}
-		if err != nil {
-			return nil, fmt.Errorf("storage error: %w", err)
+		if !usedPatternIndex {
+			if len(nodeInfo.labels) > 0 {
+				nodes, err = e.loadNodesWithTemporalViewport(ctx, nodeInfo.labels)
+			} else {
+				nodes, err = e.loadNodesWithTemporalViewport(ctx, nil)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("storage error: %w", err)
+			}
 		}
 
 		// Filter by properties if specified in pattern

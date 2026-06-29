@@ -1,0 +1,319 @@
+// Pattern-inline property MATCH fast-path tests.
+//
+// `executeMatchForContext` historically only consulted property indexes when
+// the equality was written in a WHERE clause. Pattern-inline equality
+// (`MATCH (n {id: $x})` or `MATCH (n:Label {id: $x})`) fell through to either
+// `AllNodes` (labelless) or `GetNodesByLabel` (with-label) and was then
+// filtered linearly by `nodeMatchesProps`.
+//
+// That is O(label-population) per probe — and for graphify's edge MERGE shape
+// (`MATCH (a {id:$src}),(b {id:$tgt}) MERGE ...`) it's O(node-count) twice
+// per edge, which dominates ingestion time on any realistic graph.
+//
+// These tests pin a generic, shape-agnostic contract for the executor:
+//
+//   1. When a pattern carries an inline property and a property index covers
+//      that property (regardless of whether the pattern names a label), the
+//      executor MUST probe the index and MUST NOT issue an `AllNodes` /
+//      `GetNodesByLabel` full-population scan.
+//   2. The contract holds for N inline properties (each indexed property
+//      narrows further), not just `{id}`.
+//   3. The contract holds across labelled and labelless patterns.
+//   4. Correctness is preserved: pattern-inline filters that the index can
+//      narrow but not exactly express (e.g. a non-indexed second prop) still
+//      end up with the correct row set after fast-path narrowing + residual
+//      property filtering.
+//
+// The first three are pinned via a counting engine wrapper that fails the
+// test if any `AllNodes` / `GetNodesByLabel` call escapes during a probe that
+// SHOULD be satisfied by the index. The fourth is pinned via direct result
+// equality.
+
+package cypher
+
+import (
+	"context"
+	"fmt"
+	"sync/atomic"
+	"testing"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/require"
+)
+
+// scanCountingEngine wraps a *storage.MemoryEngine and increments counters on
+// the full-population scan paths so the test can assert the fast path was
+// taken. It is intentionally a thin wrapper that delegates everything else,
+// because the goal is to observe (not change) executor behaviour.
+type scanCountingEngine struct {
+	*storage.MemoryEngine
+	allNodesCalls       int64
+	getNodesByLabelHits int64
+}
+
+func (e *scanCountingEngine) AllNodes() ([]*storage.Node, error) {
+	atomic.AddInt64(&e.allNodesCalls, 1)
+	return e.MemoryEngine.AllNodes()
+}
+
+func (e *scanCountingEngine) GetNodesByLabel(label string) ([]*storage.Node, error) {
+	atomic.AddInt64(&e.getNodesByLabelHits, 1)
+	return e.MemoryEngine.GetNodesByLabel(label)
+}
+
+func (e *scanCountingEngine) AllNodesCalls() int64 { return atomic.LoadInt64(&e.allNodesCalls) }
+func (e *scanCountingEngine) GetNodesByLabelCalls() int64 {
+	return atomic.LoadInt64(&e.getNodesByLabelHits)
+}
+
+func (e *scanCountingEngine) reset() {
+	atomic.StoreInt64(&e.allNodesCalls, 0)
+	atomic.StoreInt64(&e.getNodesByLabelHits, 0)
+}
+
+// newCountingExecutor builds a StorageExecutor over a wrapped MemoryEngine.
+// The wrapper sits BELOW the NamespacedEngine so that every AllNodes /
+// GetNodesByLabel call the executor (or its tx wrapper) issues on the
+// underlying engine increments the counter.
+func newCountingExecutor(t testing.TB) (*StorageExecutor, *scanCountingEngine) {
+	t.Helper()
+	mem := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = mem.Close() })
+	wrapped := &scanCountingEngine{MemoryEngine: mem}
+	ns := storage.NewNamespacedEngine(wrapped, "scan")
+	exec := NewStorageExecutor(ns)
+	return exec, wrapped
+}
+
+// seedScanTestPopulation creates `count` :Code nodes with `{id, sku, tier}`
+// properties. The id is unique per node, sku is unique per node, tier is a
+// repeated bucket. Indexes are created on id and sku (the two indexed
+// pattern properties). tier is intentionally NOT indexed so it can serve as
+// the "residual filter must still narrow correctly" case.
+func seedScanTestPopulation(t testing.TB, exec *StorageExecutor, count int) {
+	t.Helper()
+	ctx := context.Background()
+
+	for _, ddl := range []string{
+		"CREATE INDEX code_id IF NOT EXISTS FOR (n:Code) ON (n.id)",
+		"CREATE INDEX code_sku IF NOT EXISTS FOR (n:Code) ON (n.sku)",
+	} {
+		_, err := exec.Execute(ctx, ddl, nil)
+		require.NoErrorf(t, err, "ddl %q", ddl)
+	}
+
+	for i := 0; i < count; i++ {
+		params := map[string]interface{}{
+			"id":   fmt.Sprintf("id_%05d", i),
+			"sku":  fmt.Sprintf("sku_%05d", i),
+			"tier": fmt.Sprintf("tier_%d", i%4),
+		}
+		_, err := exec.Execute(ctx,
+			"CREATE (n:Code {id:$id, sku:$sku, tier:$tier})", params)
+		require.NoErrorf(t, err, "seed %d", i)
+	}
+}
+
+// --- correctness ------------------------------------------------------------
+
+// TestMatchPatternProperty_LabelledSinglePropReturnsCorrectRow ensures the
+// post-fast-path result set is correct for a single-prop labelled probe.
+// This is a safety net — once the fast path lands, results must not regress.
+func TestMatchPatternProperty_LabelledSinglePropReturnsCorrectRow(t *testing.T) {
+	exec, _ := newCountingExecutor(t)
+	seedScanTestPopulation(t, exec, 200)
+
+	ctx := context.Background()
+	res, err := exec.Execute(ctx,
+		"MATCH (n:Code {id:$id}) RETURN n.sku",
+		map[string]interface{}{"id": "id_00042"})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "sku_00042", res.Rows[0][0])
+}
+
+// TestMatchPatternProperty_LabellessSinglePropReturnsCorrectRow does the same
+// for a labelless `MATCH (n {id:$id})` — the shape graphify emits.
+func TestMatchPatternProperty_LabellessSinglePropReturnsCorrectRow(t *testing.T) {
+	exec, _ := newCountingExecutor(t)
+	seedScanTestPopulation(t, exec, 200)
+
+	ctx := context.Background()
+	res, err := exec.Execute(ctx,
+		"MATCH (n {id:$id}) RETURN n.sku",
+		map[string]interface{}{"id": "id_00099"})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "sku_00099", res.Rows[0][0])
+}
+
+// TestMatchPatternProperty_NaryIndexedReturnsCorrectRow probes with TWO
+// inline indexed properties; the result set must equal the intersection of
+// each individual probe.
+func TestMatchPatternProperty_NaryIndexedReturnsCorrectRow(t *testing.T) {
+	exec, _ := newCountingExecutor(t)
+	seedScanTestPopulation(t, exec, 200)
+
+	ctx := context.Background()
+	// Same row matches both id and sku — should return exactly one.
+	res, err := exec.Execute(ctx,
+		"MATCH (n:Code {id:$id, sku:$sku}) RETURN n.tier",
+		map[string]interface{}{"id": "id_00011", "sku": "sku_00011"})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+
+	// Mismatched id+sku — should return zero, NOT a partial index hit.
+	res2, err := exec.Execute(ctx,
+		"MATCH (n:Code {id:$id, sku:$sku}) RETURN n.tier",
+		map[string]interface{}{"id": "id_00011", "sku": "sku_99999"})
+	require.NoError(t, err)
+	require.Empty(t, res2.Rows)
+}
+
+// TestMatchPatternProperty_IndexedPlusResidualFilter probes with one indexed
+// property and one non-indexed property; the executor must use the index to
+// narrow then apply the residual filter on its own.
+func TestMatchPatternProperty_IndexedPlusResidualFilter(t *testing.T) {
+	exec, _ := newCountingExecutor(t)
+	seedScanTestPopulation(t, exec, 200)
+
+	ctx := context.Background()
+	// id_00007 → tier "tier_3" (7 % 4 = 3)
+	res, err := exec.Execute(ctx,
+		"MATCH (n:Code {id:$id, tier:$tier}) RETURN n.sku",
+		map[string]interface{}{"id": "id_00007", "tier": "tier_3"})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "sku_00007", res.Rows[0][0])
+
+	// Same id, wrong tier — residual filter must drop the row.
+	res2, err := exec.Execute(ctx,
+		"MATCH (n:Code {id:$id, tier:$tier}) RETURN n.sku",
+		map[string]interface{}{"id": "id_00007", "tier": "tier_0"})
+	require.NoError(t, err)
+	require.Empty(t, res2.Rows)
+}
+
+// --- scan-budget pins (these FAIL today, pass after fast-path lands) -------
+
+// TestMatchPatternProperty_LabelledSinglePropNoScan asserts that a labelled
+// MATCH with an indexed pattern-inline property does not trigger an
+// `AllNodes` or `GetNodesByLabel` full-population scan.
+//
+// This is the generic, shape-agnostic contract — `MATCH (n:Label {p:$v})`
+// must go through the property index when one exists for (Label, p).
+func TestMatchPatternProperty_LabelledSinglePropNoScan(t *testing.T) {
+	exec, wrapped := newCountingExecutor(t)
+	seedScanTestPopulation(t, exec, 500)
+	wrapped.reset()
+
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		_, err := exec.Execute(ctx,
+			"MATCH (n:Code {id:$id}) RETURN n.sku",
+			map[string]interface{}{"id": fmt.Sprintf("id_%05d", i)})
+		require.NoError(t, err)
+	}
+
+	require.Zerof(t, wrapped.AllNodesCalls(),
+		"MATCH (n:Code {id:$id}) leaked %d AllNodes() calls — index probe missing",
+		wrapped.AllNodesCalls())
+	require.Zerof(t, wrapped.GetNodesByLabelCalls(),
+		"MATCH (n:Code {id:$id}) leaked %d GetNodesByLabel() calls — index probe missing",
+		wrapped.GetNodesByLabelCalls())
+}
+
+// TestMatchPatternProperty_LabellessSinglePropNoScan asserts the same for the
+// labelless shape graphify uses. The executor cannot dispatch to
+// `GetNodesByLabel` (no label), so the only acceptable plan is the property
+// index probe.
+func TestMatchPatternProperty_LabellessSinglePropNoScan(t *testing.T) {
+	exec, wrapped := newCountingExecutor(t)
+	seedScanTestPopulation(t, exec, 500)
+	wrapped.reset()
+
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		_, err := exec.Execute(ctx,
+			"MATCH (n {id:$id}) RETURN n.sku",
+			map[string]interface{}{"id": fmt.Sprintf("id_%05d", i)})
+		require.NoError(t, err)
+	}
+
+	require.Zerof(t, wrapped.AllNodesCalls(),
+		"MATCH (n {id:$id}) leaked %d AllNodes() calls — labelless index probe missing",
+		wrapped.AllNodesCalls())
+}
+
+// TestMatchPatternProperty_NaryIndexedNoScan asserts that N inline indexed
+// properties are still served by the index (not just the first).
+func TestMatchPatternProperty_NaryIndexedNoScan(t *testing.T) {
+	exec, wrapped := newCountingExecutor(t)
+	seedScanTestPopulation(t, exec, 500)
+	wrapped.reset()
+
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		_, err := exec.Execute(ctx,
+			"MATCH (n:Code {id:$id, sku:$sku}) RETURN n.tier",
+			map[string]interface{}{
+				"id":  fmt.Sprintf("id_%05d", i),
+				"sku": fmt.Sprintf("sku_%05d", i),
+			})
+		require.NoError(t, err)
+	}
+
+	require.Zerof(t, wrapped.AllNodesCalls(),
+		"MATCH (n:Code {id, sku}) leaked %d AllNodes() calls", wrapped.AllNodesCalls())
+	require.Zerof(t, wrapped.GetNodesByLabelCalls(),
+		"MATCH (n:Code {id, sku}) leaked %d GetNodesByLabel() calls — N-ary probe missing",
+		wrapped.GetNodesByLabelCalls())
+}
+
+// TestMatchPatternProperty_IndexedPlusResidualNoScan ensures the fast path
+// fires even when ONE of the inline props is non-indexed: the executor must
+// probe the indexed prop and then apply the residual filter in-process.
+func TestMatchPatternProperty_IndexedPlusResidualNoScan(t *testing.T) {
+	exec, wrapped := newCountingExecutor(t)
+	seedScanTestPopulation(t, exec, 500)
+	wrapped.reset()
+
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		_, err := exec.Execute(ctx,
+			"MATCH (n:Code {id:$id, tier:$tier}) RETURN n.sku",
+			map[string]interface{}{
+				"id":   fmt.Sprintf("id_%05d", i),
+				"tier": fmt.Sprintf("tier_%d", i%4),
+			})
+		require.NoError(t, err)
+	}
+
+	require.Zerof(t, wrapped.AllNodesCalls(),
+		"MATCH (n:Code {id, tier}) leaked %d AllNodes() calls", wrapped.AllNodesCalls())
+	require.Zerof(t, wrapped.GetNodesByLabelCalls(),
+		"MATCH (n:Code {id, tier}) leaked %d GetNodesByLabel() calls", wrapped.GetNodesByLabelCalls())
+}
+
+// TestMatchPatternProperty_EdgeShapeNoDoubleScan locks in the graphify edge
+// shape: `MATCH (a {id:$src}),(b {id:$tgt}) ...` must not full-scan twice
+// per edge. This is the workload that motivated the whole fix.
+func TestMatchPatternProperty_EdgeShapeNoDoubleScan(t *testing.T) {
+	exec, wrapped := newCountingExecutor(t)
+	seedScanTestPopulation(t, exec, 500)
+	wrapped.reset()
+
+	ctx := context.Background()
+	for i := 0; i+1 < 20; i++ {
+		_, err := exec.Execute(ctx,
+			"MATCH (a {id:$src}),(b {id:$tgt}) RETURN a.sku, b.sku",
+			map[string]interface{}{
+				"src": fmt.Sprintf("id_%05d", i),
+				"tgt": fmt.Sprintf("id_%05d", i+1),
+			})
+		require.NoError(t, err)
+	}
+
+	require.Zerof(t, wrapped.AllNodesCalls(),
+		"graphify edge MATCH leaked %d AllNodes() calls", wrapped.AllNodesCalls())
+}

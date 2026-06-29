@@ -1962,6 +1962,61 @@ func (sm *SchemaManager) HasAnyPropertyIndexForLabel(label string) bool {
 	return false
 }
 
+// PropertyIndexLookupAnyLabel looks up node IDs by property value across ALL
+// indexes whose property name matches, regardless of the label they were
+// declared against. Returns nil when no index covers `property`, and the
+// union of hits across every matching index otherwise.
+//
+// This is the labelless-pattern counterpart to `PropertyIndexLookup`: a query
+// like `MATCH (n {id:$x})` carries an inline equality on `id` but no label,
+// so any index declared as `(Label1:id) … (LabelN:id)` is a legal candidate
+// source. Without this method the executor has to choose between (a) probing
+// every label-prop index name it can guess at, or (b) falling back to a full
+// node scan; (b) is what graphify's edge MERGE hits today. The union here
+// loses no information: it never returns false positives (a node either has
+// the value indexed or it doesn't) and the executor still applies the rest
+// of the pattern's filter on the returned candidates.
+func (sm *SchemaManager) PropertyIndexLookupAnyLabel(property string, value interface{}) []NodeID {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	suffix := ":" + property
+	var ids []NodeID
+	for key, idx := range sm.propertyIndexes {
+		if !endsWith(key, suffix) {
+			continue
+		}
+		// Defensive: ensure the suffix is the whole property segment (i.e. the
+		// character before `:` is the end of the label, not a `:property`
+		// suffix of a longer property name).
+		if len(key) == len(suffix) {
+			continue // would mean an empty label, which is impossible — skip
+		}
+
+		idx.mu.RLock()
+		valueKey, ok := propertyIndexValueKey(value)
+		if ok {
+			if hits, exists := idx.values[valueKey]; exists {
+				if ids == nil {
+					ids = make([]NodeID, 0, len(hits))
+				}
+				ids = append(ids, hits...)
+			}
+		}
+		idx.mu.RUnlock()
+	}
+	return ids
+}
+
+// endsWith is a tiny ASCII suffix helper. We keep it local to the schema
+// package so this hot-path does not pull in `strings` solely for HasSuffix.
+func endsWith(s, suffix string) bool {
+	if len(suffix) > len(s) {
+		return false
+	}
+	return s[len(s)-len(suffix):] == suffix
+}
+
 // PropertyIndexLookup looks up node IDs by property value using an index.
 // Returns nil if no index exists for the label/property.
 func (sm *SchemaManager) PropertyIndexLookup(label, property string, value interface{}) []NodeID {

@@ -1037,6 +1037,19 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 				candidates = indexed
 			}
 		}
+		// Pattern-inline property fast-path: when the pattern carries inline
+		// equality on one or more indexed properties (e.g. `(n:Code {id:$x})`
+		// or the labelless `(n {id:$x})`), probe the property index instead
+		// of scanning the full label population. This is the generic,
+		// shape-agnostic counterpart to the WHERE fast-path above and
+		// applies to N inline properties: each indexed prop intersects the
+		// candidate set further, residual non-indexed props are still
+		// enforced by `nodeMatchesProps` below.
+		if candidates == nil {
+			if indexed, ok := e.lookupPatternCandidatesUsingPropertyIndex(nodeInfo, store); ok {
+				candidates = indexed
+			}
+		}
 		if candidates == nil {
 			if len(nodeInfo.labels) > 0 {
 				var err error
@@ -1117,6 +1130,104 @@ func (e *StorageExecutor) evaluateWhereForNodeMap(ctx context.Context, nodeMap m
 		}
 	}
 	return true
+}
+
+// lookupPatternCandidatesUsingPropertyIndex returns a narrowed node candidate
+// set when the pattern carries inline equality on one or more indexed
+// properties. It is the pattern-inline counterpart of
+// `lookupWhereCandidatesUsingPropertyIndex`: same correctness contract, same
+// safety story, but the source of the equality is the parsed `nodeInfo`
+// rather than a WHERE-clause string.
+//
+// Returned `(nodes, true)` means: "use these as the candidate set; you still
+// need to apply the full `nodeMatchesProps` filter to enforce residual
+// non-indexed predicates". Returned `(nil, false)` means: "no usable index;
+// fall back to the existing label-scan / AllNodes path".
+//
+// The function is shape-agnostic: it works for labelled and labelless
+// patterns, single-property and N-property patterns, and any property type
+// the index can key (string / int / float / bool — same set
+// `propertyIndexValueKey` accepts on insert). It deliberately does NOT
+// attempt to short-circuit when the residual filter is empty; the caller's
+// uniform `nodeMatchesProps` step keeps the post-condition trivially
+// correct even when the index narrows partially.
+func (e *StorageExecutor) lookupPatternCandidatesUsingPropertyIndex(nodeInfo nodePatternInfo, store storage.Engine) ([]*storage.Node, bool) {
+	if len(nodeInfo.properties) == 0 {
+		return nil, false
+	}
+	schema := store.GetSchema()
+	if schema == nil {
+		return nil, false
+	}
+
+	// Collect per-property candidate ID sets, one per inline equality that an
+	// index can serve. Each set narrows the result via intersection.
+	var idSets []map[storage.NodeID]struct{}
+	usedAnyIndex := false
+
+	for prop, val := range nodeInfo.properties {
+		var ids []storage.NodeID
+		if len(nodeInfo.labels) > 0 {
+			// Labelled: probe the (label, prop) index when one exists.
+			if _, ok := schema.GetPropertyIndex(nodeInfo.labels[0], prop); ok {
+				ids = schema.PropertyIndexLookup(nodeInfo.labels[0], prop, val)
+				usedAnyIndex = true
+			}
+		} else {
+			// Labelless: union across every (anyLabel, prop) index. Safe
+			// because the result is filtered by `nodeMatchesProps` later, so
+			// false positives (nodes that match the value but not the rest
+			// of the pattern) cannot reach the output.
+			ids = schema.PropertyIndexLookupAnyLabel(prop, val)
+			if ids != nil {
+				usedAnyIndex = true
+			}
+		}
+		// Property has no covering index — record nothing for this prop.
+		// The residual `nodeMatchesProps` step still enforces it.
+		if ids == nil {
+			continue
+		}
+		set := make(map[storage.NodeID]struct{}, len(ids))
+		for _, id := range ids {
+			set[id] = struct{}{}
+		}
+		idSets = append(idSets, set)
+	}
+
+	if !usedAnyIndex || len(idSets) == 0 {
+		return nil, false
+	}
+
+	// Intersect across all indexed-prop sets.
+	smallest := 0
+	for i, s := range idSets {
+		if len(s) < len(idSets[smallest]) {
+			smallest = i
+		}
+	}
+	out := make([]*storage.Node, 0, len(idSets[smallest]))
+	for id := range idSets[smallest] {
+		hit := true
+		for i, s := range idSets {
+			if i == smallest {
+				continue
+			}
+			if _, ok := s[id]; !ok {
+				hit = false
+				break
+			}
+		}
+		if !hit {
+			continue
+		}
+		n, err := store.GetNode(id)
+		if err != nil || n == nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out, true
 }
 
 func (e *StorageExecutor) lookupWhereCandidatesUsingPropertyIndex(nodeInfo nodePatternInfo, wherePart string, store storage.Engine) ([]*storage.Node, bool) {
