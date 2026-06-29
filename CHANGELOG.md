@@ -5,6 +5,77 @@ All notable changes to NornicDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.1.10] - 2026-06-29
+
+Maintenance release: dependency refresh, llama.cpp upgrade, Cypher Graphiti ingest fixes, and expanded test coverage.
+
+### Changed
+
+- **llama.cpp upgraded from b9644 to b9835** (191 commits, 534 files):
+  - No breaking API changes: `llama_context_params`, `llama_model_params`, and `llama_batch` structs are unchanged.
+  - New public API `llama_model_n_layer_nextn()` added for MTP/NextN speculative-decoding models (not used by NornicDB's embedding path).
+  - No new deprecations, no embedding-path changes, no build-system changes affecting NornicDB's CMake flags.
+  - Headers and build scripts (`build-llama.sh`, `build-llama-cuda.ps1`) synced to b9835.
+- **Dependency refresh — Go modules** (11 direct dependencies updated to latest minor/patch):
+  - `github.com/99designs/gqlgen` v0.17.90 → v0.17.93
+  - `github.com/dgraph-io/badger/v4` v4.9.1 → v4.9.2
+  - `github.com/ebitengine/purego` v0.10.0 → v0.10.1
+  - `github.com/hashicorp/go-kms-wrapping/wrappers/azurekeyvault/v2` v2.0.14 → v2.0.15
+  - `github.com/hybridgroup/yzma` v1.14.1 → v1.18.0
+  - `github.com/qdrant/go-client` v1.18.2 → v1.18.3
+  - `github.com/vektah/gqlparser/v2` v2.5.33 → v2.5.35
+  - `golang.org/x/crypto` v0.52.0 → v0.53.0
+  - `golang.org/x/net` v0.55.0 → v0.56.0
+  - `golang.org/x/sync` v0.20.0 → v0.21.0
+  - `google.golang.org/api` v0.283.0 → v0.286.0
+  - `golang.org/x/sys`, `golang.org/x/text`, `golang.org/x/tools`, `golang.org/x/mod`, `google.golang.org/genproto/googleapis/rpc` also bumped as transitive upgrades.
+- **Dependency refresh — UI npm packages** (10 packages bumped to latest minor/patch):
+  - `lucide-react` ^1.17.0 → ^1.22.0
+  - `neo4j-driver` ^6.0.1 → ^6.1.0
+  - `react-router-dom` ^7.16.0 → ^7.18.0
+  - `@tailwindcss/postcss` ^4.3.0 → ^4.3.2
+  - `tailwindcss` ^4.3.0 → ^4.3.2
+  - `@types/react` ^19.2.16 → ^19.2.17
+  - `@vitejs/plugin-react` ^6.0.2 → ^6.0.3
+  - `autoprefixer` ^10.5.0 → ^10.5.2
+  - `baseline-browser-mapping` ^2.10.33 → ^2.10.40
+  - `postcss` ^8.5.14 → ^8.5.16
+- **GraphQL code regenerated** with gqlgen v0.17.93 to accommodate upstream `DeferredGroup.Label` and `CollectedField.Deferrable` field removals in the graphql runtime library.
+
+### Fixed
+
+- **Cypher Graphiti ingest correctness**:
+  - `CALL`-tail projection fast path corrected so that tail subquery outputs project correctly into outer RETURN clauses.
+  - Graphiti ingest-time relationship and chunk search performance improved; edge cases around exact relationship shape matching during high-frequency ingest are hardened.
+- **Vector cosine fast-path routing** tightened for Graphiti query shapes using `WITH ... vector.similarity.cosine(...) AS score` patterns.
+
+### Tests
+
+- **Graphiti E2E scenario and fast-path assertion tests** added (`pkg/cypher/graphiti_scenario_e2e_test.go`, `pkg/cypher/graphiti_exact_shapes_e2e_test.go`):
+  - Covers full ingest pipelines including relationship-batch, vector-property, and chunk-search query shapes.
+  - Fast-path assertions verify that optimized execution routes are taken for expected query patterns.
+- **Graphify E2E scenario tests** added (`pkg/cypher/graphify_scenario_e2e_test.go`, `pkg/cypher/graphify_exact_shapes_e2e_test.go`).
+- **CALL-tail projection regression coverage** added (`pkg/cypher/coverage_call_tail_test.go`).
+- **Vector cosine fast-path shape coverage** extended (`executor_match_vector_cosine_fastpath_test.go`).
+
+### Technical Details
+
+- **Range covered**: `v1.1.9..HEAD`
+- **Commits in range**: 6 (non-merge)
+- **Repository delta**: 34 files changed, +6,725 / −4,770 lines
+
+## [v1.1.9]
+
+### Fixed
+
+- **Cypher count preservation**: `RETURN` clauses now preserve counts correctly when combined with aggregation and projection (hotfix backport from v1.1.8-hotfix).
+
+## [v1.1.8-hotfix]
+
+### Fixed
+
+- **Cypher count preservation**: `RETURN` clauses no longer drop count values when combined with aggregation and projection.
+
 ## [v1.1.8]
 
 ### Changed
