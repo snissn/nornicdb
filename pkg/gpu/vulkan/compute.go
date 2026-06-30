@@ -28,6 +28,12 @@ var (
 
 	//go:embed shaders/topk_full.spv
 	topkFullSPV []byte
+
+	//go:embed shaders/hnsw_build_cosine.spv
+	hnswBuildCosineSPV []byte
+
+	//go:embed shaders/hnsw_build_topk_rows.spv
+	hnswBuildTopkRowsSPV []byte
 )
 
 // Additional Vulkan constants for compute pipelines
@@ -53,6 +59,12 @@ const (
 	VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT = 0x00000001
 
 	VK_PIPELINE_BIND_POINT_COMPUTE = 1
+
+	VK_STRUCTURE_TYPE_MEMORY_BARRIER = 30
+
+	VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT  = 0x00000020
+	VK_ACCESS_SHADER_WRITE_BIT            = 0x00000800
+	VK_ACCESS_SHADER_READ_BIT             = 0x00000020
 )
 
 // Vulkan handle types for compute
@@ -208,6 +220,14 @@ type VkSubmitInfo struct {
 	PSignalSemaphores    uintptr
 }
 
+// VkMemoryBarrier structure
+type VkMemoryBarrier struct {
+	SType         uint32
+	PNext         uintptr
+	SrcAccessMask uint32
+	DstAccessMask uint32
+}
+
 // Additional Vulkan function pointers for compute
 var (
 	vkCreateShaderModule         func(device VkDevice, pCreateInfo *VkShaderModuleCreateInfo, pAllocator uintptr, pShaderModule *VkShaderModule) VkResult
@@ -231,6 +251,7 @@ var (
 	vkCmdBindDescriptorSets      func(commandBuffer VkCommandBuffer, pipelineBindPoint uint32, layout VkPipelineLayout, firstSet uint32, descriptorSetCount uint32, pDescriptorSets *VkDescriptorSet, dynamicOffsetCount uint32, pDynamicOffsets uintptr)
 	vkCmdPushConstants           func(commandBuffer VkCommandBuffer, layout VkPipelineLayout, stageFlags uint32, offset uint32, size uint32, pValues uintptr)
 	vkCmdDispatch                func(commandBuffer VkCommandBuffer, groupCountX uint32, groupCountY uint32, groupCountZ uint32)
+	vkCmdPipelineBarrier         func(commandBuffer VkCommandBuffer, srcStageMask uint32, dstStageMask uint32, dependencyFlags uint32, memoryBarrierCount uint32, pMemoryBarriers *VkMemoryBarrier, bufferMemoryBarrierCount uint32, pBufferMemoryBarriers uintptr, imageMemoryBarrierCount uint32, pImageMemoryBarriers uintptr)
 	vkQueueSubmit                func(queue VkQueue, submitCount uint32, pSubmits *VkSubmitInfo, fence VkFence) VkResult
 	vkQueueWaitIdle              func(queue VkQueue) VkResult
 
@@ -257,6 +278,8 @@ const (
 	PipelineNormalize
 	PipelineTopK
 	PipelineTopKFull
+	PipelineHNSWBuildCosine
+	PipelineHNSWBuildTopKRows
 )
 
 // ComputeContext holds resources for compute operations
@@ -303,6 +326,27 @@ func (d *Device) NewComputeContext() (*ComputeContext, error) {
 		return nil, fmt.Errorf("failed to create topk pipeline: %w", err)
 	}
 	ctx.pipelines[PipelineTopK] = topkPipeline
+
+	// Create HNSW build cosine matrix pipeline (3 buffers: frontier, queries, scores)
+	hnswCosinePipeline, err := d.createPipeline(hnswBuildCosineSPV, 3, 12) // 3 uint32 push constants
+	if err != nil {
+		cosPipeline.Release()
+		normPipeline.Release()
+		topkPipeline.Release()
+		return nil, fmt.Errorf("failed to create HNSW build cosine pipeline: %w", err)
+	}
+	ctx.pipelines[PipelineHNSWBuildCosine] = hnswCosinePipeline
+
+	// Create HNSW build top-k rows pipeline (3 buffers: scores, indices, top_scores)
+	hnswTopkPipeline, err := d.createPipeline(hnswBuildTopkRowsSPV, 3, 12) // 3 uint32 push constants
+	if err != nil {
+		cosPipeline.Release()
+		normPipeline.Release()
+		topkPipeline.Release()
+		hnswCosinePipeline.Release()
+		return nil, fmt.Errorf("failed to create HNSW build topk rows pipeline: %w", err)
+	}
+	ctx.pipelines[PipelineHNSWBuildTopKRows] = hnswTopkPipeline
 
 	return ctx, nil
 }
@@ -673,4 +717,155 @@ func (c *ComputeContext) SearchGPU(embeddings *Buffer, query []float32, n, dimen
 	}
 
 	return results, nil
+}
+
+// HNSWBuildTopK computes batched cosine top-k for HNSW construction.
+//
+// The frontier and query buffers must contain normalized vectors in row-major
+// layout: frontier is [frontierN x dimensions], queries is [queryN x dimensions].
+// Both the cosine matrix and per-row top-k are dispatched in a single command
+// buffer to minimize GPU submission overhead.
+func (c *ComputeContext) HNSWBuildTopK(frontier, queries *Buffer, scoresBuf, indicesBuf, topkScoresBuf *Buffer, frontierN, queryN, dimensions uint32, k int) error {
+	if k <= 0 || frontierN == 0 || queryN == 0 {
+		return nil
+	}
+	if k > int(frontierN) {
+		k = int(frontierN)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cosinePipeline, ok := c.pipelines[PipelineHNSWBuildCosine]
+	if !ok {
+		return errors.New("HNSW cosine pipeline not found")
+	}
+	topkPipeline, ok := c.pipelines[PipelineHNSWBuildTopKRows]
+	if !ok {
+		return errors.New("HNSW topk pipeline not found")
+	}
+
+	c.device.mu.Lock()
+	defer c.device.mu.Unlock()
+
+	// Reset descriptor pools for both pipelines
+	if result := vkResetDescriptorPool(c.device.device, cosinePipeline.descriptorPool, 0); result != VK_SUCCESS {
+		return fmt.Errorf("failed to reset cosine descriptor pool: %d", result)
+	}
+	if result := vkResetDescriptorPool(c.device.device, topkPipeline.descriptorPool, 0); result != VK_SUCCESS {
+		return fmt.Errorf("failed to reset topk descriptor pool: %d", result)
+	}
+
+	// Allocate descriptor set for cosine pipeline (frontier, queries, scores)
+	cosineAllocInfo := VkDescriptorSetAllocateInfo{
+		SType:              VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		DescriptorPool:     cosinePipeline.descriptorPool,
+		DescriptorSetCount: 1,
+		PSetLayouts:        &cosinePipeline.descriptorLayout,
+	}
+	var cosineDescSet VkDescriptorSet
+	if result := vkAllocateDescriptorSets(c.device.device, &cosineAllocInfo, &cosineDescSet); result != VK_SUCCESS {
+		return fmt.Errorf("failed to allocate cosine descriptor set: %d", result)
+	}
+
+	cosineBufferInfos := [3]VkDescriptorBufferInfo{
+		{Buffer: frontier.buffer, Offset: 0, Range: VkDeviceSize(frontier.size)},
+		{Buffer: queries.buffer, Offset: 0, Range: VkDeviceSize(queries.size)},
+		{Buffer: scoresBuf.buffer, Offset: 0, Range: VkDeviceSize(scoresBuf.size)},
+	}
+	cosineWrites := [3]VkWriteDescriptorSet{
+		{SType: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, DstSet: cosineDescSet, DstBinding: 0, DescriptorCount: 1, DescriptorType: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, PBufferInfo: &cosineBufferInfos[0]},
+		{SType: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, DstSet: cosineDescSet, DstBinding: 1, DescriptorCount: 1, DescriptorType: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, PBufferInfo: &cosineBufferInfos[1]},
+		{SType: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, DstSet: cosineDescSet, DstBinding: 2, DescriptorCount: 1, DescriptorType: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, PBufferInfo: &cosineBufferInfos[2]},
+	}
+	vkUpdateDescriptorSets(c.device.device, 3, &cosineWrites[0], 0, 0)
+
+	// Allocate descriptor set for topk pipeline (scores, indices, topkScores)
+	topkAllocInfo := VkDescriptorSetAllocateInfo{
+		SType:              VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		DescriptorPool:     topkPipeline.descriptorPool,
+		DescriptorSetCount: 1,
+		PSetLayouts:        &topkPipeline.descriptorLayout,
+	}
+	var topkDescSet VkDescriptorSet
+	if result := vkAllocateDescriptorSets(c.device.device, &topkAllocInfo, &topkDescSet); result != VK_SUCCESS {
+		return fmt.Errorf("failed to allocate topk descriptor set: %d", result)
+	}
+
+	topkBufferInfos := [3]VkDescriptorBufferInfo{
+		{Buffer: scoresBuf.buffer, Offset: 0, Range: VkDeviceSize(scoresBuf.size)},
+		{Buffer: indicesBuf.buffer, Offset: 0, Range: VkDeviceSize(indicesBuf.size)},
+		{Buffer: topkScoresBuf.buffer, Offset: 0, Range: VkDeviceSize(topkScoresBuf.size)},
+	}
+	topkWrites := [3]VkWriteDescriptorSet{
+		{SType: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, DstSet: topkDescSet, DstBinding: 0, DescriptorCount: 1, DescriptorType: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, PBufferInfo: &topkBufferInfos[0]},
+		{SType: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, DstSet: topkDescSet, DstBinding: 1, DescriptorCount: 1, DescriptorType: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, PBufferInfo: &topkBufferInfos[1]},
+		{SType: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, DstSet: topkDescSet, DstBinding: 2, DescriptorCount: 1, DescriptorType: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, PBufferInfo: &topkBufferInfos[2]},
+	}
+	vkUpdateDescriptorSets(c.device.device, 3, &topkWrites[0], 0, 0)
+
+	// Allocate single command buffer for both dispatches
+	cmdAllocInfo := VkCommandBufferAllocateInfo{
+		SType:              VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		CommandPool:        c.device.commandPool,
+		Level:              VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+		CommandBufferCount: 1,
+	}
+	var commandBuffer VkCommandBuffer
+	if result := vkAllocateCommandBuffers(c.device.device, &cmdAllocInfo, &commandBuffer); result != VK_SUCCESS {
+		return fmt.Errorf("failed to allocate command buffer: %d", result)
+	}
+	defer vkFreeCommandBuffers(c.device.device, c.device.commandPool, 1, &commandBuffer)
+
+	beginInfo := VkCommandBufferBeginInfo{
+		SType: VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+		Flags: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+	}
+	if result := vkBeginCommandBuffer(commandBuffer, &beginInfo); result != VK_SUCCESS {
+		return fmt.Errorf("failed to begin command buffer: %d", result)
+	}
+
+	// --- Dispatch 1: Cosine matrix ---
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, cosinePipeline.pipeline)
+	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, cosinePipeline.pipelineLayout, 0, 1, &cosineDescSet, 0, 0)
+	cosinePushConstants := []uint32{frontierN, queryN, dimensions}
+	vkCmdPushConstants(commandBuffer, cosinePipeline.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, uintptr(unsafe.Pointer(&cosinePushConstants[0])))
+	cosineWorkgroupsX := (frontierN + 15) / 16
+	cosineWorkgroupsY := (queryN + 15) / 16
+	vkCmdDispatch(commandBuffer, cosineWorkgroupsX, cosineWorkgroupsY, 1)
+
+	// Memory barrier: ensure cosine scores are visible to top-k shader
+	barrier := VkMemoryBarrier{
+		SType:         VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+		SrcAccessMask: 0x00000800, // VK_ACCESS_SHADER_WRITE_BIT
+		DstAccessMask: 0x00000020, // VK_ACCESS_SHADER_READ_BIT
+	}
+	vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, 0, 0, 0)
+
+	// --- Dispatch 2: Per-row top-k ---
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, topkPipeline.pipeline)
+	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, topkPipeline.pipelineLayout, 0, 1, &topkDescSet, 0, 0)
+	topkPushConstants := []uint32{frontierN, queryN, uint32(k)}
+	vkCmdPushConstants(commandBuffer, topkPipeline.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, uintptr(unsafe.Pointer(&topkPushConstants[0])))
+	topkWorkgroups := (queryN + 255) / 256
+	vkCmdDispatch(commandBuffer, topkWorkgroups, 1, 1)
+
+	if result := vkEndCommandBuffer(commandBuffer); result != VK_SUCCESS {
+		return fmt.Errorf("failed to end command buffer: %d", result)
+	}
+
+	// Single submit + wait
+	submitInfo := VkSubmitInfo{
+		SType:              VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		CommandBufferCount: 1,
+		PCommandBuffers:    &commandBuffer,
+	}
+	if result := vkQueueSubmit(c.device.computeQueue, 1, &submitInfo, 0); result != VK_SUCCESS {
+		return fmt.Errorf("failed to submit to queue: %d", result)
+	}
+	if result := vkQueueWaitIdle(c.device.computeQueue); result != VK_SUCCESS {
+		return fmt.Errorf("failed to wait for queue: %d", result)
+	}
+
+	return nil
 }

@@ -115,6 +115,7 @@ func registerComputeFunctions(lib uintptr) {
 	purego.RegisterFunc(&vkCmdBindDescriptorSets, getProcAddress(lib, "vkCmdBindDescriptorSets"))
 	purego.RegisterFunc(&vkCmdPushConstants, getProcAddress(lib, "vkCmdPushConstants"))
 	purego.RegisterFunc(&vkCmdDispatch, getProcAddress(lib, "vkCmdDispatch"))
+	purego.RegisterFunc(&vkCmdPipelineBarrier, getProcAddress(lib, "vkCmdPipelineBarrier"))
 	purego.RegisterFunc(&vkQueueSubmit, getProcAddress(lib, "vkQueueSubmit"))
 	purego.RegisterFunc(&vkQueueWaitIdle, getProcAddress(lib, "vkQueueWaitIdle"))
 }

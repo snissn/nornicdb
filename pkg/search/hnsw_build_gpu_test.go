@@ -139,14 +139,54 @@ func BenchmarkHNSWBuildCPUVsAcceleratedCandidates(b *testing.B) {
 		}
 	})
 	b.Run("AcceleratedMetal", func(b *testing.B) {
-		accel, err := NewMetalHNSWBuildAccelerator()
-		if err != nil {
+		if _, err := NewMetalHNSWBuildAccelerator(); err != nil {
 			b.Skipf("Metal unavailable: %v", err)
 		}
-		_ = accel.Close()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 64, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), nil)
+			accel, err := NewMetalHNSWBuildAccelerator()
+			if err != nil {
+				b.Fatal(err)
+			}
+			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 64, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), accel)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if idx.Size() != len(pairs) {
+				b.Fatalf("size mismatch: got %d want %d", idx.Size(), len(pairs))
+			}
+		}
+	})
+	b.Run("AcceleratedCUDA", func(b *testing.B) {
+		if _, err := NewCudaHNSWBuildAccelerator(); err != nil {
+			b.Skipf("CUDA unavailable: %v", err)
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			accel, err := NewCudaHNSWBuildAccelerator()
+			if err != nil {
+				b.Fatal(err)
+			}
+			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 64, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), accel)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if idx.Size() != len(pairs) {
+				b.Fatalf("size mismatch: got %d want %d", idx.Size(), len(pairs))
+			}
+		}
+	})
+	b.Run("AcceleratedVulkan", func(b *testing.B) {
+		if _, err := NewVulkanHNSWBuildAccelerator(); err != nil {
+			b.Skipf("Vulkan unavailable: %v", err)
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			accel, err := NewVulkanHNSWBuildAccelerator()
+			if err != nil {
+				b.Fatal(err)
+			}
+			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 64, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), accel)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -178,14 +218,54 @@ func BenchmarkHNSWBuildCPUVsAcceleratedCandidates1024D(b *testing.B) {
 		}
 	})
 	b.Run("AcceleratedMetal", func(b *testing.B) {
-		accel, err := NewMetalHNSWBuildAccelerator()
-		if err != nil {
+		if _, err := NewMetalHNSWBuildAccelerator(); err != nil {
 			b.Skipf("Metal unavailable: %v", err)
 		}
-		_ = accel.Close()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 1024, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), nil)
+			accel, err := NewMetalHNSWBuildAccelerator()
+			if err != nil {
+				b.Fatal(err)
+			}
+			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 1024, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), accel)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if idx.Size() != len(pairs) {
+				b.Fatalf("size mismatch: got %d want %d", idx.Size(), len(pairs))
+			}
+		}
+	})
+	b.Run("AcceleratedCUDA", func(b *testing.B) {
+		if _, err := NewCudaHNSWBuildAccelerator(); err != nil {
+			b.Skipf("CUDA unavailable: %v", err)
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			accel, err := NewCudaHNSWBuildAccelerator()
+			if err != nil {
+				b.Fatal(err)
+			}
+			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 1024, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), accel)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if idx.Size() != len(pairs) {
+				b.Fatalf("size mismatch: got %d want %d", idx.Size(), len(pairs))
+			}
+		}
+	})
+	b.Run("AcceleratedVulkan", func(b *testing.B) {
+		if _, err := NewVulkanHNSWBuildAccelerator(); err != nil {
+			b.Skipf("Vulkan unavailable: %v", err)
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			accel, err := NewVulkanHNSWBuildAccelerator()
+			if err != nil {
+				b.Fatal(err)
+			}
+			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 1024, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), accel)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -217,14 +297,54 @@ func BenchmarkHNSWBuildCPUVsAcceleratedCandidatesLarge1024D(b *testing.B) {
 		}
 	})
 	b.Run("AcceleratedMetal", func(b *testing.B) {
-		accel, err := NewMetalHNSWBuildAccelerator()
-		if err != nil {
+		if _, err := NewMetalHNSWBuildAccelerator(); err != nil {
 			b.Skipf("Metal unavailable: %v", err)
 		}
-		_ = accel.Close()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 1024, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), nil)
+			accel, err := NewMetalHNSWBuildAccelerator()
+			if err != nil {
+				b.Fatal(err)
+			}
+			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 1024, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), accel)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if idx.Size() != len(pairs) {
+				b.Fatalf("size mismatch: got %d want %d", idx.Size(), len(pairs))
+			}
+		}
+	})
+	b.Run("AcceleratedCUDA", func(b *testing.B) {
+		if _, err := NewCudaHNSWBuildAccelerator(); err != nil {
+			b.Skipf("CUDA unavailable: %v", err)
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			accel, err := NewCudaHNSWBuildAccelerator()
+			if err != nil {
+				b.Fatal(err)
+			}
+			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 1024, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), accel)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if idx.Size() != len(pairs) {
+				b.Fatalf("size mismatch: got %d want %d", idx.Size(), len(pairs))
+			}
+		}
+	})
+	b.Run("AcceleratedVulkan", func(b *testing.B) {
+		if _, err := NewVulkanHNSWBuildAccelerator(); err != nil {
+			b.Skipf("Vulkan unavailable: %v", err)
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			accel, err := NewVulkanHNSWBuildAccelerator()
+			if err != nil {
+				b.Fatal(err)
+			}
+			idx, _, err := buildHNSWWithOptionalGPU(context.Background(), 1024, gpuConfig, nil, len(pairs), hnswPairSliceIterator(pairs), accel)
 			if err != nil {
 				b.Fatal(err)
 			}

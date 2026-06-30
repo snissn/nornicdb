@@ -541,13 +541,35 @@ func buildHNSWCPU(ctx context.Context, dimensions int, config HNSWConfig, lookup
 	return built, stats, err
 }
 
+// newBestHNSWBuildAccelerator tries each available GPU backend in order of
+// preference and returns the first one that initializes successfully.
+// Falls back to CPU if no GPU backend is available.
+func newBestHNSWBuildAccelerator() (HNSWBuildAccelerator, error) {
+	// Try CUDA first (NVIDIA GPUs)
+	if accel, err := NewCudaHNSWBuildAccelerator(); err == nil {
+		log.Printf("[HNSW] Using CUDA GPU accelerator")
+		return accel, nil
+	}
+	// Try Vulkan next (cross-platform)
+	if accel, err := NewVulkanHNSWBuildAccelerator(); err == nil {
+		log.Printf("[HNSW] Using Vulkan GPU accelerator")
+		return accel, nil
+	}
+	// Try Metal last (Apple Silicon)
+	if accel, err := NewMetalHNSWBuildAccelerator(); err == nil {
+		log.Printf("[HNSW] Using Metal GPU accelerator")
+		return accel, nil
+	}
+	return nil, fmt.Errorf("no GPU accelerator available")
+}
+
 func buildHNSWWithOptionalGPU(ctx context.Context, dimensions int, config HNSWConfig, lookup VectorLookup, total int, iter hnswBuildIterator, accel HNSWBuildAccelerator) (*HNSWIndex, hnswBuildStats, error) {
 	if !config.UseGPUBuild {
 		return buildHNSWCPU(ctx, dimensions, config, lookup, total, iter)
 	}
 	if accel == nil {
 		var err error
-		accel, err = NewMetalHNSWBuildAccelerator()
+		accel, err = newBestHNSWBuildAccelerator()
 		if err != nil {
 			log.Printf("[HNSW] GPU build unavailable, falling back to CPU: %v", err)
 			built, stats, cpuErr := buildHNSWCPU(ctx, dimensions, config, lookup, total, iter)

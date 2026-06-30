@@ -383,6 +383,56 @@ int cuda_topk(CudaDevice* dev, CudaBuffer* scores, unsigned int* out_indices,
     free(host_scores);
     return 0;
 }
+
+// Batched cosine similarity using cuBLAS SGEMM.
+// Computes scores = queries @ frontier^T  (all row-major, normalized).
+//   queries:  [query_n x dims] row-major on device
+//   frontier: [frontier_n x dims] row-major on device
+//   scores:   [query_n x frontier_n] row-major output on device
+// Each row of scores contains dot products for one query against all frontier vectors.
+int cuda_batched_cosine_similarity(
+    CudaDevice* dev,
+    CudaBuffer* frontier,
+    CudaBuffer* queries,
+    CudaBuffer* scores,
+    unsigned int frontier_n,
+    unsigned int query_n,
+    unsigned int dims)
+{
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    // We want: scores[query_n x frontier_n] = queries[query_n x dims] · frontier^T[dims x frontier_n]
+    // Row-major in cuBLAS: treat as column-major with transposes.
+    // C^T = B^T · A^T  where A=queries, B=frontier, C=scores
+    // => cublasSgemm(CUBLAS_OP_T, CUBLAS_OP_N, frontier_n, query_n, dims, ...)
+    //    B=frontier (dims x frontier_n after transpose), A=queries (dims x query_n after transpose)
+    //    C=scores stores frontier_n x query_n column-major = query_n x frontier_n row-major
+    cublasStatus_t status = cublasSgemm(
+        dev->cublas_handle,
+        CUBLAS_OP_T,           // transpose frontier: dims x frontier_n → frontier_n x dims (col-major)
+        CUBLAS_OP_N,           // no transpose on queries (treated as dims x query_n col-major)
+        (int)frontier_n,       // rows of C (col-major) = rows of scores (row-major)
+        (int)query_n,          // cols of C (col-major) = cols of scores (row-major)
+        (int)dims,             // inner dimension
+        &alpha,
+        frontier->data,        // A = frontier (dims leading dim in row-major, treated as col-major with transpose)
+        (int)dims,             // leading dimension
+        queries->data,         // B = queries
+        (int)dims,             // leading dimension
+        &beta,
+        scores->data,          // C = scores
+        (int)frontier_n        // leading dimension
+    );
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        cuda_set_error("cuBLAS SGEMM batched cosine failed");
+        return -1;
+    }
+
+    cudaStreamSynchronize(dev->stream);
+    return 0;
+}
 */
 import "C"
 
@@ -593,6 +643,20 @@ func (b *Buffer) ReadFloat32(count int) []float32 {
 	return result
 }
 
+// ReadUint32 reads uint32 values from the buffer (e.g., for indices).
+func (b *Buffer) ReadUint32(count int) []uint32 {
+	if count <= 0 || uint64(count*4) > b.size {
+		return nil
+	}
+
+	result := make([]uint32, count)
+	ret := C.cuda_buffer_copy_to_host(b.ptr, (*C.float)(unsafe.Pointer(&result[0])), C.size_t(count))
+	if ret != 0 {
+		return nil
+	}
+	return result
+}
+
 // NormalizeVectors normalizes vectors in-place to unit length.
 func (d *Device) NormalizeVectors(vectors *Buffer, n, dimensions uint32) error {
 	if d == nil || d.ptr == nil || vectors == nil || vectors.ptr == nil {
@@ -704,6 +768,90 @@ func (d *Device) Search(embeddings *Buffer, query []float32, n, dimensions uint3
 	}
 
 	return results, nil
+}
+
+// HNSWBuildTopK computes batched cosine top-k for HNSW construction.
+//
+// The frontier and query buffers must contain normalized vectors in row-major
+// layout: frontier is [frontierN x dimensions], queries is [queryN x dimensions].
+// It returns compact row-major outputs with queryN*k indices and scores.
+//
+// Uses a single cuBLAS SGEMM for batched cosine similarity (frontier_n × query_n
+// score matrix) followed by per-row CPU top-k selection.
+func (d *Device) HNSWBuildTopK(
+	frontier, queries *Buffer,
+	frontierN, queryN, dimensions uint32,
+	k int,
+) ([]uint32, []float32, error) {
+	if k <= 0 || frontierN == 0 || queryN == 0 {
+		return nil, nil, nil
+	}
+	if k > int(frontierN) {
+		k = int(frontierN)
+	}
+
+	// Step 1: Batched cosine via single cuBLAS SGEMM
+	scoresBuf, err := d.NewEmptyBuffer(uint64(frontierN)*uint64(queryN), MemoryDevice)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer scoresBuf.Release()
+
+	d.mu.Lock()
+	ret := C.cuda_batched_cosine_similarity(
+		d.ptr,
+		frontier.ptr,
+		queries.ptr,
+		scoresBuf.ptr,
+		C.uint(frontierN),
+		C.uint(queryN),
+		C.uint(dimensions),
+	)
+	d.mu.Unlock()
+	if ret != 0 {
+		errMsg := C.GoString(C.cuda_get_last_error())
+		C.cuda_clear_error()
+		return nil, nil, fmt.Errorf("%w: %s", ErrKernelExecution, errMsg)
+	}
+
+	// Step 2: Download score matrix and do per-row CPU top-k
+	allScores := scoresBuf.ReadFloat32(int(frontierN) * int(queryN))
+	if allScores == nil {
+		return nil, nil, fmt.Errorf("failed to read scores from GPU")
+	}
+
+	allIndices := make([]uint32, 0, int(queryN)*k)
+	allTopkScores := make([]float32, 0, int(queryN)*k)
+
+	for qIdx := uint32(0); qIdx < queryN; qIdx++ {
+		rowStart := int(qIdx) * int(frontierN)
+		row := allScores[rowStart : rowStart+int(frontierN)]
+
+		// Insertion-sort top-k for this row
+		topkIndices := make([]uint32, k)
+		topkScores := make([]float32, k)
+		for i := 0; i < k; i++ {
+			topkScores[i] = -2.0
+			topkIndices[i] = 0xFFFFFFFF
+		}
+		for fid := uint32(0); fid < frontierN; fid++ {
+			score := row[fid]
+			if score > topkScores[k-1] || (score == topkScores[k-1] && fid < topkIndices[k-1]) {
+				pos := k - 1
+				for pos > 0 && (score > topkScores[pos-1] || (score == topkScores[pos-1] && fid < topkIndices[pos-1])) {
+					topkScores[pos] = topkScores[pos-1]
+					topkIndices[pos] = topkIndices[pos-1]
+					pos--
+				}
+				topkScores[pos] = score
+				topkIndices[pos] = fid
+			}
+		}
+		allIndices = append(allIndices, topkIndices...)
+		allTopkScores = append(allTopkScores, topkScores...)
+	}
+
+	return allIndices, allTopkScores, nil
 }
 
 // HasGPUHardware returns true if CUDA GPU hardware is available.
