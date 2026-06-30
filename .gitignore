@@ -83,3 +83,4 @@ metrics-doc-gen
 site
 nornicdb-admin
 !cmd/nornicdb-admin
+graphify-out

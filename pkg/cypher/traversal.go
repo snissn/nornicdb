@@ -2348,6 +2348,14 @@ func (e *StorageExecutor) evaluateWhereOnPath(ctx context.Context, whereClause s
 		return val == nil
 	}
 
+	if isSimpleIdentifierOrProperty(whereClause) {
+		val := e.evaluateExpressionWithPathContext(ctx, whereClause, pathCtx)
+		if boolVal, ok := val.(bool); ok {
+			return boolVal
+		}
+		return false
+	}
+
 	return true // Default: pass through
 }
 

@@ -3585,6 +3585,11 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 	}
 
 	optMatchPattern := strings.TrimSpace(remainingAfterOptMatch[:optMatchEndIdx])
+	optMatchWhereClause := ""
+	if optMatchWhereIdx := findKeywordIndex(optMatchPattern, "WHERE"); optMatchWhereIdx > 0 {
+		optMatchWhereClause = strings.TrimSpace(optMatchPattern[optMatchWhereIdx+5:])
+		optMatchPattern = strings.TrimSpace(optMatchPattern[:optMatchWhereIdx])
+	}
 	restOfQuery := ""
 	if optMatchEndIdx < len(remainingAfterOptMatch) {
 		restOfQuery = strings.TrimSpace(remainingAfterOptMatch[optMatchEndIdx:])
@@ -3786,11 +3791,23 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 			})
 		} else {
 			// Add a row for each match
+			addedAny := false
 			for _, related := range relatedNodes {
+				if !e.optionalRelatedMatchesWhere(ctx, related, relPattern, optMatchWhereClause) {
+					continue
+				}
 				joinedRows = append(joinedRows, joinedRow{
 					initialNode:  node,
 					relatedNode:  related.node,
 					relationship: related.edge,
+				})
+				addedAny = true
+			}
+			if !addedAny {
+				joinedRows = append(joinedRows, joinedRow{
+					initialNode:  node,
+					relatedNode:  nil,
+					relationship: nil,
 				})
 			}
 		}
@@ -4162,6 +4179,24 @@ func (e *StorageExecutor) findOptionalRelatedNodes(ctx context.Context, sourceNo
 	return e.findRelatedNodes(sourceNode, pattern)
 }
 
+func (e *StorageExecutor) optionalRelatedMatchesWhere(ctx context.Context, related optionalRelResult, pattern optionalRelPattern, whereClause string) bool {
+	whereClause = strings.TrimSpace(whereClause)
+	if whereClause == "" {
+		return true
+	}
+	nodeCtx := make(map[string]*storage.Node)
+	if pattern.targetVar != "" {
+		nodeCtx[pattern.targetVar] = related.node
+	}
+	relCtx := make(map[string]*storage.Edge)
+	if pattern.relVar != "" {
+		relCtx[pattern.relVar] = related.edge
+	}
+	result := e.evaluateExpressionWithContext(ctx, whereClause, nodeCtx, relCtx)
+	passes, ok := result.(bool)
+	return ok && passes
+}
+
 // processWithAggregation handles WITH clauses with aggregation functions
 // It finds the WITH clause that contains aggregations and processes them
 // Also evaluates CASE WHEN expressions in WITH clauses
@@ -4313,7 +4348,7 @@ func (e *StorageExecutor) executeJoinedRowsWithOptionalMatch(ctx context.Context
 		}
 		addedAny := false
 		for _, related := range relatedNodes {
-			if optMatchWhereClause != "" && related.node != nil && !e.nodeMatchesWhereClause(ctx, related.node, optMatchWhereClause, relPattern.targetVar) {
+			if !e.optionalRelatedMatchesWhere(ctx, related, relPattern, optMatchWhereClause) {
 				continue
 			}
 			joinedOptionalRows = append(joinedOptionalRows, optionalRow{computedValues: row.values, relatedNode: related.node, relationship: related.edge})
@@ -4500,7 +4535,28 @@ func (e *StorageExecutor) processWithAggregation(ctx context.Context, rows []joi
 	var returnItems []returnItem
 	if aggregationWithStart >= 0 {
 		withClause := strings.TrimSpace(restOfQuery[aggregationWithStart+4 : aggregationWithEnd])
+		postWithWhere := ""
+		if postWhereIdx := findKeywordIndex(withClause, "WHERE"); postWhereIdx > 0 {
+			postWithWhere = strings.TrimSpace(withClause[postWhereIdx+5:])
+			withClause = strings.TrimSpace(withClause[:postWhereIdx])
+		}
 		returnItems = e.parseReturnItems(withClause)
+
+		hasAggregate := false
+		hasWholeVariableGrouping := false
+		for _, item := range returnItems {
+			expr := strings.TrimSpace(item.expr)
+			if isAggregateExpression(expr) {
+				hasAggregate = true
+			} else if strings.EqualFold(expr, sourceVar) || strings.EqualFold(expr, targetVar) || strings.EqualFold(expr, relVar) {
+				hasWholeVariableGrouping = true
+			}
+		}
+		if hasAggregate && hasWholeVariableGrouping {
+			returnClause := stripTrailingReturnClauses(strings.TrimSpace(restOfQuery[returnIdx+6:]))
+			finalItems := e.parseReturnItems(returnClause)
+			return e.processGroupedWithAggregation(ctx, rows, sourceVar, targetVar, relVar, returnItems, finalItems, postWithWhere)
+		}
 	} else {
 		// No aggregation WITH found, use RETURN clause items
 		returnClause := stripTrailingReturnClauses(strings.TrimSpace(restOfQuery[returnIdx+6:]))
@@ -4899,6 +4955,168 @@ func (e *StorageExecutor) processWithAggregation(ctx context.Context, rows []joi
 	}
 
 	result.Rows = append(result.Rows, row)
+	return result, nil
+}
+
+func (e *StorageExecutor) processGroupedWithAggregation(ctx context.Context, rows []joinedRow, sourceVar, targetVar, relVar string, withItems []returnItem, returnItems []returnItem, postWithWhere string) (*ExecuteResult, error) {
+	type groupedRows struct {
+		values map[string]interface{}
+		rows   []joinedRow
+	}
+
+	isAgg := func(expr string) bool {
+		return isAggregateExpression(strings.TrimSpace(expr))
+	}
+
+	resolveExpr := func(row joinedRow, expr string) interface{} {
+		expr = strings.TrimSpace(expr)
+		switch {
+		case sourceVar != "" && strings.EqualFold(expr, sourceVar):
+			return row.initialNode
+		case targetVar != "" && strings.EqualFold(expr, targetVar):
+			return row.relatedNode
+		case relVar != "" && strings.EqualFold(expr, relVar):
+			return row.relationship
+		}
+		nodeCtx, relCtx := buildJoinedEvaluationContext(row, sourceVar, targetVar, relVar)
+		return e.evaluateExpressionWithContext(ctx, expr, nodeCtx, relCtx)
+	}
+	groups := make(map[string]*groupedRows)
+	order := make([]string, 0)
+	for _, row := range rows {
+		values := make(map[string]interface{})
+		keyParts := make([]string, 0, len(withItems))
+		for _, item := range withItems {
+			if isAgg(item.expr) {
+				continue
+			}
+			alias := item.alias
+			if alias == "" {
+				alias = item.expr
+			}
+			val := resolveExpr(row, item.expr)
+			values[alias] = val
+			keyParts = append(keyParts, alias+"="+joinedValueKey(val))
+		}
+		key := strings.Join(keyParts, "|")
+		group, ok := groups[key]
+		if !ok {
+			group = &groupedRows{values: values, rows: make([]joinedRow, 0, 1)}
+			groups[key] = group
+			order = append(order, key)
+		}
+		group.rows = append(group.rows, row)
+	}
+
+	for _, key := range order {
+		group := groups[key]
+		for _, item := range withItems {
+			expr := strings.TrimSpace(item.expr)
+			if !isAgg(expr) {
+				continue
+			}
+			alias := item.alias
+			if alias == "" {
+				alias = item.expr
+			}
+			inner := strings.TrimSpace(extractFuncInner(expr))
+			switch {
+			case isAggregateFuncName(expr, "count"):
+				if inner == "*" {
+					group.values[alias] = int64(len(group.rows))
+					continue
+				}
+				count := int64(0)
+				for _, row := range group.rows {
+					switch {
+					case sourceVar != "" && strings.EqualFold(inner, sourceVar):
+						if row.initialNode != nil {
+							count++
+						}
+						continue
+					case targetVar != "" && strings.EqualFold(inner, targetVar):
+						if row.relatedNode != nil {
+							count++
+						}
+						continue
+					case relVar != "" && strings.EqualFold(inner, relVar):
+						if row.relationship != nil {
+							count++
+						}
+						continue
+					}
+					if resolveExpr(row, inner) != nil {
+						count++
+					}
+				}
+				group.values[alias] = count
+			case isAggregateFuncName(expr, "collect"):
+				collected := make([]interface{}, 0, len(group.rows))
+				for _, row := range group.rows {
+					if val := resolveExpr(row, inner); val != nil {
+						collected = append(collected, val)
+					}
+				}
+				group.values[alias] = collected
+			case isAggregateFuncName(expr, "sum"):
+				var sum float64
+				hasNonNull := false
+				for _, row := range group.rows {
+					val := resolveExpr(row, inner)
+					if val == nil {
+						continue
+					}
+					num, ok := toFloat64(val)
+					if !ok {
+						return nil, fmt.Errorf("SUM() requires numeric values, got %T in expression %q", val, inner)
+					}
+					sum += num
+					hasNonNull = true
+				}
+				if hasNonNull {
+					group.values[alias] = sum
+				} else {
+					group.values[alias] = nil
+				}
+			}
+		}
+	}
+
+	result := &ExecuteResult{Columns: make([]string, len(returnItems)), Rows: make([][]interface{}, 0, len(order))}
+	for i, item := range returnItems {
+		if item.alias != "" {
+			result.Columns[i] = item.alias
+		} else {
+			result.Columns[i] = item.expr
+		}
+	}
+
+	for _, key := range order {
+		group := groups[key]
+		if postWithWhere != "" && !e.evaluateWithWhereCondition(ctx, postWithWhere, group.values) {
+			continue
+		}
+		row := make([]interface{}, len(returnItems))
+		nodeCtx := make(map[string]*storage.Node)
+		relCtx := make(map[string]*storage.Edge)
+		for alias, val := range group.values {
+			switch v := val.(type) {
+			case *storage.Node:
+				nodeCtx[alias] = v
+			case *storage.Edge:
+				relCtx[alias] = v
+			}
+		}
+		for i, item := range returnItems {
+			if val, ok := group.values[item.expr]; ok {
+				row[i] = val
+				continue
+			}
+			row[i] = e.evaluateExpressionWithContext(ctx, item.expr, nodeCtx, relCtx)
+		}
+		result.Rows = append(result.Rows, row)
+	}
+
 	return result, nil
 }
 

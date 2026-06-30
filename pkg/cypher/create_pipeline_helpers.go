@@ -151,12 +151,44 @@ func (e *StorageExecutor) executeCreateRelSegment(ctx context.Context, createStm
 		return fmt.Errorf("failed to parse relationship pattern: %w", err)
 	}
 
-	// Get source and target nodes from context
-	sourceNode, sourceExists := nodeContext[sourceVar]
-	targetNode, targetExists := nodeContext[targetVar]
+	resolveNode := func(content string) (*storage.Node, error) {
+		nodePattern := e.parseNodePattern(ctx, "("+content+")")
+		if nodePattern.variable != "" {
+			if node, exists := nodeContext[nodePattern.variable]; exists {
+				return node, nil
+			}
+		}
+		if len(nodePattern.labels) == 0 && len(nodePattern.properties) == 0 {
+			return nil, fmt.Errorf("variable not found in context: %s", content)
+		}
+		node := &storage.Node{
+			ID:         storage.NodeID(e.generateID()),
+			Labels:     nodePattern.labels,
+			Properties: nodePattern.properties,
+		}
+		actualID, err := store.CreateNode(node)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create inline node: %w", err)
+		}
+		if actualID != "" {
+			node.ID = actualID
+		}
+		e.notifyNodeMutated(string(node.ID))
+		if nodePattern.variable != "" {
+			nodeContext[nodePattern.variable] = node
+		}
+		result.Stats.NodesCreated++
+		addOptimisticNodeID(result, node.ID)
+		return node, nil
+	}
 
-	if !sourceExists || !targetExists {
-		return fmt.Errorf("variable not found in context: source=%s (exists=%v), target=%s (exists=%v)", sourceVar, sourceExists, targetVar, targetExists)
+	sourceNode, err := resolveNode(sourceVar)
+	if err != nil {
+		return fmt.Errorf("source %s: %w", sourceVar, err)
+	}
+	targetNode, err := resolveNode(targetVar)
+	if err != nil {
+		return fmt.Errorf("target %s: %w", targetVar, err)
 	}
 
 	// Validate node IDs are not empty

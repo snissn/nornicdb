@@ -96,6 +96,160 @@ func TestMatchOptionalMatchBasic(t *testing.T) {
 	})
 }
 
+func TestMatchOptionalMatchWithAggregationWhereFiltersAfterWith(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE (:T {name:'T1'})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (:T {name:'T2'})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (:C {name:'C1', met:false})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (:C {name:'C2', met:true})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `MATCH (t:T {name:'T1'}),(c:C {name:'C1'}) CREATE (t)-[:BLOCKED_BY]->(c)`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `MATCH (t:T {name:'T2'}),(c:C {name:'C2'}) CREATE (t)-[:BLOCKED_BY]->(c)`, nil)
+	require.NoError(t, err)
+
+	joined, err := exec.Execute(ctx, `
+		MATCH (t:T)
+		OPTIONAL MATCH (t)-[:BLOCKED_BY]->(c:C) WHERE c.met = false
+		RETURN t.name AS name, c.name AS blocker
+	`, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, [][]interface{}{{"T1", "C1"}, {"T2", nil}}, joined.Rows)
+
+	counts, err := exec.Execute(ctx, `
+		MATCH (t:T)
+		OPTIONAL MATCH (t)-[:BLOCKED_BY]->(c:C) WHERE c.met = false
+		WITH t, count(c) AS n
+		RETURN t.name AS name, n
+	`, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, [][]interface{}{{"T1", int64(1)}, {"T2", int64(0)}}, counts.Rows)
+
+	result, err := exec.Execute(ctx, `
+		MATCH (t:T)
+		OPTIONAL MATCH (t)-[:BLOCKED_BY]->(c:C) WHERE c.met = false
+		WITH t, count(c) AS n WHERE n = 0
+		RETURN t.name AS name
+	`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"name"}, result.Columns)
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, "T2", result.Rows[0][0])
+}
+
+func TestReportedWhereAndCreateRegressionCluster(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	for _, query := range []string{
+		`CREATE (:T {name:'T1'})`,
+		`CREATE (:T {name:'T2'})`,
+		`CREATE (:C {name:'C1', met:false})`,
+		`CREATE (:C {name:'C2', met:true})`,
+		`MATCH (t:T {name:'T1'}),(c:C {name:'C1'}) CREATE (t)-[:BLOCKED_BY]->(c)`,
+		`MATCH (t:T {name:'T2'}),(c:C {name:'C2'}) CREATE (t)-[:BLOCKED_BY]->(c)`,
+	} {
+		_, err := exec.Execute(ctx, query, nil)
+		require.NoError(t, err)
+	}
+
+	simpleWithWhere, err := exec.Execute(ctx, `
+		MATCH (t:T)
+		WITH t WHERE t.name = 'T2'
+		RETURN t.name AS name
+	`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"name"}, simpleWithWhere.Columns)
+	require.Equal(t, [][]interface{}{{"T2"}}, simpleWithWhere.Rows)
+
+	patternPredicate, err := exec.Execute(ctx, `
+		MATCH (t:T)
+		WHERE NOT (t)-[:BLOCKED_BY]->(:C {met:false})
+		RETURN t.name AS name
+	`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"name"}, patternPredicate.Columns)
+	require.Equal(t, [][]interface{}{{"T2"}}, patternPredicate.Rows)
+
+	notBooleanProperty, err := exec.Execute(ctx, `
+		MATCH (t:T)-[:BLOCKED_BY]->(c:C)
+		WHERE NOT c.met
+		RETURN t.name AS name
+	`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"name"}, notBooleanProperty.Columns)
+	require.Equal(t, [][]interface{}{{"T1"}}, notBooleanProperty.Rows)
+
+	createTwoRelationships, err := exec.Execute(ctx, `
+		CREATE (a:T {name:'x'})-[:R]->(b:C {name:'y'})
+		CREATE (c:T {name:'z'})-[:R]->(d:C {name:'w'})
+	`, nil)
+	require.NoError(t, err)
+	require.NotNil(t, createTwoRelationships.Stats)
+	require.Equal(t, 4, createTwoRelationships.Stats.NodesCreated)
+	require.Equal(t, 2, createTwoRelationships.Stats.RelationshipsCreated)
+}
+
+func TestOptionalRelatedMatchesWhereBindsTargetVariable(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	pattern := exec.parseOptionalRelPattern(ctx, `(t)-[:BLOCKED_BY]->(c:C)`)
+	require.Equal(t, "c", pattern.targetVar)
+
+	related := optionalRelResult{node: &storage.Node{ID: "c1", Labels: []string{"C"}, Properties: map[string]interface{}{"met": false}}}
+	assert.True(t, exec.optionalRelatedMatchesWhere(ctx, related, pattern, "c.met = false"))
+
+	related.node.Properties["met"] = true
+	assert.False(t, exec.optionalRelatedMatchesWhere(ctx, related, pattern, "c.met = false"))
+}
+
+func TestGroupedWithAggregationCountSkipsNullOptionalTarget(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	t1 := &storage.Node{ID: "t1", Labels: []string{"T"}, Properties: map[string]interface{}{"name": "T1"}}
+	t2 := &storage.Node{ID: "t2", Labels: []string{"T"}, Properties: map[string]interface{}{"name": "T2"}}
+	c1 := &storage.Node{ID: "c1", Labels: []string{"C"}, Properties: map[string]interface{}{"name": "C1"}}
+	rows := []joinedRow{
+		{initialNode: t1, relatedNode: c1},
+		{initialNode: t2, relatedNode: nil},
+	}
+	require.Equal(t, "c", extractFuncInner("count(c)"))
+	require.True(t, isAggregateExpression("count(c)"))
+	require.True(t, isAggregateFuncName("count(c)", "count"))
+
+	result, err := exec.processGroupedWithAggregation(
+		ctx,
+		rows,
+		"t",
+		"c",
+		"",
+		[]returnItem{{expr: "t"}, {expr: "count(c)", alias: "n"}},
+		[]returnItem{{expr: "t.name", alias: "name"}, {expr: "n"}},
+		"",
+	)
+	require.NoError(t, err)
+	require.ElementsMatch(t, [][]interface{}{{"T1", int64(1)}, {"T2", int64(0)}}, result.Rows)
+}
+
 // TestMatchOptionalMatchWithCase tests OPTIONAL MATCH with CASE WHEN
 func TestMatchOptionalMatchWithCase(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)

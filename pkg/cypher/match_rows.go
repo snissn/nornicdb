@@ -172,18 +172,45 @@ func splitArithmeticExpression(expr string) []string {
 // This is for filtering after WITH aggregation (like SQL HAVING).
 func (e *StorageExecutor) evaluateWithWhereCondition(ctx context.Context, whereClause string, values map[string]interface{}) bool {
 	upperClause := strings.ToUpper(whereClause)
+	resolveValue := func(expr string) (interface{}, bool) {
+		expr = strings.TrimSpace(expr)
+		if val, exists := values[expr]; exists {
+			return val, true
+		}
+		if dotIdx := strings.Index(expr, "."); dotIdx > 0 {
+			varName := strings.TrimSpace(expr[:dotIdx])
+			propName := strings.TrimSpace(expr[dotIdx+1:])
+			if val, exists := values[varName]; exists {
+				switch v := val.(type) {
+				case *storage.Node:
+					if v == nil {
+						return nil, true
+					}
+					propVal, ok := v.Properties[propName]
+					return propVal, ok
+				case *storage.Edge:
+					if v == nil {
+						return nil, true
+					}
+					propVal, ok := v.Properties[propName]
+					return propVal, ok
+				}
+			}
+		}
+		return e.parseValue(ctx, expr), false
+	}
 
 	// Handle IS NULL / IS NOT NULL
 	if strings.Contains(upperClause, " IS NOT NULL") {
 		idx := strings.Index(upperClause, " IS NOT NULL")
 		varName := strings.TrimSpace(whereClause[:idx])
-		val, exists := values[varName]
+		val, exists := resolveValue(varName)
 		return exists && val != nil
 	}
 	if strings.Contains(upperClause, " IS NULL") {
 		idx := strings.Index(upperClause, " IS NULL")
 		varName := strings.TrimSpace(whereClause[:idx])
-		val, exists := values[varName]
+		val, exists := resolveValue(varName)
 		return !exists || val == nil
 	}
 
@@ -194,14 +221,8 @@ func (e *StorageExecutor) evaluateWithWhereCondition(ctx context.Context, whereC
 			left := strings.TrimSpace(whereClause[:idx])
 			right := strings.TrimSpace(whereClause[idx+len(op):])
 
-			leftVal, exists := values[left]
-			if !exists {
-				leftVal = e.parseValue(ctx, left)
-			}
-			rightVal, exists := values[right]
-			if !exists {
-				rightVal = e.parseValue(ctx, right)
-			}
+			leftVal, _ := resolveValue(left)
+			rightVal, _ := resolveValue(right)
 
 			switch op {
 			case "=":

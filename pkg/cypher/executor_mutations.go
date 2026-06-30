@@ -2751,6 +2751,26 @@ func (e *StorageExecutor) evaluateRelationshipPatternInWhere(node *storage.Node,
 		return e.checkChainedPattern(node, variable, pattern, "")
 	}
 	_ = e.extractTargetVariable(pattern, variable) // not needed for simple (var)-[]->() pattern
+	relPattern := e.parseOptionalRelPattern(context.Background(), pattern)
+	targetMatches := func(targetNodeID storage.NodeID) bool {
+		if len(relPattern.targetLabels) == 0 && len(relPattern.targetProps) == 0 {
+			return true
+		}
+		targetNode, err := e.storage.GetNode(targetNodeID)
+		if err != nil || targetNode == nil {
+			return false
+		}
+		if len(relPattern.targetLabels) > 0 && !mergeNodeHasLabels(targetNode, relPattern.targetLabels) {
+			return false
+		}
+		for key, expected := range relPattern.targetProps {
+			actual, ok := targetNode.Properties[key]
+			if !ok || !e.compareEqual(actual, expected) {
+				return false
+			}
+		}
+		return true
+	}
 	var checkIncoming, checkOutgoing bool
 	var relTypes []string
 	if strings.Contains(pattern, "<-[") {
@@ -2764,7 +2784,7 @@ func (e *StorageExecutor) evaluateRelationshipPatternInWhere(node *storage.Node,
 	if checkIncoming {
 		edges, _ := e.storage.GetIncomingEdges(node.ID)
 		for _, edge := range edges {
-			if len(relTypes) == 0 || e.edgeTypeMatches(edge.Type, relTypes) {
+			if (len(relTypes) == 0 || e.edgeTypeMatches(edge.Type, relTypes)) && targetMatches(edge.StartNode) {
 				return true
 			}
 		}
@@ -2772,7 +2792,7 @@ func (e *StorageExecutor) evaluateRelationshipPatternInWhere(node *storage.Node,
 	if checkOutgoing {
 		edges, _ := e.storage.GetOutgoingEdges(node.ID)
 		for _, edge := range edges {
-			if len(relTypes) == 0 || e.edgeTypeMatches(edge.Type, relTypes) {
+			if (len(relTypes) == 0 || e.edgeTypeMatches(edge.Type, relTypes)) && targetMatches(edge.EndNode) {
 				return true
 			}
 		}
