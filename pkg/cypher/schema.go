@@ -381,8 +381,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	} else if startsWithKeywordFold(strings.TrimSpace(cypher), "CREATE CONSTRAINT") &&
-		strings.Contains(strings.ToUpper(cypher), "REQUIRE MAX COUNT") &&
-		strings.Contains(err.Error(), "MAX COUNT must be a positive integer") {
+		strings.Contains(strings.ToUpper(cypher), "REQUIRE MAX COUNT") {
 		return nil, err
 	}
 

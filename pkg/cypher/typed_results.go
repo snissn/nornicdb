@@ -224,12 +224,6 @@ func assignValue(field reflect.Value, val interface{}) error {
 		return nil
 	}
 
-	// Type conversion
-	if valReflect.Type().ConvertibleTo(field.Type()) {
-		field.Set(valReflect.Convert(field.Type()))
-		return nil
-	}
-
 	// Handle numeric conversions
 	switch field.Kind() {
 	case reflect.String:
@@ -259,6 +253,12 @@ func assignValue(field reflect.Value, val interface{}) error {
 			field.Set(newSlice)
 			return nil
 		}
+	}
+
+	// Type conversion
+	if valReflect.Type().ConvertibleTo(field.Type()) {
+		field.Set(valReflect.Convert(field.Type()))
+		return nil
 	}
 
 	return fmt.Errorf("cannot assign %T to %v", val, field.Type())

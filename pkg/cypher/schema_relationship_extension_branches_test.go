@@ -93,5 +93,5 @@ func TestCreateConstraint_RelationshipCardinalityInvalidCount(t *testing.T) {
 
 	_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT bad_in IF NOT EXISTS FOR ()<-[r:KNOWS]-() REQUIRE MAX COUNT -1")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid CREATE CONSTRAINT syntax")
+	require.Contains(t, err.Error(), "invalid cardinality require clause")
 }

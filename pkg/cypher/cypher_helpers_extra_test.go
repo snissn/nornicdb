@@ -2137,7 +2137,7 @@ func TestCypherHelpers_TypedResultDecodeAndAssignBranches(t *testing.T) {
 	var s string
 	err = assignValue(reflect.ValueOf(&s).Elem(), 123)
 	require.NoError(t, err)
-	assert.Equal(t, "{", s)
+	assert.Equal(t, "123", s)
 	err = assignValue(reflect.ValueOf(&s).Elem(), struct{ V int }{V: 9})
 	require.NoError(t, err)
 	assert.Contains(t, s, "9")

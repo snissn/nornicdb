@@ -1900,6 +1900,9 @@ func (e *StorageExecutor) compileCallTailValueComparisonPredicate(clause string)
 		if idx <= 0 {
 			continue
 		}
+		if op == "=" && idx+1 < len(clause) && clause[idx+1] == '~' {
+			continue
+		}
 		left, okLeft := e.compileCallTailValueResolver(clause[:idx])
 		right, okRight := e.compileCallTailValueResolver(clause[idx+len(op):])
 		if !okLeft || !okRight {

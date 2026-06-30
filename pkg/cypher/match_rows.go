@@ -645,11 +645,8 @@ func (e *StorageExecutor) executeMatchUnwind(ctx context.Context, cypher string)
 		// Find WHERE and RETURN boundaries
 		postWhereStart := asIdx + 4 + postWhereIdx + 7
 		postWhereEnd := len(unwindPart)
-		if returnIdx > unwindIdx {
-			relativeReturnIdx := returnIdx - unwindIdx - 6
-			if relativeReturnIdx > 0 && relativeReturnIdx < postWhereEnd {
-				postWhereEnd = relativeReturnIdx
-			}
+		if relativeReturnIdx := findKeywordIndex(unwindPart, "RETURN"); relativeReturnIdx > 0 && relativeReturnIdx < postWhereEnd {
+			postWhereEnd = relativeReturnIdx
 		}
 		postUnwindWhere = strings.TrimSpace(unwindPart[postWhereStart:postWhereEnd])
 	}

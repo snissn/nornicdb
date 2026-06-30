@@ -2209,7 +2209,8 @@ func TestMatchMultiAndUnwindBranchCoverage(t *testing.T) {
 	unwindRes, err := exec.executeMatchUnwind(ctx, "MATCH (n:Person) UNWIND n.items AS item WHERE item <> 'y' RETURN item ORDER BY item DESC SKIP 1 LIMIT 2")
 	require.NoError(t, err)
 	require.Len(t, unwindRes.Rows, 2)
-	assert.Equal(t, "y", unwindRes.Rows[0][0])
+	assert.Equal(t, "x", unwindRes.Rows[0][0])
+	assert.Equal(t, "x", unwindRes.Rows[1][0])
 
 	aggUnwindRes, err := exec.executeMatchUnwind(ctx, "MATCH (n:Person {name:'alice'}) UNWIND n.items AS item RETURN count(*) AS c, collect(item) AS allItems")
 	require.NoError(t, err)
