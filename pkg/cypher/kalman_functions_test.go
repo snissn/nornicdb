@@ -274,6 +274,44 @@ func TestKalmanAdaptiveProcess_SwitchesToVelocityOnTrend(t *testing.T) {
 	}
 }
 
+func TestKalmanAdaptiveProcess_SwitchesBackToBasicWhenStable(t *testing.T) {
+	stateJSON := kalmanAdaptiveInit(map[string]interface{}{
+		"initialMode":        "velocity",
+		"hysteresis":         float64(1),
+		"stabilityThreshold": float64(100),
+	})
+
+	var state KalmanAdaptiveState
+	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
+		t.Fatalf("Failed to parse state JSON: %v", err)
+	}
+	state.Mode = "velocity"
+	state.SinceSwitch = state.Hysteresis
+	state.Velocity.Pos = 10
+	state.Velocity.Vel = 0
+	state.TrendScore = 0
+
+	b, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	result := kalmanAdaptiveProcess(10, string(b))
+	if result["mode"] != "basic" {
+		t.Fatalf("expected stable velocity state to switch to basic mode, got %v", result["mode"])
+	}
+
+	if err := json.Unmarshal([]byte(result["state"].(string)), &state); err != nil {
+		t.Fatalf("result state should be valid JSON: %v", err)
+	}
+	if state.Mode != "basic" {
+		t.Fatalf("expected serialized state mode basic, got %s", state.Mode)
+	}
+	if state.SinceSwitch != 0 {
+		t.Fatalf("expected switch counter reset, got %d", state.SinceSwitch)
+	}
+}
+
 func TestKalmanReset_Basic(t *testing.T) {
 	stateJSON := kalmanInit(nil)
 

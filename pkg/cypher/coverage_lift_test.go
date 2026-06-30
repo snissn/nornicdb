@@ -431,10 +431,25 @@ func TestCoverageLiftTypedAssignmentAndKeywordScanHelpers(t *testing.T) {
 		var parsed time.Time
 		require.NoError(t, assignValue(reflect.ValueOf(&parsed).Elem(), "2025-01-02T03:04:05Z"))
 		assert.Equal(t, time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC), parsed)
+		require.NoError(t, assignValue(reflect.ValueOf(&parsed).Elem(), nil))
+		assert.Equal(t, time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC), parsed)
+
+		var directTime time.Time
+		expectedTime := time.Date(2025, 6, 30, 12, 0, 0, 0, time.UTC)
+		require.NoError(t, assignValue(reflect.ValueOf(&directTime).Elem(), expectedTime))
+		assert.Equal(t, expectedTime, directTime)
+
+		var spacedTime time.Time
+		require.NoError(t, assignValue(reflect.ValueOf(&spacedTime).Elem(), "2025-01-02 03:04:05"))
+		assert.Equal(t, time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC), spacedTime)
 
 		var unix time.Time
 		require.NoError(t, assignValue(reflect.ValueOf(&unix).Elem(), int64(10)))
 		assert.Equal(t, time.Unix(10, 0), unix)
+
+		var direct string
+		require.NoError(t, assignValue(reflect.ValueOf(&direct).Elem(), "Ada"))
+		assert.Equal(t, "Ada", direct)
 
 		var text string
 		require.NoError(t, assignValue(reflect.ValueOf(&text).Elem(), int64(42)))
@@ -456,6 +471,7 @@ func TestCoverageLiftTypedAssignmentAndKeywordScanHelpers(t *testing.T) {
 
 	t.Run("keyword scanner skips comments and quoted regions", func(t *testing.T) {
 		opts := defaultKeywordScanOpts()
+		opts.SkipBraces = true
 		query := "MATCH (n) // RETURN ignored\nWITH n /* RETURN ignored */ RETURN n"
 		assert.Equal(t, strings.LastIndex(query, "RETURN"), keywordIndexFrom(query, "RETURN", 0, opts))
 		assert.Equal(t, strings.Index(query, "WITH"), keywordIndexFrom(query, "WITH", -5, opts))
@@ -465,6 +481,78 @@ func TestCoverageLiftTypedAssignmentAndKeywordScanHelpers(t *testing.T) {
 		assert.Equal(t, strings.LastIndex(quoted, "RETURN"), keywordIndexFrom(quoted, "RETURN", 0, opts))
 		assert.Equal(t, -1, keywordIndexFrom("RETURN", "   ", 0, opts))
 	})
+}
+
+func TestCoverageLiftApplySetToNodeMapAndDynamicLabels(t *testing.T) {
+	exec := NewStorageExecutor(newTestMemoryEngine(t))
+	node := &storage.Node{Labels: []string{"Base"}, Properties: map[string]interface{}{"old": "value"}}
+	ctx := context.WithValue(context.Background(), paramsKey, map[string]interface{}{
+		"props": map[string]interface{}{"name": "Ada", "age": int64(37)},
+		"payload": map[string]interface{}{
+			"replacement": map[string]interface{}{"name": "Grace", "active": true},
+		},
+		"labels": []interface{}{"Engineer", "Base", "MATCH", "bad-label", "Analyst"},
+	})
+
+	exec.applySetToNode(ctx, node, "n", "n = $props")
+	assert.Equal(t, map[string]interface{}{"name": "Ada", "age": int64(37)}, node.Properties)
+	node.Properties["name"] = "mutated"
+	assert.Equal(t, "Ada", getParamsFromContext(ctx)["props"].(map[string]interface{})["name"])
+
+	exec.applySetToNode(ctx, node, "n", "n = $payload.replacement")
+	assert.Equal(t, map[string]interface{}{"name": "Grace", "active": true}, node.Properties)
+
+	exec.applySetToNode(ctx, node, "n", "n:$($labels), n:Reviewer, n:Reviewer, ignored = true, n")
+	assert.ElementsMatch(t, []string{"Base", "Engineer", "MATCH", "Analyst", "Reviewer"}, node.Labels)
+	assert.NotContains(t, node.Labels, "bad-label")
+
+	exec.applySetToNode(ctx, node, "n", "n += $props")
+	assert.Equal(t, "Ada", node.Properties["name"])
+	assert.Equal(t, int64(37), node.Properties["age"])
+}
+
+func TestCoverageLiftShortestPathAndShellParserHelpers(t *testing.T) {
+	funcName, inner, idx, ok := extractShortestPathCall("MATCH p = shortestPath( (a)-[:KNOWS*]->(b) ) RETURN p")
+	require.True(t, ok)
+	assert.Equal(t, "shortestPath", funcName)
+	assert.Equal(t, "(a)-[:KNOWS*]->(b)", inner)
+	assert.Greater(t, idx, 0)
+	assert.Equal(t, "p", extractShortestPathPathVariable("MATCH p = shortestPath((a)-->(b)) RETURN p", idx))
+
+	funcName, inner, idx, ok = extractShortestPathCall("MATCH p = allShortestPaths((a)-[*]->(b)) RETURN p")
+	require.True(t, ok)
+	assert.Equal(t, "allShortestPaths", funcName)
+	assert.Equal(t, "(a)-[*]->(b)", inner)
+	assert.Equal(t, "p", extractShortestPathPathVariable("MATCH p = allShortestPaths((a)-[*]->(b)) RETURN p", idx))
+
+	funcName, inner, idx, ok = extractShortestPathCall("MATCH (n) RETURN notshortestPath(n)")
+	assert.False(t, ok)
+	assert.Empty(t, funcName)
+	assert.Empty(t, inner)
+	assert.Equal(t, -1, idx)
+
+	funcName, inner, idx, ok = extractShortestPathCall("MATCH p = shortestPath((a)-->(b) RETURN p")
+	assert.False(t, ok)
+	assert.Equal(t, "shortestPath", funcName)
+	assert.Empty(t, inner)
+	assert.Greater(t, idx, 0)
+	assert.Empty(t, extractShortestPathPathVariable("MATCH (a) RETURN shortestPath((a)-->(b))", idx))
+	previousQuery := "MATCH (a) RETURN 1 MATCH p = shortestPath((a)-->(b)) RETURN p"
+	_, _, previousIdx, ok := extractShortestPathCall(previousQuery)
+	require.True(t, ok)
+	assert.Equal(t, "(a) RETURN 1", extractPreviousMatchClause(previousQuery, previousIdx))
+
+	command, consumed, ok := consumeShellMapCommand(":params {name: 'Ada // not comment', note: \"brace } inside\", nested: {x: 1 /* ok */}};\nMATCH (n) RETURN n")
+	require.True(t, ok)
+	assert.Equal(t, ":params {name: 'Ada // not comment', note: \"brace } inside\", nested: {x: 1 /* ok */}}", command)
+	assert.Equal(t, strings.Index(command+";\nMATCH (n) RETURN n", "MATCH"), consumed)
+
+	command, rest, ok := nextShellCommand(" :params {name: 'Ada'}\nMATCH (n) RETURN n")
+	require.True(t, ok)
+	assert.Equal(t, ":params {name: 'Ada'}", command)
+	assert.Equal(t, "MATCH (n) RETURN n", strings.TrimSpace(rest))
+	_, _, ok = consumeShellMapCommand(":params {name: 'Ada'")
+	assert.False(t, ok)
 }
 
 func TestCoverageLiftCallTailParsersAndMaps(t *testing.T) {
