@@ -76,3 +76,45 @@ func TestResolveBindAddress(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveCLIStorageBackendAndDataDir(t *testing.T) {
+	t.Run("memory backend clears implicit default data dir", func(t *testing.T) {
+		cmd := &cobra.Command{Use: "test"}
+		cmd.Flags().String("data-dir", "./data", "")
+		cmd.Flags().String("storage-backend", config.StorageBackendMemory, "")
+		if err := cmd.Flags().Set("storage-backend", config.StorageBackendMemory); err != nil {
+			t.Fatalf("set storage backend: %v", err)
+		}
+
+		backend, dataDir, err := resolveCLIStorageBackendAndDataDir(cmd, config.StorageBackendBadger, config.StorageBackendMemory, "./data")
+		if err != nil {
+			t.Fatalf("resolve storage backend: %v", err)
+		}
+		if backend != config.StorageBackendMemory {
+			t.Fatalf("expected memory backend, got %q", backend)
+		}
+		if dataDir != "" {
+			t.Fatalf("expected implicit data dir to clear for memory mode, got %q", dataDir)
+		}
+	})
+
+	t.Run("memory backend preserves explicit data dir", func(t *testing.T) {
+		cmd := &cobra.Command{Use: "test"}
+		cmd.Flags().String("data-dir", "./data", "")
+		cmd.Flags().String("storage-backend", config.StorageBackendMemory, "")
+		if err := cmd.Flags().Set("data-dir", "/var/lib/nornicdb"); err != nil {
+			t.Fatalf("set data dir: %v", err)
+		}
+
+		backend, dataDir, err := resolveCLIStorageBackendAndDataDir(cmd, config.StorageBackendMemory, config.StorageBackendMemory, "/var/lib/nornicdb")
+		if err != nil {
+			t.Fatalf("resolve storage backend: %v", err)
+		}
+		if backend != config.StorageBackendMemory {
+			t.Fatalf("expected memory backend, got %q", backend)
+		}
+		if dataDir != "/var/lib/nornicdb" {
+			t.Fatalf("expected explicit data dir to be preserved, got %q", dataDir)
+		}
+	})
+}

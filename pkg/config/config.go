@@ -194,6 +194,10 @@ type AuthConfig struct {
 type DatabaseConfig struct {
 	// DataDir is the directory for data storage
 	DataDir string
+	// StorageBackend selects the physical storage backend.
+	// Supported: "badger", "treedb", "memory".
+	// Env: NORNICDB_STORAGE_BACKEND
+	StorageBackend string
 	// DefaultDatabase name
 	DefaultDatabase string
 	// ReadOnly mode
@@ -1242,6 +1246,9 @@ func (c *Config) Validate() error {
 	if c.Memory.EmbeddingDimensions <= 0 {
 		return fmt.Errorf("invalid embedding dimensions: %d", c.Memory.EmbeddingDimensions)
 	}
+	if err := ValidateStorageBackend(c.Database.StorageBackend); err != nil {
+		return err
+	}
 
 	providerMode := strings.ToLower(strings.TrimSpace(c.Database.EncryptionProvider))
 	if providerMode == "" {
@@ -1356,6 +1363,7 @@ type YAMLConfig struct {
 	// Database/Storage configuration
 	Database struct {
 		DataDir                           string `yaml:"data_dir"`
+		StorageBackend                    string `yaml:"storage_backend"`
 		DefaultDatabase                   string `yaml:"default_database"`
 		ReadOnly                          bool   `yaml:"read_only"`
 		TransactionTimeout                string `yaml:"transaction_timeout"`
@@ -1426,7 +1434,8 @@ type YAMLConfig struct {
 
 	// Storage alias for database
 	Storage struct {
-		Path string `yaml:"path"`
+		Path    string `yaml:"path"`
+		Backend string `yaml:"backend"`
 		// BytesMetricInterval is the cadence for the Plan 04-04 D-07
 		// bytes_metrics_sweeper lifecycle.Component. Default 30s when
 		// zero/unset. Configurable for tests + ops who want denser or
@@ -1695,6 +1704,7 @@ func LoadDefaults() *Config {
 
 	// Database defaults
 	config.Database.DataDir = "./data"
+	config.Database.StorageBackend = StorageBackendBadger
 	config.Database.DefaultDatabase = "nornic" // Default database name (like Neo4j's "neo4j")
 	config.Database.ReadOnly = false
 	config.Database.TransactionTimeout = 30 * time.Second
@@ -1970,6 +1980,9 @@ func applyEnvVars(config *Config) error {
 		config.Database.DataDir = v
 	} else if v := getEnv("NEO4J_dbms_directories_data", ""); v != "" {
 		config.Database.DataDir = v
+	}
+	if v := getEnv("NORNICDB_STORAGE_BACKEND", ""); v != "" {
+		config.Database.StorageBackend = NormalizeStorageBackend(v)
 	}
 	if v := getEnv("NORNICDB_DEFAULT_DATABASE", ""); v != "" {
 		config.Database.DefaultDatabase = v
@@ -2869,8 +2882,14 @@ func LoadFromFile(configPath string) (*Config, error) {
 	if yamlCfg.Storage.Path != "" {
 		config.Database.DataDir = yamlCfg.Storage.Path
 	}
+	if yamlCfg.Storage.Backend != "" {
+		config.Database.StorageBackend = NormalizeStorageBackend(yamlCfg.Storage.Backend)
+	}
 	if yamlCfg.Database.DataDir != "" {
 		config.Database.DataDir = yamlCfg.Database.DataDir
+	}
+	if yamlCfg.Database.StorageBackend != "" {
+		config.Database.StorageBackend = NormalizeStorageBackend(yamlCfg.Database.StorageBackend)
 	}
 	if yamlCfg.Database.DefaultDatabase != "" {
 		config.Database.DefaultDatabase = yamlCfg.Database.DefaultDatabase
