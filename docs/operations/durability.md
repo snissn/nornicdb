@@ -145,10 +145,10 @@ storage backend:
 
 | Setting | Applies to | Value | Effect |
 |---------|-----------|-------|--------|
-| WAL Sync Mode | All backends | `immediate` | fsync every write |
+| WAL Sync Mode | Badger/legacy-WAL backends only | `immediate` | fsync every write |
 | SyncWrites | Badger backend only | `true` | Sync Badger's underlying storage |
 | SyncWrites | TreeDB backend only | `true` | Use TreeDB's synchronous commit path |
-| AsyncEngine Flush | All backends | `10ms` | More frequent cache flushes |
+| AsyncEngine Flush | Non-TreeDB backends | `10ms` | More frequent cache flushes; TreeDB disables async writes |
 
 ### When to Use Strict Mode
 
@@ -179,7 +179,9 @@ maintenance `Sync()` path.
 TreeDB is not wrapped in NornicDB's legacy `WALEngine`. The `NORNICDB_WAL_*`
 retention and compaction settings below apply to the NornicDB WAL path used by
 Badger-era deployments; they do not create raft replay records for TreeDB.
-TreeDB command-WAL profiles and non-standalone cluster modes currently fail
+TreeDB also bypasses the legacy async engine path, so async flush interval
+settings do not change TreeDB commit behavior. TreeDB command-WAL profiles and
+non-standalone cluster modes currently fail
 closed with explicit `ErrNotImplemented` errors. Until the separate
 WAL/replication integration lane lands, TreeDB should be treated as locally
 durable after close/reopen, not as a raft-replicated or externally replayable
