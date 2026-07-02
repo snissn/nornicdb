@@ -60,6 +60,23 @@ func TestNamespacedEngineBeginGraphTransactionAcceptsUserIDs(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestNamespacedGraphTransactionRejectsNilMutations(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	namespaced := NewNamespacedEngine(engine, "tenant")
+	tx, err := namespaced.BeginGraphTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	_, err = tx.CreateNode(nil)
+	require.ErrorIs(t, err, ErrInvalidData)
+	require.ErrorIs(t, tx.UpdateNode(nil), ErrInvalidData)
+	require.ErrorIs(t, tx.CreateEdge(nil), ErrInvalidData)
+	require.ErrorIs(t, tx.UpdateEdge(nil), ErrInvalidData)
+	require.ErrorIs(t, tx.BulkCreateEdges([]*Edge{nil}), ErrInvalidData)
+}
+
 func TestNamespacedGraphTransactionGetFirstNodeByLabelFiltersNamespace(t *testing.T) {
 	engine := NewMemoryEngine()
 	defer engine.Close()

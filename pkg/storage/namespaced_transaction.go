@@ -48,6 +48,9 @@ func (t *namespacedGraphTransaction) GetMetadata() map[string]interface{} {
 }
 
 func (t *namespacedGraphTransaction) CreateNode(node *Node) (NodeID, error) {
+	if node == nil {
+		return "", ErrInvalidData
+	}
 	namespaced := copyNode(node)
 	namespaced.ID = t.namespace.prefixNodeID(node.ID)
 	actualID, err := t.tx.CreateNode(namespaced)
@@ -58,6 +61,9 @@ func (t *namespacedGraphTransaction) CreateNode(node *Node) (NodeID, error) {
 }
 
 func (t *namespacedGraphTransaction) UpdateNode(node *Node) error {
+	if node == nil {
+		return ErrInvalidData
+	}
 	namespaced := copyNode(node)
 	namespaced.ID = t.namespace.prefixNodeID(node.ID)
 	return t.tx.UpdateNode(namespaced)
@@ -68,6 +74,9 @@ func (t *namespacedGraphTransaction) DeleteNode(id NodeID) error {
 }
 
 func (t *namespacedGraphTransaction) CreateEdge(edge *Edge) error {
+	if edge == nil {
+		return ErrInvalidData
+	}
 	namespaced := copyEdge(edge)
 	namespaced.ID = t.namespace.prefixEdgeID(edge.ID)
 	namespaced.StartNode = t.namespace.prefixNodeID(edge.StartNode)
@@ -76,6 +85,9 @@ func (t *namespacedGraphTransaction) CreateEdge(edge *Edge) error {
 }
 
 func (t *namespacedGraphTransaction) UpdateEdge(edge *Edge) error {
+	if edge == nil {
+		return ErrInvalidData
+	}
 	namespaced := copyEdge(edge)
 	namespaced.ID = t.namespace.prefixEdgeID(edge.ID)
 	namespaced.StartNode = t.namespace.prefixNodeID(edge.StartNode)
@@ -90,6 +102,9 @@ func (t *namespacedGraphTransaction) DeleteEdge(id EdgeID) error {
 func (t *namespacedGraphTransaction) BulkCreateEdges(edges []*Edge) error {
 	namespaced := make([]*Edge, 0, len(edges))
 	for _, edge := range edges {
+		if edge == nil {
+			return ErrInvalidData
+		}
 		next := copyEdge(edge)
 		next.ID = t.namespace.prefixEdgeID(edge.ID)
 		next.StartNode = t.namespace.prefixNodeID(edge.StartNode)
