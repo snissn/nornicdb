@@ -681,6 +681,9 @@ func (t *TreeDBTransaction) GetNode(id NodeID) (*Node, error) {
 	if id == "" {
 		return nil, ErrInvalidID
 	}
+	if t.namespace != "" && !t.nodeInPinnedNamespace(id) {
+		return nil, fmt.Errorf("%w: attempted to read node %q from pinned namespace %q", ErrCrossNamespaceTransaction, id, t.namespace)
+	}
 	if _, deleted := t.deletedNodes[id]; deleted {
 		return nil, ErrNotFound
 	}
@@ -704,6 +707,9 @@ func (t *TreeDBTransaction) GetEdge(id EdgeID) (*Edge, error) {
 	}
 	if id == "" {
 		return nil, ErrInvalidID
+	}
+	if t.namespace != "" && !t.edgeInPinnedNamespace(id) {
+		return nil, fmt.Errorf("%w: attempted to read edge %q from pinned namespace %q", ErrCrossNamespaceTransaction, id, t.namespace)
 	}
 	if _, deleted := t.deletedEdges[id]; deleted {
 		return nil, ErrNotFound

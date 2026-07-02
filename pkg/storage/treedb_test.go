@@ -428,6 +428,81 @@ func TestTreeDBTransaction_NamespacedLabelScanIgnoresForeignNamespaceConflicts(t
 	require.NoError(t, tx.Commit())
 }
 
+func TestTreeDBEngine_NamespacedDirectGetUnprefixesIDs(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	tenant := NewNamespacedEngine(engine, "tenant_a")
+
+	_, err := tenant.CreateNode(&Node{
+		ID:         "user",
+		Labels:     []string{"User"},
+		Properties: map[string]any{"name": "Alice"},
+	})
+	require.NoError(t, err)
+	_, err = tenant.CreateNode(&Node{ID: "other", Labels: []string{"User"}})
+	require.NoError(t, err)
+	require.NoError(t, tenant.CreateEdge(&Edge{
+		ID:         "rel",
+		StartNode:  "user",
+		EndNode:    "other",
+		Type:       "KNOWS",
+		Properties: map[string]any{"since": int64(2024)},
+	}))
+
+	node, err := tenant.GetNode("user")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("user"), node.ID)
+	require.Equal(t, "Alice", node.Properties["name"])
+
+	prefixedNode, err := tenant.GetNode("tenant_a:user")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("user"), prefixedNode.ID)
+
+	edge, err := tenant.GetEdge("rel")
+	require.NoError(t, err)
+	require.Equal(t, EdgeID("rel"), edge.ID)
+	require.Equal(t, NodeID("user"), edge.StartNode)
+	require.Equal(t, NodeID("other"), edge.EndNode)
+
+	prefixedEdge, err := tenant.GetEdge("tenant_a:rel")
+	require.NoError(t, err)
+	require.Equal(t, EdgeID("rel"), prefixedEdge.ID)
+	require.Equal(t, NodeID("user"), prefixedEdge.StartNode)
+	require.Equal(t, NodeID("other"), prefixedEdge.EndNode)
+}
+
+func TestTreeDBTransaction_SetNamespaceRejectsCrossNamespacePointReads(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	tenantA := NewNamespacedEngine(engine, "tenant_a")
+	tenantB := NewNamespacedEngine(engine, "tenant_b")
+
+	_, err := tenantA.CreateNode(&Node{ID: "a-user", Labels: []string{"User"}})
+	require.NoError(t, err)
+	_, err = tenantB.CreateNode(&Node{ID: "b-user", Labels: []string{"User"}})
+	require.NoError(t, err)
+	require.NoError(t, tenantB.CreateEdge(&Edge{
+		ID:        "b-rel",
+		StartNode: "b-user",
+		EndNode:   "b-user",
+		Type:      "SELF",
+	}))
+
+	tx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("tenant_a"))
+
+	node, err := tx.GetNode("tenant_a:a-user")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("tenant_a:a-user"), node.ID)
+
+	_, err = tx.GetNode("tenant_b:b-user")
+	require.ErrorIs(t, err, ErrCrossNamespaceTransaction)
+
+	edge, err := tx.GetEdge("tenant_b:b-rel")
+	require.ErrorIs(t, err, ErrCrossNamespaceTransaction)
+	require.Nil(t, edge)
+}
+
 func TestTreeDBTransaction_LabelScanPhantomConflictsOnCommit(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 
