@@ -155,6 +155,48 @@ func TestUndoDeleteNode(t *testing.T) {
 	}
 }
 
+func TestUndoDeleteNodeRestoresCascadedEdges(t *testing.T) {
+	base := NewMemoryEngine()
+	defer base.Close()
+	engine := NewNamespacedEngine(base, "test")
+
+	oldNode := &Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}}
+	otherNode := &Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}}
+	oldEdge := &Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS", Properties: map[string]interface{}{"since": "2024"}}
+
+	_, err := engine.CreateNode(oldNode)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(otherNode)
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(oldEdge))
+
+	data, err := json.Marshal(WALDeleteData{ID: "n1", OldNode: oldNode, OldEdges: []*Edge{oldEdge}})
+	require.NoError(t, err)
+	entry := WALEntry{
+		Sequence:  3,
+		Operation: OpDeleteNode,
+		Data:      data,
+		Checksum:  crc32Checksum(data),
+		Database:  "test",
+	}
+
+	require.NoError(t, ReplayWALEntry(engine, entry))
+	_, err = engine.GetNode("n1")
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = engine.GetEdge("e1")
+	require.ErrorIs(t, err, ErrNotFound)
+
+	require.NoError(t, UndoWALEntry(engine, entry))
+	node, err := engine.GetNode("n1")
+	require.NoError(t, err)
+	require.Equal(t, "Alice", node.Properties["name"])
+	edge, err := engine.GetEdge("e1")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("n1"), edge.StartNode)
+	require.Equal(t, NodeID("n2"), edge.EndNode)
+	require.Equal(t, "2024", edge.Properties["since"])
+}
+
 // TestUndoWithoutBeforeImage verifies error on missing undo data.
 func TestUndoWithoutBeforeImage(t *testing.T) {
 	base := NewMemoryEngine()

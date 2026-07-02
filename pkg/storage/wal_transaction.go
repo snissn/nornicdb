@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -83,14 +84,32 @@ func (t *walGraphTransaction) UpdateNode(node *Node) error {
 }
 
 func (t *walGraphTransaction) DeleteNode(id NodeID) error {
+	if !t.walEnabled() {
+		return t.tx.DeleteNode(id)
+	}
+
+	dbName, unprefixedID := t.walEngine.databaseFromNodeID(id)
 	oldNode, oldErr := t.tx.GetNode(id)
+	if oldErr != nil && !errors.Is(oldErr, ErrNotFound) {
+		return oldErr
+	}
+
+	var oldEdges []*Edge
+	if oldErr == nil {
+		var err error
+		oldEdges, err = t.oldEdgesForNodeDelete(dbName, id)
+		if err != nil {
+			return err
+		}
+	}
+
 	if err := t.tx.DeleteNode(id); err != nil {
 		return err
 	}
-	dbName, unprefixedID := t.walEngine.databaseFromNodeID(id)
 	data := WALDeleteData{ID: unprefixedID, TxID: t.TransactionID()}
 	if oldErr == nil {
 		data.OldNode = cloneNodeForWAL(dbName, oldNode)
+		data.OldEdges = oldEdges
 	}
 	t.record(OpDeleteNode, data, dbName)
 	return nil
@@ -293,6 +312,44 @@ func (t *walGraphTransaction) databaseForEntries(entries []walGraphTransactionEn
 		dbName = t.walEngine.getDatabaseName()
 	}
 	return dbName, nil
+}
+
+func (t *walGraphTransaction) oldEdgesForNodeDelete(dbName string, id NodeID) ([]*Edge, error) {
+	outgoing, err := t.tx.GetOutgoingEdges(id)
+	if err != nil {
+		return nil, err
+	}
+	incoming, err := t.tx.GetIncomingEdges(id)
+	if err != nil {
+		return nil, err
+	}
+	if len(outgoing) == 0 && len(incoming) == 0 {
+		return nil, nil
+	}
+
+	seen := make(map[EdgeID]struct{}, len(outgoing)+len(incoming))
+	edges := make([]*Edge, 0, len(outgoing)+len(incoming))
+	for _, edge := range outgoing {
+		if edge == nil {
+			continue
+		}
+		if _, ok := seen[edge.ID]; ok {
+			continue
+		}
+		seen[edge.ID] = struct{}{}
+		edges = append(edges, cloneEdgeForWAL(dbName, edge))
+	}
+	for _, edge := range incoming {
+		if edge == nil {
+			continue
+		}
+		if _, ok := seen[edge.ID]; ok {
+			continue
+		}
+		seen[edge.ID] = struct{}{}
+		edges = append(edges, cloneEdgeForWAL(dbName, edge))
+	}
+	return edges, nil
 }
 
 var _ GraphTransaction = (*walGraphTransaction)(nil)

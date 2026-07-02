@@ -170,10 +170,11 @@ type WALEdgeData struct {
 // WALDeleteData holds delete operation data with undo support.
 // For proper undo, we store the complete entity being deleted.
 type WALDeleteData struct {
-	ID      string `json:"id"`
-	OldNode *Node  `json:"old_node,omitempty"` // Complete node being deleted (undo)
-	OldEdge *Edge  `json:"old_edge,omitempty"` // Complete edge being deleted (undo)
-	TxID    string `json:"tx_id,omitempty"`    // Transaction ID for grouping
+	ID       string  `json:"id"`
+	OldNode  *Node   `json:"old_node,omitempty"`  // Complete node being deleted (undo)
+	OldEdge  *Edge   `json:"old_edge,omitempty"`  // Complete edge being deleted (undo)
+	OldEdges []*Edge `json:"old_edges,omitempty"` // Edges cascaded by node delete (undo)
+	TxID     string  `json:"tx_id,omitempty"`     // Transaction ID for grouping
 }
 
 // WALBulkNodesData holds bulk node creation data.
@@ -2149,7 +2150,7 @@ func UndoWALEntry(engine Engine, entry WALEntry) error {
 		return namespacedEngine.UpdateNode(data.OldNode)
 
 	case OpDeleteNode:
-		// Undo delete = recreate old node
+		// Undo delete = recreate old node and any edges cascaded by the delete.
 		var data WALDeleteData
 		if err := json.Unmarshal(entry.Data, &data); err != nil {
 			return fmt.Errorf("wal: failed to unmarshal delete for undo: %w", err)
@@ -2157,8 +2158,18 @@ func UndoWALEntry(engine Engine, entry WALEntry) error {
 		if data.OldNode == nil {
 			return ErrNoUndoData
 		}
-		_, err := namespacedEngine.CreateNode(data.OldNode)
-		return err
+		if _, err := namespacedEngine.CreateNode(data.OldNode); err != nil && !errors.Is(err, ErrAlreadyExists) {
+			return err
+		}
+		for _, edge := range data.OldEdges {
+			if edge == nil {
+				continue
+			}
+			if err := namespacedEngine.CreateEdge(edge); err != nil && !errors.Is(err, ErrAlreadyExists) {
+				return err
+			}
+		}
+		return nil
 
 	case OpCreateEdge:
 		// Undo create = delete

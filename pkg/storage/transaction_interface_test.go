@@ -170,3 +170,51 @@ func TestWALEngineBeginGraphTransactionSkipsWALWhenDisabled(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, entries)
 }
+
+func TestWALEngineBeginGraphTransactionDeleteNodeRecordsCascadedEdges(t *testing.T) {
+	config.EnableWAL()
+	t.Cleanup(config.DisableWAL)
+
+	base := NewMemoryEngine()
+	defer base.Close()
+
+	_, err := base.CreateNode(&Node{ID: "tenant:n1", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	_, err = base.CreateNode(&Node{ID: "tenant:n2", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	require.NoError(t, base.CreateEdge(&Edge{
+		ID:        "tenant:e1",
+		StartNode: "tenant:n1",
+		EndNode:   "tenant:n2",
+		Type:      "KNOWS",
+	}))
+
+	wal, err := NewWAL(t.TempDir(), DefaultWALConfig())
+	require.NoError(t, err)
+	walEngine := NewWALEngine(base, wal)
+	defer wal.Close()
+
+	tx, err := walEngine.BeginGraphTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("tenant"))
+
+	require.NoError(t, tx.DeleteNode("tenant:n1"))
+
+	walTx, ok := tx.(*walGraphTransaction)
+	require.True(t, ok)
+	entries := walTx.snapshotEntries()
+	require.Len(t, entries, 1)
+	require.Equal(t, OpDeleteNode, entries[0].op)
+	require.Equal(t, "tenant", entries[0].database)
+
+	data, ok := entries[0].data.(WALDeleteData)
+	require.True(t, ok)
+	require.Equal(t, "n1", data.ID)
+	require.NotNil(t, data.OldNode)
+	require.Equal(t, NodeID("n1"), data.OldNode.ID)
+	require.Len(t, data.OldEdges, 1)
+	require.Equal(t, EdgeID("e1"), data.OldEdges[0].ID)
+	require.Equal(t, NodeID("n1"), data.OldEdges[0].StartNode)
+	require.Equal(t, NodeID("n2"), data.OldEdges[0].EndNode)
+}
