@@ -136,6 +136,48 @@ func TestTreeDBTransaction_CommitDeletedBodiesDoNotRemainCached(t *testing.T) {
 	require.False(t, cachedEdge)
 }
 
+func TestTreeDBTransaction_CreateEdgeEndpointFastPathHonorsPendingAndDeletedNodes(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+	_, err = tx.CreateNode(&Node{ID: "test:pending-a", Labels: []string{"Doc"}})
+	require.NoError(t, err)
+	_, err = tx.CreateNode(&Node{ID: "test:pending-b", Labels: []string{"Doc"}})
+	require.NoError(t, err)
+	require.NoError(t, tx.CreateEdge(&Edge{
+		ID:        "test:pending-edge",
+		StartNode: "test:pending-a",
+		EndNode:   "test:pending-b",
+		Type:      "LINKS",
+	}))
+	require.NoError(t, tx.Commit())
+
+	edge, err := engine.GetEdge("test:pending-edge")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("test:pending-a"), edge.StartNode)
+	require.Equal(t, NodeID("test:pending-b"), edge.EndNode)
+
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:deleted-a", Labels: []string{"Doc"}},
+		{ID: "test:deleted-b", Labels: []string{"Doc"}},
+	}))
+	rawDelete, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	deleteTx := rawDelete.(*TreeDBTransaction)
+	defer deleteTx.Rollback()
+	require.NoError(t, deleteTx.DeleteNode("test:deleted-a"))
+	err = deleteTx.CreateEdge(&Edge{
+		ID:        "test:deleted-edge",
+		StartNode: "test:deleted-a",
+		EndNode:   "test:deleted-b",
+		Type:      "LINKS",
+	})
+	require.ErrorIs(t, err, ErrInvalidEdge)
+}
+
 func TestNamespacedTreeDBEngine_DirectFastPathStripsNamespaceAndReturnsCopies(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	namespaced := NewNamespacedEngine(engine, "tenant")

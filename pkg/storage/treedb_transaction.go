@@ -524,14 +524,10 @@ func (t *TreeDBTransaction) CreateEdge(edge *Edge) error {
 	if exists {
 		return ErrAlreadyExists
 	}
-	if _, err := t.GetNode(edge.StartNode); errors.Is(err, ErrNotFound) {
-		return ErrInvalidEdge
-	} else if err != nil {
+	if err := t.requireEdgeEndpointExists(edge.StartNode); err != nil {
 		return err
 	}
-	if _, err := t.GetNode(edge.EndNode); errors.Is(err, ErrNotFound) {
-		return ErrInvalidEdge
-	} else if err != nil {
+	if err := t.requireEdgeEndpointExists(edge.EndNode); err != nil {
 		return err
 	}
 	next := copyEdge(edge)
@@ -574,14 +570,10 @@ func (t *TreeDBTransaction) UpdateEdge(edge *Edge) error {
 	if err != nil {
 		return err
 	}
-	if _, err := t.GetNode(edge.StartNode); errors.Is(err, ErrNotFound) {
-		return ErrInvalidEdge
-	} else if err != nil {
+	if err := t.requireEdgeEndpointExists(edge.StartNode); err != nil {
 		return err
 	}
-	if _, err := t.GetNode(edge.EndNode); errors.Is(err, ErrNotFound) {
-		return ErrInvalidEdge
-	} else if err != nil {
+	if err := t.requireEdgeEndpointExists(edge.EndNode); err != nil {
 		return err
 	}
 	next := copyEdge(edge)
@@ -612,6 +604,7 @@ func (t *TreeDBTransaction) DeleteEdge(id EdgeID) error {
 }
 
 func (t *TreeDBTransaction) BulkCreateEdges(edges []*Edge) error {
+	t.reserveEdgeCreateBatch(edges)
 	for _, edge := range edges {
 		if err := t.CreateEdge(edge); err != nil {
 			return err
@@ -674,6 +667,34 @@ func (t *TreeDBTransaction) GetNode(id NodeID) (*Node, error) {
 		return nil, err
 	}
 	return node, nil
+}
+
+func (t *TreeDBTransaction) requireEdgeEndpointExists(id NodeID) error {
+	exists, err := t.nodeExistsForEdgeEndpoint(id)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrInvalidEdge
+	}
+	return nil
+}
+
+func (t *TreeDBTransaction) nodeExistsForEdgeEndpoint(id NodeID) (bool, error) {
+	if id == "" {
+		return false, ErrInvalidEdge
+	}
+	if t.namespace != "" && !t.nodeInPinnedNamespace(id) {
+		return false, fmt.Errorf("%w: attempted to read node %q from pinned namespace %q", ErrCrossNamespaceTransaction, id, t.namespace)
+	}
+	if _, deleted := t.deletedNodes[id]; deleted {
+		return false, nil
+	}
+	if node, ok := t.pendingNodes[id]; ok && node != nil {
+		return true, nil
+	}
+	exists, err := t.tx.Has(nodeKey(id))
+	return exists, mapTreeDBError(err)
 }
 
 func (t *TreeDBTransaction) GetEdge(id EdgeID) (*Edge, error) {
@@ -1262,9 +1283,75 @@ func (t *TreeDBTransaction) reserveHeld(extra int) {
 	if cap(t.held) >= needed {
 		return
 	}
-	next := make([][]byte, len(t.held), needed)
+	t.growHeld(needed)
+}
+
+func (t *TreeDBTransaction) growHeld(needed int) {
+	nextCap := cap(t.held)
+	if nextCap == 0 {
+		nextCap = needed
+	}
+	for nextCap < needed {
+		if nextCap < 1024 {
+			nextCap *= 2
+		} else {
+			nextCap += nextCap / 2
+		}
+	}
+	next := make([][]byte, len(t.held), nextCap)
 	copy(next, t.held)
 	t.held = next
+}
+
+func (t *TreeDBTransaction) reserveNodeCreateBatch(nodes []*Node) {
+	if len(nodes) == 0 {
+		return
+	}
+	writes := 0
+	held := 0
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		nodeWrites := 2 + len(node.Labels)
+		if t.engine.shouldIndexPendingEmbed(node) {
+			nodeWrites++
+		}
+		writes += nodeWrites
+		held += nodeWrites * 2
+	}
+	if writes > 0 {
+		t.tx.ReserveWrites(writes)
+		t.reserveHeld(held)
+	}
+}
+
+func (t *TreeDBTransaction) reserveEdgeCreateBatch(edges []*Edge) {
+	if len(edges) == 0 {
+		return
+	}
+	writes := 0
+	for _, edge := range edges {
+		if edge == nil {
+			continue
+		}
+		writes += treeDBEdgeCreateWriteCount(edge)
+	}
+	if writes > 0 {
+		t.tx.ReserveWrites(writes)
+		t.reserveHeld(writes * 2)
+	}
+}
+
+func treeDBEdgeCreateWriteCount(edge *Edge) int {
+	if edge == nil {
+		return 0
+	}
+	writes := 1 + 5 + 2
+	if edge.StartNode != edge.EndNode {
+		writes++
+	}
+	return writes
 }
 
 func (t *TreeDBTransaction) setKey(key, value []byte) error {
