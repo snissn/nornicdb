@@ -1312,6 +1312,131 @@ func TestTreeDBEngine_EventCallbacks(t *testing.T) {
 	assert.Equal(t, int32(1), edgeDeleted.Load())
 }
 
+func TestTreeDBEngine_NodeEventCallbackMutationDoesNotAffectCache(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+
+	engine.OnNodeCreated(func(node *Node) {
+		node.Labels[0] = "CallbackMutated"
+		node.Properties["name"] = "callback-created"
+		node.Properties["callbackOnly"] = true
+	})
+	engine.OnNodeUpdated(func(node *Node) {
+		node.Labels[0] = "CallbackUpdated"
+		node.Properties["name"] = "callback-updated"
+		node.Properties["callbackOnly"] = true
+	})
+
+	createInput := &Node{
+		ID:         "test:event-cache",
+		Labels:     []string{"Created"},
+		Properties: map[string]any{"name": "stored"},
+	}
+	_, err := engine.CreateNode(createInput)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Created"}, createInput.Labels)
+	require.Equal(t, "stored", createInput.Properties["name"])
+	require.NotContains(t, createInput.Properties, "callbackOnly")
+
+	created, err := engine.GetNode("test:event-cache")
+	require.NoError(t, err)
+	require.Equal(t, []string{"Created"}, created.Labels)
+	require.Equal(t, "stored", created.Properties["name"])
+	require.NotContains(t, created.Properties, "callbackOnly")
+
+	updateInput := &Node{
+		ID:         "test:event-cache",
+		Labels:     []string{"Updated"},
+		Properties: map[string]any{"name": "updated"},
+		CreatedAt:  created.CreatedAt,
+	}
+	require.NoError(t, engine.UpdateNode(updateInput))
+	require.Equal(t, []string{"Updated"}, updateInput.Labels)
+	require.Equal(t, "updated", updateInput.Properties["name"])
+	require.NotContains(t, updateInput.Properties, "callbackOnly")
+
+	updated, err := engine.GetNode("test:event-cache")
+	require.NoError(t, err)
+	require.Equal(t, []string{"Updated"}, updated.Labels)
+	require.Equal(t, "updated", updated.Properties["name"])
+	require.NotContains(t, updated.Properties, "callbackOnly")
+}
+
+func TestTreeDBEngine_EdgeEventCallbackMutationDoesNotAffectCache(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:event-edge-a", Labels: []string{"Event"}},
+		{ID: "test:event-edge-b", Labels: []string{"Event"}},
+	}))
+
+	engine.OnEdgeCreated(func(edge *Edge) {
+		edge.Type = "CALLBACK_CREATED"
+		edge.Properties["name"] = "callback-created"
+		edge.Properties["callbackOnly"] = true
+	})
+	engine.OnEdgeUpdated(func(edge *Edge) {
+		edge.Type = "CALLBACK_UPDATED"
+		edge.Properties["name"] = "callback-updated"
+		edge.Properties["callbackOnly"] = true
+	})
+
+	createInput := &Edge{
+		ID:         "test:event-edge",
+		StartNode:  "test:event-edge-a",
+		EndNode:    "test:event-edge-b",
+		Type:       "CREATED",
+		Properties: map[string]any{"name": "stored"},
+	}
+	require.NoError(t, engine.CreateEdge(createInput))
+	require.Equal(t, "CREATED", createInput.Type)
+	require.Equal(t, "stored", createInput.Properties["name"])
+	require.NotContains(t, createInput.Properties, "callbackOnly")
+
+	created, err := engine.GetEdge("test:event-edge")
+	require.NoError(t, err)
+	require.Equal(t, "CREATED", created.Type)
+	require.Equal(t, "stored", created.Properties["name"])
+	require.NotContains(t, created.Properties, "callbackOnly")
+
+	updateInput := &Edge{
+		ID:         "test:event-edge",
+		StartNode:  "test:event-edge-a",
+		EndNode:    "test:event-edge-b",
+		Type:       "UPDATED",
+		Properties: map[string]any{"name": "updated"},
+		CreatedAt:  created.CreatedAt,
+	}
+	require.NoError(t, engine.UpdateEdge(updateInput))
+	require.Equal(t, "UPDATED", updateInput.Type)
+	require.Equal(t, "updated", updateInput.Properties["name"])
+	require.NotContains(t, updateInput.Properties, "callbackOnly")
+
+	updated, err := engine.GetEdge("test:event-edge")
+	require.NoError(t, err)
+	require.Equal(t, "UPDATED", updated.Type)
+	require.Equal(t, "updated", updated.Properties["name"])
+	require.NotContains(t, updated.Properties, "callbackOnly")
+}
+
+func TestTreeDBEngine_NoSchemaWritesDoNotCreateSchemaManager(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:no-schema-a", Labels: []string{"NoSchema"}, Properties: map[string]any{"name": "a"}},
+		{ID: "test:no-schema-b", Labels: []string{"NoSchema"}, Properties: map[string]any{"name": "b"}},
+	}))
+	require.NoError(t, engine.CreateEdge(&Edge{
+		ID:        "test:no-schema-edge",
+		StartNode: "test:no-schema-a",
+		EndNode:   "test:no-schema-b",
+		Type:      "NO_SCHEMA",
+	}))
+
+	engine.schemaMu.RLock()
+	_, created := engine.schemas["test"]
+	engine.schemaMu.RUnlock()
+	require.False(t, created)
+}
+
 func TestTreeDBEngine_SchemaPersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 	engine, err := NewTreeDBEngineWithOptions(TreeDBOptions{Dir: dir})

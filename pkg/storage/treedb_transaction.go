@@ -40,14 +40,12 @@ type TreeDBTransaction struct {
 	createdNodeIDs map[NodeID]struct{}
 	originalNodes  map[NodeID]*Node
 
-	createdNodes      []*Node
-	oldUpdatedNodes   []*Node
-	updatedNodes      []*Node
-	deletedNodeIDs    []NodeID
-	deletedNodeCopies []*Node
-	createdEdges      []*Edge
-	updatedEdges      []*Edge
-	deletedEdgeIDs    []EdgeID
+	createdNodes   []*Node
+	updatedNodes   []*Node
+	deletedNodeIDs []NodeID
+	createdEdges   []*Edge
+	updatedEdges   []*Edge
+	deletedEdgeIDs []EdgeID
 
 	nodeDelta        int64
 	edgeDelta        int64
@@ -393,7 +391,7 @@ func (t *TreeDBTransaction) CreateNode(node *Node) (NodeID, error) {
 	t.opCount++
 	t.nodeDelta++
 	t.addPrefixDelta(&t.nodePrefixDeltas, string(next.ID), 1)
-	t.createdNodes = append(t.createdNodes, copyNode(next))
+	t.createdNodes = append(t.createdNodes, next)
 	return next.ID, nil
 }
 
@@ -431,8 +429,7 @@ func (t *TreeDBTransaction) UpdateNode(node *Node) error {
 		return err
 	}
 	t.opCount++
-	t.oldUpdatedNodes = append(t.oldUpdatedNodes, copyNode(oldNode))
-	t.updatedNodes = append(t.updatedNodes, copyNode(next))
+	t.updatedNodes = append(t.updatedNodes, next)
 	return nil
 }
 
@@ -497,7 +494,6 @@ func (t *TreeDBTransaction) DeleteNode(id NodeID) error {
 	t.nodeDelta--
 	t.addPrefixDelta(&t.nodePrefixDeltas, string(id), -1)
 	t.deletedNodeIDs = append(t.deletedNodeIDs, id)
-	t.deletedNodeCopies = append(t.deletedNodeCopies, copyNode(node))
 	return nil
 }
 
@@ -549,7 +545,7 @@ func (t *TreeDBTransaction) CreateEdge(edge *Edge) error {
 	t.opCount++
 	t.edgeDelta++
 	t.addPrefixDelta(&t.edgePrefixDeltas, string(next.ID), 1)
-	t.createdEdges = append(t.createdEdges, copyEdge(next))
+	t.createdEdges = append(t.createdEdges, next)
 	return nil
 }
 
@@ -592,7 +588,7 @@ func (t *TreeDBTransaction) UpdateEdge(edge *Edge) error {
 		return err
 	}
 	t.opCount++
-	t.updatedEdges = append(t.updatedEdges, copyEdge(next))
+	t.updatedEdges = append(t.updatedEdges, next)
 	return nil
 }
 
@@ -1426,7 +1422,7 @@ func (t *TreeDBTransaction) validateNodeConstraints(node *Node) error {
 	if err != nil {
 		return err
 	}
-	schema := t.engine.GetSchemaForNamespace(ns)
+	schema := t.engine.lookupSchemaForNamespace(ns)
 	if schema == nil {
 		return nil
 	}
@@ -1549,7 +1545,7 @@ func (t *TreeDBTransaction) validateEdgeConstraints(edge *Edge) error {
 	if edge == nil || edge.Type == "" || t.namespace == "" {
 		return nil
 	}
-	schema := t.engine.GetSchemaForNamespace(t.namespace)
+	schema := t.engine.lookupSchemaForNamespace(t.namespace)
 	if schema == nil {
 		return nil
 	}
@@ -1573,7 +1569,7 @@ func (t *TreeDBTransaction) validateEdgeConstraints(edge *Edge) error {
 
 func (t *TreeDBTransaction) validatePendingConstraints() error {
 	if t.namespace != "" {
-		schema := t.engine.GetSchemaForNamespace(t.namespace)
+		schema := t.engine.lookupSchemaForNamespace(t.namespace)
 		if schema == nil || !treeDBSchemaHasValidationState(schema) {
 			return nil
 		}
@@ -1607,11 +1603,21 @@ func treeDBSchemaHasValidationState(schema *SchemaManager) bool {
 	return hasState
 }
 
+func treeDBSchemaHasMaintenanceState(schema *SchemaManager) bool {
+	if schema == nil {
+		return false
+	}
+	schema.mu.RLock()
+	hasState := len(schema.uniqueConstraints) > 0 || len(schema.propertyIndexes) > 0 || len(schema.compositeIndexes) > 0
+	schema.mu.RUnlock()
+	return hasState
+}
+
 func (t *TreeDBTransaction) acquireUniqueConstraintCommitLocks() func() {
 	if len(t.pendingNodes) == 0 || t.namespace == "" {
 		return func() {}
 	}
-	schema := t.engine.GetSchemaForNamespace(t.namespace)
+	schema := t.engine.lookupSchemaForNamespace(t.namespace)
 	if schema == nil {
 		return func() {}
 	}
@@ -1651,6 +1657,13 @@ func (t *TreeDBTransaction) acquireUniqueConstraintCommitLocks() func() {
 }
 
 func (t *TreeDBTransaction) applySchemaState() {
+	if len(t.pendingNodes) == 0 && len(t.originalNodes) == 0 && len(t.deletedNodes) == 0 {
+		return
+	}
+	if !treeDBSchemaHasMaintenanceState(t.engine.lookupSchemaForNamespace(t.namespace)) {
+		return
+	}
+
 	affected := make(map[NodeID]struct{}, len(t.originalNodes)+len(t.pendingNodes)+len(t.deletedNodes))
 	for id := range t.originalNodes {
 		affected[id] = struct{}{}
@@ -1687,7 +1700,7 @@ func (t *TreeDBTransaction) unregisterNodeSchemaValues(node *Node) {
 	if err != nil {
 		return
 	}
-	schema := t.engine.GetSchemaForNamespace(ns)
+	schema := t.engine.lookupSchemaForNamespace(ns)
 	if schema == nil {
 		return
 	}
@@ -1714,7 +1727,7 @@ func (t *TreeDBTransaction) registerNodeSchemaValues(node *Node) {
 	if err != nil {
 		return
 	}
-	schema := t.engine.GetSchemaForNamespace(ns)
+	schema := t.engine.lookupSchemaForNamespace(ns)
 	if schema == nil {
 		return
 	}

@@ -632,6 +632,19 @@ func (e *TreeDBEngine) GetSchemaForNamespace(namespace string) *SchemaManager {
 	return sm
 }
 
+func (e *TreeDBEngine) lookupSchemaForNamespace(namespace string) *SchemaManager {
+	if e == nil {
+		return nil
+	}
+	if namespace == "" {
+		namespace = "nornic"
+	}
+	e.schemaMu.RLock()
+	sm := e.schemas[namespace]
+	e.schemaMu.RUnlock()
+	return sm
+}
+
 func (e *TreeDBEngine) loadPersistedSchemas() error {
 	if err := e.ensureOpen(); err != nil {
 		return err
