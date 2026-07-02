@@ -7,17 +7,73 @@ PRs compare against the same Badger evidence instead of using one-off commands.
 ## Canonical Command
 
 ```bash
-BENCH_COUNT=10 scripts/benchmark_storage_backends.sh
+TMPDIR=/mnt/fast4tb/tmp \
+GOWORK=off \
+GOMODCACHE=/mnt/fast4tb/tmp/gomod \
+GOCACHE=/mnt/fast4tb/tmp/gocache \
+GOPATH=/mnt/fast4tb/tmp/go \
+CGO_ENABLED=0 \
+BENCH_COUNT=10 \
+scripts/benchmark_storage_backends.sh
 ```
 
-The script writes `context.txt`, `storage.txt`, and `cypher.txt` under
-`benchmarks/storage-backends/<timestamp>/`. By default it uses:
+The script writes these artifacts under
+`benchmarks/storage-backends/<timestamp>/`:
+
+- `context.txt`: git, Go, CPU, environment, timeout, count, and regex context.
+- `gates.txt`: TreeDB and Badger regression budgets.
+- `storage.txt`: raw `go test ./pkg/storage -bench` output.
+- `cypher.txt`: raw `go test ./pkg/cypher -bench` output.
+- `summary.tsv`: compact report with benchmark name, `ns/op`, derived
+  ops/sec, `B/op`, `allocs/op`, and `MB/s` when Go reports it.
+
+By default it uses:
 
 - `GOWORK=off`, so unrelated local workspaces do not affect the run.
 - `CGO_ENABLED=0`, so storage benchmarks do not require local llama.cpp
   libraries. CI still hydrates llama libraries for full builds.
-- `/mnt/fast4tb/tmp` as `TMPDIR` when present, to keep temporary benchmark data
-  off small root-backed filesystems.
+- `/mnt/fast4tb/tmp` as `TMPDIR`, `GOMODCACHE`, `GOCACHE`, and `GOPATH` when
+  present, to keep temporary benchmark data and Go caches off small
+  root-backed filesystems.
+
+For smoke runs, keep the same matrix but shorten the timer:
+
+```bash
+TMPDIR=/mnt/fast4tb/tmp GOWORK=off GOMODCACHE=/mnt/fast4tb/tmp/gomod \
+GOCACHE=/mnt/fast4tb/tmp/gocache GOPATH=/mnt/fast4tb/tmp/go CGO_ENABLED=0 \
+BENCH_COUNT=1 BENCHTIME=1x scripts/benchmark_storage_backends.sh
+```
+
+## Default Matrix
+
+The default storage regex keeps the existing Badger/WAL regression gates and
+adds persistent Badger, TreeDB wrapper, namespaced TreeDB, and direct TreeDB
+equivalent rows:
+
+| Backend surface | Benchmark families |
+| --- | --- |
+| Existing Badger gates | `BenchmarkBadgerEngine_*`, `BenchmarkTransaction_*`, `BenchmarkWAL_*`, `BenchmarkWALEngine_CreateNode` |
+| Persistent Badger direct | `BenchmarkPersistentBadgerEngine_*` |
+| Persistent Badger namespaced/server-chain | `BenchmarkNamespacedPersistentBadgerEngine_*` |
+| TreeDB wrapper | `BenchmarkTreeDBEngine_*` |
+| TreeDB namespaced/server-chain | `BenchmarkNamespacedTreeDBEngine_*` |
+| Direct TreeDB equivalent | `BenchmarkDirectTreeDB_Graph*Equivalent` |
+
+The default storage workloads include node create/get, bulk node create, edge
+create, bulk edge create, transaction create, label lookup, batch get, and
+outgoing adjacency reads where the backend surface supports the operation.
+
+The default Cypher regex keeps the previous memory-backed query-shape gates and
+adds `BenchmarkBackendCypherMatrix`, which runs the same representative Cypher
+workloads against persistent namespaced Badger and persistent namespaced
+TreeDB:
+
+| Cypher workload | Shape |
+| --- | --- |
+| `BareCreateBatch100` | `UNWIND` plus `CREATE` for 100 property nodes |
+| `LabelCountRead256` | `MATCH (n:BenchNode) RETURN count(n)` |
+| `RelationshipCount255` | `MATCH ()-[r:BENCH_LINK]->() RETURN count(r)` |
+| `ShortestPath64` | bounded `shortestPath` traversal over a 64-node chain |
 
 ## Required Comparison
 
@@ -47,6 +103,61 @@ TreeDB-specific gates begin once the TreeDB engine exists:
 - bulk/batch writes: >=85% of direct equivalent TreeDB throughput;
 - hot-path allocation overhead: <=2 allocs/op over direct equivalent TreeDB
   operations, or a profiled blocker must be linked before closeout.
+
+Use throughput from `summary.tsv` for TreeDB direct-equivalent ratios:
+
+- primitive persisted writes: `TreeDBEngine_CreateNode` and
+  `NamespacedTreeDBEngine_CreateNode` versus
+  `DirectTreeDB_GraphCreateNodeEquivalent`;
+- bulk writes: `TreeDBEngine_BulkCreateNodes`,
+  `NamespacedTreeDBEngine_BulkCreateNodes`,
+  `TreeDBEngine_BulkCreateEdges`, and
+  `NamespacedTreeDBEngine_BulkCreateEdges` versus their direct equivalents;
+- allocation overhead: compare `allocs/op` for wrapper/namespaced rows against
+  the closest `DirectTreeDB_Graph*Equivalent` row.
+
+Use `benchstat` on raw `storage.txt` and `cypher.txt` files for Badger
+candidate-vs-baseline comparisons. The target is <=3% runtime regression, no
+new steady-state alloc/op, and <=5% B/op unless the PR documents why the
+increase is required.
+
+## Focused Reviewer Commands
+
+Storage matrix listing:
+
+```bash
+TMPDIR=/mnt/fast4tb/tmp GOWORK=off GOMODCACHE=/mnt/fast4tb/tmp/gomod \
+GOCACHE=/mnt/fast4tb/tmp/gocache GOPATH=/mnt/fast4tb/tmp/go CGO_ENABLED=0 \
+go test ./pkg/storage -run '^$' \
+  -list '^(BenchmarkPersistentBadgerEngine_|BenchmarkNamespacedPersistentBadgerEngine_|BenchmarkTreeDBEngine_|BenchmarkNamespacedTreeDBEngine_|BenchmarkDirectTreeDB_)'
+```
+
+Focused storage smoke:
+
+```bash
+TMPDIR=/mnt/fast4tb/tmp GOWORK=off GOMODCACHE=/mnt/fast4tb/tmp/gomod \
+GOCACHE=/mnt/fast4tb/tmp/gocache GOPATH=/mnt/fast4tb/tmp/go CGO_ENABLED=0 \
+go test ./pkg/storage -run '^$' \
+  -bench '^(BenchmarkPersistentBadgerEngine_|BenchmarkNamespacedPersistentBadgerEngine_|BenchmarkTreeDBEngine_|BenchmarkNamespacedTreeDBEngine_|BenchmarkDirectTreeDB_)' \
+  -benchmem -benchtime=1x -count=1 -timeout=30m
+```
+
+Focused Cypher smoke:
+
+```bash
+TMPDIR=/mnt/fast4tb/tmp GOWORK=off GOMODCACHE=/mnt/fast4tb/tmp/gomod \
+GOCACHE=/mnt/fast4tb/tmp/gocache GOPATH=/mnt/fast4tb/tmp/go CGO_ENABLED=0 \
+go test ./pkg/cypher -run '^$' -bench '^BenchmarkBackendCypherMatrix$' \
+  -benchmem -benchtime=1x -count=1 -timeout=30m
+```
+
+Full reviewer run:
+
+```bash
+TMPDIR=/mnt/fast4tb/tmp GOWORK=off GOMODCACHE=/mnt/fast4tb/tmp/gomod \
+GOCACHE=/mnt/fast4tb/tmp/gocache GOPATH=/mnt/fast4tb/tmp/go CGO_ENABLED=0 \
+BENCH_COUNT=10 scripts/benchmark_storage_backends.sh
+```
 
 ## TreeDB Substrate Target
 
