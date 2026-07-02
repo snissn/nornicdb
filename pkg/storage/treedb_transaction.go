@@ -1308,19 +1308,16 @@ func (t *TreeDBTransaction) validateNodeConstraints(node *Node) error {
 	if !treeDBSchemaHasValidationState(schema) {
 		return nil
 	}
-	for _, label := range node.Labels {
-		for propName, propValue := range node.Properties {
-			if err := schema.CheckUniqueConstraint(label, propName, propValue, node.ID); err != nil {
-				return err
-			}
-		}
-	}
 	for _, constraint := range schema.GetConstraintsForLabels(node.Labels) {
 		if constraint.EffectiveEntityType() != ConstraintEntityNode {
 			continue
 		}
 		switch constraint.Type {
-		case ConstraintUnique, ConstraintPropertyType:
+		case ConstraintUnique:
+			if err := t.validateNodeUniqueConstraint(node, schema, constraint, ns); err != nil {
+				return err
+			}
+		case ConstraintPropertyType:
 		case ConstraintExists, ConstraintNodeKey, ConstraintTemporal, ConstraintDomain, ConstraintCardinality, ConstraintPolicy, ConstraintRelationshipKey:
 			return fmt.Errorf("%w: treedb does not yet enforce %s node constraints", ErrNotImplemented, constraint.Type)
 		default:
@@ -1340,6 +1337,87 @@ func (t *TreeDBTransaction) validateNodeConstraints(node *Node) error {
 		}
 	}
 	return nil
+}
+
+func (t *TreeDBTransaction) validateNodeUniqueConstraint(node *Node, schema *SchemaManager, constraint Constraint, namespace string) error {
+	if node == nil || schema == nil || len(constraint.Properties) != 1 {
+		return nil
+	}
+	prop := constraint.Properties[0]
+	value, ok := node.Properties[prop]
+	if !ok || value == nil {
+		return nil
+	}
+	for id, pending := range t.pendingNodes {
+		if id == node.ID {
+			continue
+		}
+		if _, deleted := t.deletedNodes[id]; deleted {
+			continue
+		}
+		pendingValue, ok := pending.Properties[prop]
+		if !ok || pendingValue == nil {
+			continue
+		}
+		if treeDBLabelContains(pending.Labels, constraint.Label) && compareValues(pendingValue, value) {
+			return &ConstraintViolationError{
+				Type:       ConstraintUnique,
+				Label:      constraint.Label,
+				Properties: []string{prop},
+				Message:    fmt.Sprintf("Node with %s=%v already exists in transaction", prop, value),
+			}
+		}
+	}
+
+	existingNode, found, cacheComplete, constrained := schema.lookupUniqueConstraintValueForValidation(constraint.Label, prop, value)
+	if constrained {
+		if found && existingNode != node.ID {
+			if _, deleted := t.deletedNodes[existingNode]; !deleted {
+				return uniqueConstraintViolation(constraint.Label, prop, value, existingNode)
+			}
+		}
+		if cacheComplete {
+			return nil
+		}
+	}
+	return t.scanForUniqueViolation(namespace, constraint.Label, prop, value, node.ID)
+}
+
+func (t *TreeDBTransaction) scanForUniqueViolation(namespace, label, property string, value interface{}, excludeNodeID NodeID) error {
+	if hook := getUniqueConstraintScanHook(); hook != nil {
+		hook()
+	}
+	nodes, err := t.nodesByLabelForConstraintScan(label)
+	if err != nil {
+		return err
+	}
+	nsPrefix := namespace + ":"
+	for _, node := range nodes {
+		if node == nil || node.ID == "" || node.ID == excludeNodeID {
+			continue
+		}
+		if _, deleted := t.deletedNodes[node.ID]; deleted {
+			continue
+		}
+		if namespace != "" && !strings.HasPrefix(string(node.ID), nsPrefix) {
+			continue
+		}
+		if !treeDBLabelContains(node.Labels, label) {
+			continue
+		}
+		existingValue, ok := node.Properties[property]
+		if ok && compareValues(existingValue, value) {
+			return uniqueConstraintViolation(label, property, value, node.ID)
+		}
+	}
+	return nil
+}
+
+func (t *TreeDBTransaction) nodesByLabelForConstraintScan(label string) ([]*Node, error) {
+	if t.snapshot != nil {
+		return t.GetNodesByLabel(label)
+	}
+	return t.engine.GetNodesByLabel(label)
 }
 
 func (t *TreeDBTransaction) validateEdgeConstraints(edge *Edge) error {

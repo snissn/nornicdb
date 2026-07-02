@@ -869,6 +869,67 @@ func TestTreeDBTransaction_UniqueConstraintSerializesCommitWindow(t *testing.T) 
 	require.Contains(t, err.Error(), "same@example.com")
 }
 
+func TestTreeDBTransaction_UniqueConstraintScansExistingRowsWhenCacheIncomplete(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	_, err := engine.CreateNode(&Node{
+		ID:         "test:existing-unique",
+		Labels:     []string{"User"},
+		Properties: map[string]any{"email": "existing@example.com"},
+	})
+	require.NoError(t, err)
+
+	schema := engine.GetSchemaForNamespace("test")
+	require.NoError(t, schema.AddUniqueConstraint("unique_user_email", "User", "email"))
+	_, found, constrained, cacheComplete := schema.LookupUniqueConstraintValueForPlanning("User", "email", "existing@example.com")
+	require.True(t, constrained)
+	require.False(t, found)
+	require.False(t, cacheComplete)
+
+	_, err = engine.CreateNode(&Node{
+		ID:         "test:duplicate-unique",
+		Labels:     []string{"User"},
+		Properties: map[string]any{"email": "existing@example.com"},
+	})
+	require.Error(t, err)
+	var constraintErr *ConstraintViolationError
+	require.ErrorAs(t, err, &constraintErr)
+	require.Equal(t, ConstraintUnique, constraintErr.Type)
+	require.Contains(t, err.Error(), "existing@example.com")
+
+	_, err = engine.CreateNode(&Node{
+		ID:         "test:new-unique",
+		Labels:     []string{"User"},
+		Properties: map[string]any{"email": "new@example.com"},
+	})
+	require.NoError(t, err)
+}
+
+func TestTreeDBTransaction_UniqueConstraintRejectsPendingDuplicate(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.GetSchemaForNamespace("test").AddUniqueConstraint("unique_user_email", "User", "email"))
+
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+	_, err = tx.CreateNode(&Node{
+		ID:         "test:pending-unique-a",
+		Labels:     []string{"User"},
+		Properties: map[string]any{"email": "pending@example.com"},
+	})
+	require.NoError(t, err)
+	_, err = tx.CreateNode(&Node{
+		ID:         "test:pending-unique-b",
+		Labels:     []string{"User"},
+		Properties: map[string]any{"email": "pending@example.com"},
+	})
+	require.Error(t, err)
+	var constraintErr *ConstraintViolationError
+	require.ErrorAs(t, err, &constraintErr)
+	require.Equal(t, ConstraintUnique, constraintErr.Type)
+	require.Contains(t, err.Error(), "pending@example.com")
+}
+
 func TestTreeDBTransaction_UnsupportedConstraintsFailClosed(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	schema := engine.GetSchemaForNamespace("test")
