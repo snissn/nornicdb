@@ -44,7 +44,7 @@ jobs:
           echo "release_tag=${TARGET_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ steps.meta.outputs.checkout_ref }}
 
@@ -95,7 +95,7 @@ jobs:
             runner: macos-15-intel
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.build-macos-release-assets.outputs.checkout_ref }}
 
@@ -174,7 +174,7 @@ jobs:
 
       - name: Open Homebrew tap update PR
         if: ${{ vars.HOMEBREW_TAP_REPOSITORY != '' }}
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           repository: ${{ vars.HOMEBREW_TAP_REPOSITORY }}
