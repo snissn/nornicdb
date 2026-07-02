@@ -161,6 +161,20 @@ func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 	}, nil
 }
 
+// BeginGraphTransaction starts a backend-neutral graph transaction.
+func (b *BadgerEngine) BeginGraphTransaction() (GraphTransaction, error) {
+	return b.BeginTransaction()
+}
+
+// TransactionID returns the stable transaction identifier used by WAL markers
+// and observability.
+func (tx *BadgerTransaction) TransactionID() string {
+	if tx == nil {
+		return ""
+	}
+	return tx.ID
+}
+
 // refreshReadVersionForNamespaceLocked rebinds tx.readTS once the
 // transaction's namespace is known, registering the snapshot reader at
 // the namespace-specific version. Called from pinNamespaceFromIDLocked /

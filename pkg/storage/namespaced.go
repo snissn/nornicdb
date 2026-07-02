@@ -117,6 +117,29 @@ func (n *NamespacedEngine) GetInnerEngine() Engine {
 	return n.inner
 }
 
+// BeginGraphTransaction starts a transaction on the inner engine and pins it to
+// this namespace before returning it.
+func (n *NamespacedEngine) BeginGraphTransaction() (GraphTransaction, error) {
+	txEngine, ok := n.inner.(TransactionalEngine)
+	if !ok {
+		return nil, ErrNotImplemented
+	}
+	if primer, ok := n.inner.(namespaceMVCCPrimer); ok {
+		if err := primer.EnsureNamespaceMVCC(n.namespace); err != nil {
+			return nil, err
+		}
+	}
+	tx, err := txEngine.BeginGraphTransaction()
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.SetNamespace(n.namespace); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &namespacedGraphTransaction{namespace: n, tx: tx}, nil
+}
+
 // prefixNodeID adds namespace prefix to a node ID.
 // "123" → "tenant_a:123"
 func (n *NamespacedEngine) prefixNodeID(id NodeID) NodeID {

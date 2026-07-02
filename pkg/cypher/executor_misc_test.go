@@ -30,6 +30,10 @@ func (e *beginFailEngine) BeginTransaction() (*storage.BadgerTransaction, error)
 	return nil, errors.New("begin failed")
 }
 
+func (e *beginFailEngine) BeginGraphTransaction() (storage.GraphTransaction, error) {
+	return nil, errors.New("begin failed")
+}
+
 type nonTransactionalEngine struct {
 	storage.Engine
 }

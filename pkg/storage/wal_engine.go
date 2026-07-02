@@ -63,6 +63,24 @@ func (w *WALEngine) ListNamespaces() []string {
 	return nil
 }
 
+// BeginGraphTransaction delegates transaction creation to the wrapped engine.
+func (w *WALEngine) BeginGraphTransaction() (GraphTransaction, error) {
+	txEngine, ok := w.engine.(TransactionalEngine)
+	if !ok {
+		return nil, ErrNotImplemented
+	}
+	return txEngine.BeginGraphTransaction()
+}
+
+// EnsureNamespaceMVCC delegates namespace MVCC priming to the wrapped engine
+// when supported.
+func (w *WALEngine) EnsureNamespaceMVCC(namespace string) error {
+	if primer, ok := w.engine.(namespaceMVCCPrimer); ok {
+		return primer.EnsureNamespaceMVCC(namespace)
+	}
+	return nil
+}
+
 // IsCurrentTemporalNode delegates current-version checks to the wrapped engine when supported.
 func (w *WALEngine) IsCurrentTemporalNode(node *Node, asOf time.Time) (bool, error) {
 	if provider, ok := w.engine.(TemporalCurrentNodeEngine); ok {

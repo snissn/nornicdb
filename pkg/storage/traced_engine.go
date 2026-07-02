@@ -42,6 +42,31 @@ func (t *TracedEngine) getCtx() context.Context {
 // need access to the concrete engine, e.g. AsyncEngine).
 func (t *TracedEngine) Unwrap() Engine { return t.Engine }
 
+// GetInnerEngine returns the wrapped storage engine for generic unwrap loops.
+func (t *TracedEngine) GetInnerEngine() Engine { return t.Engine }
+
+// BeginGraphTransaction delegates transaction creation to the wrapped engine.
+func (t *TracedEngine) BeginGraphTransaction() (GraphTransaction, error) {
+	_, span := otel.Tracer("nornicdb/storage").Start(t.getCtx(), "nornicdb.storage.BeginGraphTransaction",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+	txEngine, ok := t.Engine.(TransactionalEngine)
+	if !ok {
+		return nil, ErrNotImplemented
+	}
+	return txEngine.BeginGraphTransaction()
+}
+
+// EnsureNamespaceMVCC delegates namespace MVCC priming to the wrapped engine
+// when supported.
+func (t *TracedEngine) EnsureNamespaceMVCC(namespace string) error {
+	if primer, ok := t.Engine.(namespaceMVCCPrimer); ok {
+		return primer.EnsureNamespaceMVCC(namespace)
+	}
+	return nil
+}
+
 // depositLink records the current span context on the inner AsyncEngine (if
 // present) so the flush span can link back to the originating request (TRC-23).
 func (t *TracedEngine) depositLink() {
