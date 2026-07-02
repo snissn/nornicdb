@@ -20,6 +20,52 @@ func newDirectTreeDBBenchDB(b *testing.B) *treedb.DB {
 	return db
 }
 
+type directTreeDBBenchTxn struct {
+	tx        *treedb.ConditionalTxn
+	heldViews [][]byte
+}
+
+func newDirectTreeDBBenchTxn(db *treedb.DB, readSet, writes int) (directTreeDBBenchTxn, error) {
+	tx, err := db.NewConditionalTxn()
+	if err != nil {
+		return directTreeDBBenchTxn{}, err
+	}
+	tx.ReserveReadSet(readSet)
+	tx.ReserveWrites(writes)
+	return directTreeDBBenchTxn{
+		tx:        tx,
+		heldViews: make([][]byte, 0, writes*2),
+	}, nil
+}
+
+func (d *directTreeDBBenchTxn) has(key []byte) (bool, error) {
+	return d.tx.Has(key)
+}
+
+func (d *directTreeDBBenchTxn) set(key, value []byte) error {
+	// SetView keeps caller-owned slices until Commit; keep generated views live and immutable.
+	d.heldViews = append(d.heldViews, key, value)
+	return d.tx.SetView(key, value)
+}
+
+func (d *directTreeDBBenchTxn) close() {
+	if d.tx != nil {
+		_ = d.tx.Close()
+		d.tx = nil
+	}
+}
+
+func (d *directTreeDBBenchTxn) commit() error {
+	err := d.tx.Commit()
+	_ = d.heldViews
+	if err != nil {
+		d.close()
+		return err
+	}
+	d.tx = nil
+	return nil
+}
+
 func BenchmarkPersistentBadgerEngine_CreateNode(b *testing.B) {
 	engine, err := NewBadgerEngineWithOptions(BadgerOptions{DataDir: b.TempDir()})
 	if err != nil {
@@ -79,25 +125,23 @@ func BenchmarkDirectTreeDB_GraphCreateNodeEquivalent(b *testing.B) {
 			Labels:     []string{"Benchmark"},
 			Properties: map[string]any{"index": i},
 		}
-		tx, err := db.NewConditionalTxn()
+		tx, err := newDirectTreeDBBenchTxn(db, 1, 3)
 		if err != nil {
 			b.Fatal(err)
 		}
-		tx.ReserveReadSet(1)
-		tx.ReserveWrites(3)
 
-		exists, err := tx.Has(nodeKey(id))
+		exists, err := tx.has(nodeKey(id))
 		if err != nil {
-			_ = tx.Close()
+			tx.close()
 			b.Fatal(err)
 		}
 		if exists {
-			_ = tx.Close()
+			tx.close()
 			b.Fatal("duplicate benchmark node")
 		}
 		data, err := serializeNode(node)
 		if err != nil {
-			_ = tx.Close()
+			tx.close()
 			b.Fatal(err)
 		}
 		bodyKey := nodeKey(id)
@@ -106,21 +150,21 @@ func BenchmarkDirectTreeDB_GraphCreateNodeEquivalent(b *testing.B) {
 		var guardValue [8]byte
 		binary.LittleEndian.PutUint64(guardValue[:], uint64(i+1))
 
-		held := make([][]byte, 0, 6)
-		set := func(key, value []byte) {
-			held = append(held, key, value)
-			if err := tx.SetView(key, value); err != nil {
-				_ = tx.Close()
-				b.Fatal(err)
-			}
-		}
-		set(bodyKey, data)
-		set(labelKey, treeDBEmptyValue)
-		set(guardKey, guardValue[:])
-		if err := tx.Commit(); err != nil {
+		if err := tx.set(bodyKey, data); err != nil {
+			tx.close()
 			b.Fatal(err)
 		}
-		_ = held
+		if err := tx.set(labelKey, treeDBEmptyValue); err != nil {
+			tx.close()
+			b.Fatal(err)
+		}
+		if err := tx.set(guardKey, guardValue[:]); err != nil {
+			tx.close()
+			b.Fatal(err)
+		}
+		if err := tx.commit(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -200,46 +244,44 @@ func BenchmarkDirectTreeDB_GraphBulkCreateNodesEquivalent(b *testing.B) {
 		nodes := treeDBBenchBulkNodes("bench:direct-bulk-n", i*treeDBBulkBenchSize, treeDBBulkBenchSize)
 		b.StartTimer()
 
-		tx, err := db.NewConditionalTxn()
+		tx, err := newDirectTreeDBBenchTxn(db, len(nodes), len(nodes)*3)
 		if err != nil {
 			b.Fatal(err)
-		}
-		tx.ReserveReadSet(len(nodes))
-		tx.ReserveWrites(len(nodes) * 3)
-		held := make([][]byte, 0, len(nodes)*6)
-		set := func(key, value []byte) {
-			held = append(held, key, value)
-			if err := tx.SetView(key, value); err != nil {
-				_ = tx.Close()
-				b.Fatal(err)
-			}
 		}
 		var guardValue [8]byte
 		binary.LittleEndian.PutUint64(guardValue[:], uint64(i+1))
 		guardKey := treeDBNodeNamespaceGuardKey("bench")
 		for _, node := range nodes {
-			exists, err := tx.Has(nodeKey(node.ID))
+			exists, err := tx.has(nodeKey(node.ID))
 			if err != nil {
-				_ = tx.Close()
+				tx.close()
 				b.Fatal(err)
 			}
 			if exists {
-				_ = tx.Close()
+				tx.close()
 				b.Fatal("duplicate benchmark node")
 			}
 			data, err := serializeNode(node)
 			if err != nil {
-				_ = tx.Close()
+				tx.close()
 				b.Fatal(err)
 			}
-			set(nodeKey(node.ID), data)
-			set(treeDBLabelIndexKey("Benchmark", node.ID), treeDBEmptyValue)
-			set(guardKey, guardValue[:])
+			if err := tx.set(nodeKey(node.ID), data); err != nil {
+				tx.close()
+				b.Fatal(err)
+			}
+			if err := tx.set(treeDBLabelIndexKey("Benchmark", node.ID), treeDBEmptyValue); err != nil {
+				tx.close()
+				b.Fatal(err)
+			}
+			if err := tx.set(guardKey, guardValue[:]); err != nil {
+				tx.close()
+				b.Fatal(err)
+			}
 		}
-		if err := tx.Commit(); err != nil {
+		if err := tx.commit(); err != nil {
 			b.Fatal(err)
 		}
-		_ = held
 	}
 }
 

@@ -998,12 +998,9 @@ func (e *TreeDBEngine) BulkCreateEdges(edges []*Edge) error {
 	if err != nil {
 		return err
 	}
-	tx.reserveEdgeCreateBatch(edges)
-	for _, edge := range edges {
-		if err := tx.CreateEdge(edge); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
+	if err := tx.BulkCreateEdges(edges); err != nil {
+		_ = tx.Rollback()
+		return err
 	}
 	return tx.Commit()
 }

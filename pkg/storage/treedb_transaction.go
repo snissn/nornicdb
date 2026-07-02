@@ -654,14 +654,15 @@ func (t *TreeDBTransaction) GetNode(id NodeID) (*Node, error) {
 	if id == "" {
 		return nil, ErrInvalidID
 	}
-	if t.namespace != "" && !t.nodeInPinnedNamespace(id) {
-		return nil, fmt.Errorf("%w: attempted to read node %q from pinned namespace %q", ErrCrossNamespaceTransaction, id, t.namespace)
+	visibility, err := t.nodeReadVisibility(id)
+	if err != nil {
+		return nil, err
 	}
-	if _, deleted := t.deletedNodes[id]; deleted {
+	if visibility.deleted {
 		return nil, ErrNotFound
 	}
-	if node, ok := t.pendingNodes[id]; ok {
-		return copyNode(node), nil
+	if visibility.pendingFound {
+		return copyNode(visibility.pending), nil
 	}
 	data, err := t.getVersionedAppendForRead(nodeKey(id))
 	if err != nil {
@@ -672,6 +673,25 @@ func (t *TreeDBTransaction) GetNode(id NodeID) (*Node, error) {
 		return nil, err
 	}
 	return node, nil
+}
+
+type treeDBNodeReadVisibility struct {
+	pending      *Node
+	pendingFound bool
+	deleted      bool
+}
+
+func (t *TreeDBTransaction) nodeReadVisibility(id NodeID) (treeDBNodeReadVisibility, error) {
+	if t.namespace != "" && !t.nodeInPinnedNamespace(id) {
+		return treeDBNodeReadVisibility{}, fmt.Errorf("%w: attempted to read node %q from pinned namespace %q", ErrCrossNamespaceTransaction, id, t.namespace)
+	}
+	if _, deleted := t.deletedNodes[id]; deleted {
+		return treeDBNodeReadVisibility{deleted: true}, nil
+	}
+	if node, ok := t.pendingNodes[id]; ok {
+		return treeDBNodeReadVisibility{pending: node, pendingFound: true}, nil
+	}
+	return treeDBNodeReadVisibility{}, nil
 }
 
 func (t *TreeDBTransaction) requireEdgeEndpointExists(id NodeID) error {
@@ -689,13 +709,14 @@ func (t *TreeDBTransaction) nodeExistsForEdgeEndpoint(id NodeID) (bool, error) {
 	if id == "" {
 		return false, ErrInvalidEdge
 	}
-	if t.namespace != "" && !t.nodeInPinnedNamespace(id) {
-		return false, fmt.Errorf("%w: attempted to read node %q from pinned namespace %q", ErrCrossNamespaceTransaction, id, t.namespace)
+	visibility, err := t.nodeReadVisibility(id)
+	if err != nil {
+		return false, err
 	}
-	if _, deleted := t.deletedNodes[id]; deleted {
+	if visibility.deleted {
 		return false, nil
 	}
-	if node, ok := t.pendingNodes[id]; ok && node != nil {
+	if visibility.pendingFound && visibility.pending != nil {
 		return true, nil
 	}
 	exists, err := t.tx.Has(nodeKey(id))
@@ -1318,9 +1339,9 @@ func (t *TreeDBTransaction) reserveNodeCreateBatch(nodes []*Node) {
 		if node == nil {
 			continue
 		}
-		nodeWrites := 2 + len(node.Labels)
+		nodeWrites := treeDBNodeRecordWriteCount + len(node.Labels)*treeDBNodeLabelIndexWriteCount + treeDBNodeNamespaceGuardWriteCount
 		if t.engine.shouldIndexPendingEmbed(node) {
-			nodeWrites++
+			nodeWrites += treeDBNodePendingEmbedWriteCount
 		}
 		writes += nodeWrites
 		held += nodeWrites * 2
@@ -1348,13 +1369,25 @@ func (t *TreeDBTransaction) reserveEdgeCreateBatch(edges []*Edge) {
 	}
 }
 
+const (
+	treeDBNodeRecordWriteCount         = 1 // node body record.
+	treeDBNodeLabelIndexWriteCount     = 1 // one label index entry per label.
+	treeDBNodePendingEmbedWriteCount   = 1 // pending-embedding guard when embeddings are enabled.
+	treeDBNodeNamespaceGuardWriteCount = 1 // namespace membership guard.
+
+	treeDBEdgeRecordWriteCount         = 1 // edge body record.
+	treeDBEdgeIndexWriteCount          = 5 // outgoing, incoming, type, between, and between-head indexes.
+	treeDBEdgeBaseMembershipGuardCount = 2 // start-node edge guard plus edge namespace guard.
+	treeDBEdgeEndMembershipGuardCount  = 1 // end-node edge guard for non-self edges.
+)
+
 func treeDBEdgeCreateWriteCount(edge *Edge) int {
 	if edge == nil {
 		return 0
 	}
-	writes := 1 + 5 + 2
+	writes := treeDBEdgeRecordWriteCount + treeDBEdgeIndexWriteCount + treeDBEdgeBaseMembershipGuardCount
 	if edge.StartNode != edge.EndNode {
-		writes++
+		writes += treeDBEdgeEndMembershipGuardCount
 	}
 	return writes
 }
