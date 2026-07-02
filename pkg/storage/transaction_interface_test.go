@@ -130,10 +130,11 @@ func TestWALEngineBeginGraphTransactionLogsCommittedMutations(t *testing.T) {
 
 	entries, err := ReadWALEntriesFromDir(walDir)
 	require.NoError(t, err)
-	require.Len(t, entries, 3)
+	require.Len(t, entries, 4)
 	require.Equal(t, OpTxBegin, entries[0].Operation)
 	require.Equal(t, OpCreateNode, entries[1].Operation)
-	require.Equal(t, OpTxCommit, entries[2].Operation)
+	require.Equal(t, OpTxPrepare, entries[2].Operation)
+	require.Equal(t, OpTxCommit, entries[3].Operation)
 	require.Equal(t, "tenant", entries[1].Database)
 
 	var nodeData WALNodeData
@@ -219,7 +220,7 @@ func TestWALEngineBeginGraphTransactionDeleteNodeRecordsCascadedEdges(t *testing
 	require.Equal(t, NodeID("n2"), data.OldEdges[0].EndNode)
 }
 
-func TestWALEngineBeginGraphTransactionCommitFailureLogsAbortAfterMarker(t *testing.T) {
+func TestWALEngineBeginGraphTransactionCommitFailureLogsAbortAfterPrepare(t *testing.T) {
 	config.EnableWAL()
 	t.Cleanup(config.DisableWAL)
 
@@ -257,7 +258,7 @@ func TestWALEngineBeginGraphTransactionCommitFailureLogsAbortAfterMarker(t *test
 	require.Equal(t, OpTxBegin, entries[0].Operation)
 	require.Equal(t, OpCreateNode, entries[1].Operation)
 	require.Equal(t, OpCreateNode, entries[2].Operation)
-	require.Equal(t, OpTxCommit, entries[3].Operation)
+	require.Equal(t, OpTxPrepare, entries[3].Operation)
 	require.Equal(t, OpTxAbort, entries[4].Operation)
 
 	_, err = base.GetNode("tenant:n1")

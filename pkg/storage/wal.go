@@ -57,9 +57,10 @@ const (
 	OpCheckpoint      OperationType = "checkpoint" // Marks snapshot boundaries
 
 	// Transaction boundary markers for ACID compliance
-	OpTxBegin  OperationType = "tx_begin"  // Marks transaction start
-	OpTxCommit OperationType = "tx_commit" // Marks successful transaction completion
-	OpTxAbort  OperationType = "tx_abort"  // Marks explicit transaction rollback
+	OpTxBegin   OperationType = "tx_begin"   // Marks transaction start
+	OpTxPrepare OperationType = "tx_prepare" // Marks all transaction WAL mutations are durable
+	OpTxCommit  OperationType = "tx_commit"  // Marks successful transaction completion
+	OpTxAbort   OperationType = "tx_abort"   // Marks explicit transaction rollback
 )
 
 // Common WAL errors
@@ -601,6 +602,14 @@ func (w *WAL) AppendTxBegin(database, txID string, metadata map[string]string) (
 	return w.AppendWithDatabaseReturningSeq(OpTxBegin, WALTxData{
 		TxID:     txID,
 		Metadata: metadata,
+	}, database)
+}
+
+// AppendTxPrepare writes a transaction-prepare marker to the WAL.
+func (w *WAL) AppendTxPrepare(database, txID string, opCount int) (uint64, error) {
+	return w.AppendWithDatabaseReturningSeq(OpTxPrepare, WALTxData{
+		TxID:    txID,
+		OpCount: opCount,
 	}, database)
 }
 
@@ -2087,7 +2096,7 @@ func ReplayWALEntry(engine Engine, entry WALEntry) error {
 		// Checkpoints are markers, no action needed
 		return nil
 
-	case OpTxBegin, OpTxCommit, OpTxAbort:
+	case OpTxBegin, OpTxPrepare, OpTxCommit, OpTxAbort:
 		// Transaction boundaries are markers handled at a higher level
 		// Individual replay doesn't need to process them
 		return nil
@@ -2250,7 +2259,7 @@ func UndoWALEntry(engine Engine, entry WALEntry) error {
 		}
 		return engine.BulkCreateEdges(data.OldEdges)
 
-	case OpCheckpoint, OpTxBegin, OpTxCommit, OpTxAbort, OpUpdateEmbedding:
+	case OpCheckpoint, OpTxBegin, OpTxPrepare, OpTxCommit, OpTxAbort, OpUpdateEmbedding:
 		// These don't need undo
 		return nil
 
@@ -2300,7 +2309,7 @@ func GetEntryTxID(entry WALEntry) string {
 		if json.Unmarshal(entry.Data, &data) == nil {
 			txID = data.TxID
 		}
-	case OpTxBegin, OpTxCommit, OpTxAbort:
+	case OpTxBegin, OpTxPrepare, OpTxCommit, OpTxAbort:
 		var data WALTxData
 		if json.Unmarshal(entry.Data, &data) == nil {
 			txID = data.TxID
@@ -2312,11 +2321,12 @@ func GetEntryTxID(entry WALEntry) string {
 
 // TransactionState tracks the state of an in-progress transaction during recovery.
 type TransactionState struct {
-	TxID    string
-	Entries []WALEntry // All entries in this transaction (in order)
-	Started bool       // True if we saw TxBegin
-	Done    bool       // True if we saw TxCommit or TxAbort
-	Aborted bool       // True if explicitly aborted
+	TxID     string
+	Entries  []WALEntry // All entries in this transaction (in order)
+	Started  bool       // True if we saw TxBegin
+	Prepared bool       // True if we saw TxPrepare
+	Done     bool       // True if we saw TxCommit or TxAbort
+	Aborted  bool       // True if explicitly aborted
 }
 
 // RecoverWithTransactions performs transaction-aware WAL recovery.
@@ -2385,6 +2395,16 @@ func RecoverWithTransactions(walDir, snapshotPath string) (*MemoryEngine, *Trans
 				tx.Done = true
 			}
 
+		case OpTxPrepare:
+			var data WALTxData
+			json.Unmarshal(entry.Data, &data)
+			tx, ok := result.Transactions[data.TxID]
+			if !ok {
+				tx = &TransactionState{TxID: data.TxID}
+				result.Transactions[data.TxID] = tx
+			}
+			tx.Prepared = true
+
 		case OpTxAbort:
 			var data WALTxData
 			json.Unmarshal(entry.Data, &data)
@@ -2430,6 +2450,10 @@ func RecoverWithTransactions(walDir, snapshotPath string) (*MemoryEngine, *Trans
 	// Phase 3: Rollback incomplete transactions
 	for txID, tx := range result.Transactions {
 		if !tx.Done {
+			if tx.Prepared {
+				result.InDoubtTransactions = append(result.InDoubtTransactions, txID)
+				continue
+			}
 			// Transaction incomplete - needs rollback
 			// First apply forward (in case partially applied before crash)
 			for _, entry := range tx.Entries {
@@ -2460,6 +2484,11 @@ func RecoverWithTransactions(walDir, snapshotPath string) (*MemoryEngine, *Trans
 		result.NonTxApplied++
 	}
 
+	if len(result.InDoubtTransactions) > 0 {
+		sort.Strings(result.InDoubtTransactions)
+		return engine, result, fmt.Errorf("%w: prepared transactions without terminal marker: %s", ErrRecoveryFailed, strings.Join(result.InDoubtTransactions, ","))
+	}
+
 	return engine, result, nil
 }
 
@@ -2470,6 +2499,7 @@ type TransactionRecoveryResult struct {
 	CommittedTransactions  int
 	RolledBackTransactions int
 	AbortedTransactions    int
+	InDoubtTransactions    []string
 	FailedTransactions     []string
 	UndoErrors             []string
 	NonTxApplied           int
@@ -2478,14 +2508,15 @@ type TransactionRecoveryResult struct {
 
 // Summary returns a human-readable summary of the recovery.
 func (r *TransactionRecoveryResult) Summary() string {
-	return fmt.Sprintf("committed=%d rolledback=%d aborted=%d non-tx=%d errors=%d",
+	errorCount := len(r.UndoErrors) + len(r.NonTxErrors) + len(r.FailedTransactions) + len(r.InDoubtTransactions)
+	return fmt.Sprintf("committed=%d rolledback=%d aborted=%d indoubt=%d non-tx=%d errors=%d",
 		r.CommittedTransactions, r.RolledBackTransactions, r.AbortedTransactions,
-		r.NonTxApplied, len(r.UndoErrors)+len(r.NonTxErrors))
+		len(r.InDoubtTransactions), r.NonTxApplied, errorCount)
 }
 
 // HasErrors returns true if there were any errors during recovery.
 func (r *TransactionRecoveryResult) HasErrors() bool {
-	return len(r.UndoErrors) > 0 || len(r.NonTxErrors) > 0 || len(r.FailedTransactions) > 0
+	return len(r.UndoErrors) > 0 || len(r.NonTxErrors) > 0 || len(r.FailedTransactions) > 0 || len(r.InDoubtTransactions) > 0
 }
 
 // RecoverFromWAL recovers database state from a snapshot and WAL.

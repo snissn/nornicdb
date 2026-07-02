@@ -298,6 +298,12 @@ func TestGetEntryTxID(t *testing.T) {
 			expected: "tx-789",
 		},
 		{
+			name:     "tx prepare",
+			op:       OpTxPrepare,
+			data:     WALTxData{TxID: "tx-prepared"},
+			expected: "tx-prepared",
+		},
+		{
 			name:     "edge with tx",
 			op:       OpCreateEdge,
 			data:     WALEdgeData{Edge: &Edge{ID: "e1"}, TxID: "tx-edge"},
@@ -435,6 +441,37 @@ func TestRecoverIncompleteTransaction(t *testing.T) {
 	if n != nil {
 		t.Error("Node should NOT exist after rollback of incomplete transaction")
 	}
+}
+
+func TestRecoverWithTransactionsPreparedWithoutTerminalMarkerFailsClosed(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	dir := t.TempDir()
+	cfg := &WALConfig{Dir: dir, SyncMode: "immediate"}
+	wal, err := NewWAL(dir, cfg)
+	require.NoError(t, err)
+
+	require.NoError(t, wal.AppendWithDatabase(OpTxBegin, WALTxData{TxID: "tx-prepared"}, "test"))
+	require.NoError(t, wal.AppendWithDatabase(OpCreateNode, WALNodeData{
+		Node: &Node{ID: "n1", Labels: []string{"Prepared"}},
+		TxID: "tx-prepared",
+	}, "test"))
+	_, err = wal.AppendTxPrepare("test", "tx-prepared", 1)
+	require.NoError(t, err)
+	require.NoError(t, wal.Close())
+
+	baseEngine, result, err := RecoverWithTransactions(dir, "")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrRecoveryFailed)
+	require.NotNil(t, baseEngine)
+	require.Contains(t, result.InDoubtTransactions, "tx-prepared")
+	require.Equal(t, 0, result.CommittedTransactions)
+	require.Equal(t, 0, result.RolledBackTransactions)
+	require.True(t, result.HasErrors())
+
+	_, getErr := baseEngine.GetNode("test:n1")
+	require.ErrorIs(t, getErr, ErrNotFound)
 }
 
 // TestRecoverAbortedTransaction verifies aborted transactions don't apply.
@@ -610,6 +647,7 @@ func TestRecoveryResultSummary(t *testing.T) {
 		CommittedTransactions:  5,
 		RolledBackTransactions: 2,
 		AbortedTransactions:    1,
+		InDoubtTransactions:    []string{"tx-prepared"},
 		NonTxApplied:           10,
 		UndoErrors:             []string{"error1"},
 	}
@@ -622,6 +660,7 @@ func TestRecoveryResultSummary(t *testing.T) {
 	if !result.HasErrors() {
 		t.Error("HasErrors should return true when there are undo errors")
 	}
+	require.Contains(t, summary, "indoubt=1")
 }
 
 // =============================================================================
@@ -805,7 +844,7 @@ func TestReplayAndUndoWALEntry_ErrorBranches(t *testing.T) {
 	engine := NewNamespacedEngine(baseEngine, "test")
 
 	t.Run("marker operations are noops", func(t *testing.T) {
-		for _, op := range []OperationType{OpCheckpoint, OpTxBegin, OpTxCommit, OpTxAbort} {
+		for _, op := range []OperationType{OpCheckpoint, OpTxBegin, OpTxPrepare, OpTxCommit, OpTxAbort} {
 			require.NoError(t, ReplayWALEntry(engine, WALEntry{Operation: op}))
 			require.NoError(t, UndoWALEntry(engine, WALEntry{Operation: op}))
 		}
