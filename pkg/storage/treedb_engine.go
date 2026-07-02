@@ -225,7 +225,7 @@ func (e *TreeDBEngine) DurabilityInfo() TreeDBDurabilityInfo {
 	info := TreeDBDurabilityInfo{
 		Dir:                  e.dir,
 		Profile:              e.profile,
-		RedoLog:              "on",
+		RedoLog:              treeDBRedoLogPolicy(e.nativeWAL),
 		NativeWAL:            e.nativeWAL,
 		CommandWAL:           e.commandWAL,
 		NornicWAL:            false,
@@ -233,7 +233,7 @@ func (e *TreeDBEngine) DurabilityInfo() TreeDBDurabilityInfo {
 		SyncWrites:           e.syncWrites,
 		ReplicationSupported: false,
 	}
-	if e.db != nil && !e.closed.Load() {
+	if e.ensureOpen() == nil {
 		info.DurabilityMode = e.db.DurabilityMode()
 		stats := e.db.Stats()
 		if mode := stats["treedb.write_path.mode"]; mode != "" {
@@ -246,6 +246,13 @@ func (e *TreeDBEngine) DurabilityInfo() TreeDBDurabilityInfo {
 		info.NativeWAL = info.RedoLog != "off"
 	}
 	return info
+}
+
+func treeDBRedoLogPolicy(nativeWAL bool) string {
+	if nativeWAL {
+		return "on"
+	}
+	return "off"
 }
 
 // Logger returns the engine logger for wrappers.

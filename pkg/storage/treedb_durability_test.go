@@ -33,7 +33,7 @@ func TestTreeDBEngine_DurabilityInfoReportsNativeWAL(t *testing.T) {
 	require.False(t, info.ReplicationSupported)
 }
 
-func TestTreeDBEngine_DurabilityInfoAfterClose(t *testing.T) {
+func TestTreeDBEngine_DurabilityInfoAfterCloseUsesCachedPolicy(t *testing.T) {
 	dir := t.TempDir()
 	engine, err := NewTreeDBEngineWithOptions(TreeDBOptions{
 		Dir:        dir,
@@ -42,14 +42,20 @@ func TestTreeDBEngine_DurabilityInfoAfterClose(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, engine.Close())
 
-	// DurabilityInfo must not panic or call into the closed DB; static fields
-	// (Dir, SyncWrites, etc.) are still readable.
-	info := engine.DurabilityInfo()
-	require.Equal(t, dir, info.Dir)
-	require.True(t, info.SyncWrites)
-	// DB-sourced fields should remain at their zero/default values.
-	require.Empty(t, info.DurabilityMode)
-	require.Empty(t, info.WritePathMode)
+	require.NotPanics(t, func() {
+		info := engine.DurabilityInfo()
+		require.Equal(t, dir, info.Dir)
+		require.Equal(t, string(treedb.ProfileLegacyWALDurable), info.Profile)
+		require.Equal(t, "on", info.RedoLog)
+		require.True(t, info.NativeWAL)
+		require.False(t, info.CommandWAL)
+		require.False(t, info.NornicWAL)
+		require.False(t, info.AsyncWrites)
+		require.True(t, info.SyncWrites)
+		require.False(t, info.ReplicationSupported)
+		require.Empty(t, info.DurabilityMode)
+		require.Empty(t, info.WritePathMode)
+	})
 }
 
 func TestTreeDBEngine_CommandWALProfilesFailClosed(t *testing.T) {
