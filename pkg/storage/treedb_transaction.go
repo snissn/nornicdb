@@ -98,12 +98,7 @@ func (t *TreeDBTransaction) ensureScanSnapshot() (treedb.Snapshot, error) {
 	if t.snapshot != nil {
 		return t.snapshot, nil
 	}
-	snap := t.engine.db.AcquireSnapshot()
-	if snap == nil {
-		return nil, fmt.Errorf("%w: TreeDB scan snapshot unavailable", ErrNotImplemented)
-	}
-	t.snapshot = snap
-	return snap, nil
+	return nil, fmt.Errorf("%w: TreeDB scan snapshot unavailable", ErrNotImplemented)
 }
 
 func (t *TreeDBTransaction) closeScanSnapshot() error {
@@ -131,40 +126,20 @@ func (t *TreeDBTransaction) closeTransactionHandles() error {
 }
 
 func (t *TreeDBTransaction) getVersionedAppendForRead(key []byte) ([]byte, error) {
-	if t.snapshot == nil {
-		data, _, err := t.tx.GetVersionedAppend(key, nil)
-		return data, mapTreeDBError(err)
-	}
-	data, revision, err := t.snapshot.GetVersionedAppend(key, nil)
-	mapped := mapTreeDBError(err)
-	if mapped != nil {
-		if errors.Is(mapped, ErrNotFound) {
-			if recErr := t.tx.RequireReadVersion(key, revision, false); recErr != nil {
-				return nil, mapTreeDBError(recErr)
-			}
-		}
-		return nil, mapped
-	}
-	if err := t.tx.RequireReadVersion(key, revision, true); err != nil {
-		return nil, mapTreeDBError(err)
-	}
-	return data, nil
+	data, _, err := t.tx.GetVersionedAppend(key, nil)
+	return data, mapTreeDBError(err)
 }
 
 func (t *TreeDBTransaction) readPredicateGuard(key []byte) error {
-	snap, err := t.ensureScanSnapshot()
-	if err != nil {
-		return err
-	}
-	_, revision, err := snap.GetVersionedAppend(key, nil)
+	_, _, err := t.tx.GetVersionedAppend(key, nil)
 	mapped := mapTreeDBError(err)
 	if mapped != nil {
 		if errors.Is(mapped, ErrNotFound) {
-			return mapTreeDBError(t.tx.RequireReadVersion(key, revision, false))
+			return nil
 		}
 		return mapped
 	}
-	return mapTreeDBError(t.tx.RequireReadVersion(key, revision, true))
+	return nil
 }
 
 func (t *TreeDBTransaction) guardBytes() []byte {
@@ -761,8 +736,11 @@ func (t *TreeDBTransaction) GetNodesByLabel(label string) ([]*Node, error) {
 
 func (t *TreeDBTransaction) GetFirstNodeByLabel(label string) (*Node, error) {
 	nodes, err := t.GetNodesByLabel(label)
-	if err != nil || len(nodes) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if len(nodes) == 0 {
+		return nil, ErrNotFound
 	}
 	return nodes[0], nil
 }
@@ -1197,6 +1175,9 @@ func (t *TreeDBTransaction) replacementEdgeBetweenHead(deleted *Edge) (EdgeID, e
 			return nil
 		}
 		if _, removed := t.deletedEdges[id]; removed {
+			return nil
+		}
+		if pending, ok := t.pendingEdges[id]; ok && !treeDBEdgeMatchesBetween(pending, deleted.StartNode, deleted.EndNode, deleted.Type) {
 			return nil
 		}
 		replacement = id

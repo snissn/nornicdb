@@ -85,6 +85,65 @@ func TestTreeDBEngine_HotBodyCacheLifecycle(t *testing.T) {
 	require.False(t, cachedEdge)
 }
 
+func TestNamespacedTreeDBEngine_DirectFastPathStripsNamespaceAndReturnsCopies(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	namespaced := NewNamespacedEngine(engine, "tenant")
+
+	_, err := namespaced.CreateNode(&Node{
+		ID:         "a",
+		Labels:     []string{"Doc"},
+		Properties: map[string]any{"name": "alpha"},
+	})
+	require.NoError(t, err)
+	_, err = namespaced.CreateNode(&Node{ID: "b", Labels: []string{"Doc"}})
+	require.NoError(t, err)
+	require.NoError(t, namespaced.CreateEdge(&Edge{
+		ID:         "e1",
+		StartNode:  "a",
+		EndNode:    "b",
+		Type:       "LINKS",
+		Properties: map[string]any{"weight": int64(7)},
+	}))
+
+	gotNode, err := namespaced.GetNode("a")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("a"), gotNode.ID)
+	require.Equal(t, "alpha", gotNode.Properties["name"])
+	gotNode.ID = "mutated"
+	gotNode.Properties["name"] = "mutated"
+
+	againNode, err := namespaced.GetNode("a")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("a"), againNode.ID)
+	require.Equal(t, "alpha", againNode.Properties["name"])
+
+	gotEdge, err := namespaced.GetEdge("e1")
+	require.NoError(t, err)
+	require.Equal(t, EdgeID("e1"), gotEdge.ID)
+	require.Equal(t, NodeID("a"), gotEdge.StartNode)
+	require.Equal(t, NodeID("b"), gotEdge.EndNode)
+	require.Equal(t, int64(7), gotEdge.Properties["weight"])
+	gotEdge.ID = "mutated"
+	gotEdge.StartNode = "mutated"
+	gotEdge.Properties["weight"] = int64(99)
+
+	againEdge, err := namespaced.GetEdge("e1")
+	require.NoError(t, err)
+	require.Equal(t, EdgeID("e1"), againEdge.ID)
+	require.Equal(t, NodeID("a"), againEdge.StartNode)
+	require.Equal(t, NodeID("b"), againEdge.EndNode)
+	require.Equal(t, int64(7), againEdge.Properties["weight"])
+
+	rawNode, err := engine.GetNode("tenant:a")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("tenant:a"), rawNode.ID)
+	rawEdge, err := engine.GetEdge("tenant:e1")
+	require.NoError(t, err)
+	require.Equal(t, EdgeID("tenant:e1"), rawEdge.ID)
+	require.Equal(t, NodeID("tenant:a"), rawEdge.StartNode)
+	require.Equal(t, NodeID("tenant:b"), rawEdge.EndNode)
+}
+
 func TestTreeDBEngine_CRUDIndexesRevisionsAndReopen(t *testing.T) {
 	dir := t.TempDir()
 	engine, err := NewTreeDBEngineWithOptions(TreeDBOptions{Dir: dir})
@@ -392,6 +451,34 @@ func TestTreeDBTransaction_SnapshotReadPreconditionConflictsOnCommit(t *testing.
 	require.True(t, errors.Is(err, ErrConflict), "commit error = %v", err)
 }
 
+func TestTreeDBTransaction_FirstRangeReadUsesBeginSnapshot(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	_, err := engine.CreateNode(&Node{
+		ID:         "test:first-range",
+		Labels:     []string{"User"},
+		Properties: map[string]any{"version": int64(1)},
+	})
+	require.NoError(t, err)
+
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+
+	require.NoError(t, engine.DeleteNode("test:first-range"))
+
+	nodes, err := tx.GetNodesByLabel("User")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []NodeID{"test:first-range"}, treeDBNodeIDs(nodes))
+
+	_, err = tx.CreateNode(&Node{ID: "test:first-range-marker", Labels: []string{"Marker"}})
+	require.NoError(t, err)
+	err = tx.Commit()
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrConflict), "commit error = %v", err)
+}
+
 func TestTreeDBTransaction_NamespacedLabelScanIgnoresForeignNamespaceConflicts(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	tenantA := NewNamespacedEngine(engine, "tenant_a")
@@ -576,6 +663,48 @@ func TestTreeDBEngine_GetEdgeBetweenHeadPromotesSurvivorOnDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte(first.ID), head)
 	require.Equal(t, first.ID, engine.GetEdgeBetween("test:head-a", "test:head-b", "KNOWS").ID)
+}
+
+func TestTreeDBTransaction_EdgeBetweenHeadSkipsMovedPendingReplacement(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:move-a", Labels: []string{"Node"}},
+		{ID: "test:move-b", Labels: []string{"Node"}},
+		{ID: "test:move-c", Labels: []string{"Node"}},
+	}))
+	first := &Edge{ID: "test:move-e1", StartNode: "test:move-a", EndNode: "test:move-b", Type: "KNOWS"}
+	second := &Edge{ID: "test:move-e2", StartNode: "test:move-a", EndNode: "test:move-b", Type: "KNOWS"}
+	require.NoError(t, engine.CreateEdge(first))
+	require.NoError(t, engine.CreateEdge(second))
+	require.Equal(t, second.ID, engine.GetEdgeBetween("test:move-a", "test:move-b", "KNOWS").ID)
+
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+
+	moved := copyEdge(first)
+	moved.EndNode = "test:move-c"
+	require.NoError(t, tx.UpdateEdge(moved))
+	require.NoError(t, tx.DeleteEdge(second.ID))
+	require.NoError(t, tx.Commit())
+
+	require.Nil(t, engine.GetEdgeBetween("test:move-a", "test:move-b", "KNOWS"))
+	require.Equal(t, first.ID, engine.GetEdgeBetween("test:move-a", "test:move-c", "KNOWS").ID)
+}
+
+func TestTreeDBTransaction_GetFirstNodeByLabelNotFound(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+
+	node, err := tx.GetFirstNodeByLabel("Missing")
+	require.Nil(t, node)
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestTreeDBTransaction_CreateSkipOnlyBypassesUUIDIDs(t *testing.T) {

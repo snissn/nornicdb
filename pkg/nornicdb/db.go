@@ -350,6 +350,8 @@ func resolveStorageBackendForOpen(dataDir string, config *Config) (string, error
 //   - Uses TreeDB for durable storage
 //   - Uses TreeDB native conditional transactions and revision metadata
 //   - Requires a persistent data directory
+//   - Fails closed for encryption, in-memory mode, memory decay, and cluster
+//     replication until those integrations are implemented
 //
 // In-Memory Storage (dataDir == "" or storage_backend=memory without dataDir):
 //   - Uses memory-only storage

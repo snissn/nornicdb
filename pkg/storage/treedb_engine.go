@@ -666,13 +666,20 @@ func (e *TreeDBEngine) BeginGraphTransaction() (GraphTransaction, error) {
 	if err := e.ensureOpen(); err != nil {
 		return nil, err
 	}
-	tx, err := e.db.NewConditionalTxn()
+	tx, err := e.db.NewConditionalTxnWithSnapshot()
 	if err != nil {
 		return nil, mapTreeDBError(err)
 	}
+	scanSnapshot := e.db.AcquireSnapshot()
+	if scanSnapshot == nil {
+		_ = tx.Close()
+		return nil, fmt.Errorf("%w: TreeDB scan snapshot unavailable", ErrNotImplemented)
+	}
 	tx.ReserveReadSet(8)
 	tx.ReserveWrites(16)
-	return newTreeDBTransaction(e, tx), nil
+	treeTx := newTreeDBTransaction(e, tx)
+	treeTx.snapshot = scanSnapshot
+	return treeTx, nil
 }
 
 func (e *TreeDBEngine) beginTreeDBTransaction() (*TreeDBTransaction, error) {
@@ -688,9 +695,22 @@ func (e *TreeDBEngine) beginTreeDBTransaction() (*TreeDBTransaction, error) {
 	return treeTx, nil
 }
 
+func (e *TreeDBEngine) beginTreeDBPointTransaction() (*TreeDBTransaction, error) {
+	if err := e.ensureOpen(); err != nil {
+		return nil, err
+	}
+	tx, err := e.db.NewConditionalTxn()
+	if err != nil {
+		return nil, mapTreeDBError(err)
+	}
+	tx.ReserveReadSet(8)
+	tx.ReserveWrites(16)
+	return newTreeDBTransaction(e, tx), nil
+}
+
 // CreateNode creates a node through a native conditional write.
 func (e *TreeDBEngine) CreateNode(node *Node) (NodeID, error) {
-	tx, err := e.beginTreeDBTransaction()
+	tx, err := e.beginTreeDBPointTransaction()
 	if err != nil {
 		return "", err
 	}
@@ -710,7 +730,7 @@ func (e *TreeDBEngine) UpdateNode(node *Node) error {
 	if node == nil {
 		return ErrInvalidData
 	}
-	tx, err := e.beginTreeDBTransaction()
+	tx, err := e.beginTreeDBPointTransaction()
 	if err != nil {
 		return err
 	}
@@ -746,7 +766,7 @@ func (e *TreeDBEngine) DeleteNode(id NodeID) error {
 
 // CreateEdge creates an edge through a native conditional write.
 func (e *TreeDBEngine) CreateEdge(edge *Edge) error {
-	tx, err := e.beginTreeDBTransaction()
+	tx, err := e.beginTreeDBPointTransaction()
 	if err != nil {
 		return err
 	}
@@ -785,7 +805,7 @@ func (e *TreeDBEngine) DeleteEdge(id EdgeID) error {
 
 // BulkCreateNodes creates nodes in one native TreeDB conditional transaction.
 func (e *TreeDBEngine) BulkCreateNodes(nodes []*Node) error {
-	tx, err := e.beginTreeDBTransaction()
+	tx, err := e.beginTreeDBPointTransaction()
 	if err != nil {
 		return err
 	}
@@ -801,7 +821,7 @@ func (e *TreeDBEngine) BulkCreateNodes(nodes []*Node) error {
 
 // BulkCreateEdges creates edges in one native TreeDB conditional transaction.
 func (e *TreeDBEngine) BulkCreateEdges(edges []*Edge) error {
-	tx, err := e.beginTreeDBTransaction()
+	tx, err := e.beginTreeDBPointTransaction()
 	if err != nil {
 		return err
 	}
@@ -1261,7 +1281,7 @@ func (e *TreeDBEngine) GetEdgeBetween(startID, endID NodeID, edgeType string) *E
 	data, err := e.db.GetAppend(treeDBEdgeBetweenHeadKey(startID, endID, edgeType), nil)
 	if err == nil && len(data) > 0 {
 		edge, err := e.GetEdge(EdgeID(string(data)))
-		if err == nil {
+		if err == nil && treeDBEdgeMatchesBetween(edge, startID, endID, edgeType) {
 			return edge
 		}
 	}
@@ -1612,7 +1632,7 @@ func (e *TreeDBEngine) FindNodeNeedingEmbedding() *Node {
 
 // MarkNodeEmbedded removes a node from the pending embeddings index.
 func (e *TreeDBEngine) MarkNodeEmbedded(nodeID NodeID) {
-	tx, err := e.beginTreeDBTransaction()
+	tx, err := e.beginTreeDBPointTransaction()
 	if err != nil {
 		return
 	}
@@ -1625,7 +1645,7 @@ func (e *TreeDBEngine) MarkNodeEmbedded(nodeID NodeID) {
 
 // AddToPendingEmbeddings adds a node to the pending embeddings index.
 func (e *TreeDBEngine) AddToPendingEmbeddings(nodeID NodeID) {
-	tx, err := e.beginTreeDBTransaction()
+	tx, err := e.beginTreeDBPointTransaction()
 	if err != nil {
 		return
 	}
@@ -1989,6 +2009,13 @@ func treeDBEdgeIDFromBetweenKey(key []byte) EdgeID {
 		return ""
 	}
 	return EdgeID(string(key[idx+1:]))
+}
+
+func treeDBEdgeMatchesBetween(edge *Edge, startID, endID NodeID, edgeType string) bool {
+	return edge != nil &&
+		edge.StartNode == startID &&
+		edge.EndNode == endID &&
+		strings.EqualFold(edge.Type, edgeType)
 }
 
 func treeDBNodePrefixForNamespace(namespace string) []byte {
