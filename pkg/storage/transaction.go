@@ -164,6 +164,21 @@ type namespaceMVCCPrimer interface {
 	EnsureNamespaceMVCC(namespace string) error
 }
 
+func beginGraphTransactionOrNotImplemented(engine Engine) (GraphTransaction, error) {
+	txEngine, ok := engine.(TransactionalEngine)
+	if !ok {
+		return nil, ErrNotImplemented
+	}
+	return txEngine.BeginGraphTransaction()
+}
+
+func ensureNamespaceMVCCIfSupported(engine Engine, namespace string) error {
+	if primer, ok := engine.(namespaceMVCCPrimer); ok {
+		return primer.EnsureNamespaceMVCC(namespace)
+	}
+	return nil
+}
+
 // Transaction is the public closure-facing transaction type used by DB.Update and DB.View.
 type Transaction = GraphTransaction
 

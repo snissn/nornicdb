@@ -65,11 +65,7 @@ func (w *WALEngine) ListNamespaces() []string {
 
 // BeginGraphTransaction starts a WAL-aware transaction on the wrapped engine.
 func (w *WALEngine) BeginGraphTransaction() (GraphTransaction, error) {
-	txEngine, ok := w.engine.(TransactionalEngine)
-	if !ok {
-		return nil, ErrNotImplemented
-	}
-	tx, err := txEngine.BeginGraphTransaction()
+	tx, err := beginGraphTransactionOrNotImplemented(w.engine)
 	if err != nil {
 		return nil, err
 	}
@@ -79,10 +75,7 @@ func (w *WALEngine) BeginGraphTransaction() (GraphTransaction, error) {
 // EnsureNamespaceMVCC delegates namespace MVCC priming to the wrapped engine
 // when supported.
 func (w *WALEngine) EnsureNamespaceMVCC(namespace string) error {
-	if primer, ok := w.engine.(namespaceMVCCPrimer); ok {
-		return primer.EnsureNamespaceMVCC(namespace)
-	}
-	return nil
+	return ensureNamespaceMVCCIfSupported(w.engine, namespace)
 }
 
 // IsCurrentTemporalNode delegates current-version checks to the wrapped engine when supported.
@@ -482,11 +475,7 @@ func (w *WALEngine) databaseFromNode(node *Node) string {
 }
 
 func (w *WALEngine) databaseFromNodeID(id NodeID) (dbName string, unprefixedID string) {
-	dbName, unprefixedID = w.getDatabaseName(), string(id)
-	if parsedDB, parsedID, ok := ParseDatabasePrefix(string(id)); ok {
-		dbName, unprefixedID = parsedDB, parsedID
-	}
-	return dbName, unprefixedID
+	return w.databaseFromRawID(string(id))
 }
 
 func (w *WALEngine) databaseFromEdge(edge *Edge) (string, error) {
@@ -519,8 +508,12 @@ func (w *WALEngine) databaseFromEdge(edge *Edge) (string, error) {
 }
 
 func (w *WALEngine) databaseFromEdgeID(id EdgeID) (dbName string, unprefixedID string) {
-	dbName, unprefixedID = w.getDatabaseName(), string(id)
-	if parsedDB, parsedID, ok := ParseDatabasePrefix(string(id)); ok {
+	return w.databaseFromRawID(string(id))
+}
+
+func (w *WALEngine) databaseFromRawID(id string) (dbName string, unprefixedID string) {
+	dbName, unprefixedID = w.getDatabaseName(), id
+	if parsedDB, parsedID, ok := ParseDatabasePrefix(id); ok {
 		dbName, unprefixedID = parsedDB, parsedID
 	}
 	return dbName, unprefixedID

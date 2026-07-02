@@ -163,7 +163,11 @@ func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 
 // BeginGraphTransaction starts a backend-neutral graph transaction.
 func (b *BadgerEngine) BeginGraphTransaction() (GraphTransaction, error) {
-	return b.BeginTransaction()
+	tx, err := b.BeginTransaction()
+	if err != nil {
+		return nil, err
+	}
+	return tx, nil
 }
 
 // TransactionID returns the stable transaction identifier used by WAL markers

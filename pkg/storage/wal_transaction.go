@@ -56,6 +56,10 @@ func (t *walGraphTransaction) GetMetadata() map[string]interface{} {
 }
 
 func (t *walGraphTransaction) CreateNode(node *Node) (NodeID, error) {
+	if !t.walEnabled() {
+		return t.tx.CreateNode(node)
+	}
+
 	id, err := t.tx.CreateNode(node)
 	if err != nil {
 		return "", err
@@ -70,6 +74,10 @@ func (t *walGraphTransaction) CreateNode(node *Node) (NodeID, error) {
 }
 
 func (t *walGraphTransaction) UpdateNode(node *Node) error {
+	if !t.walEnabled() {
+		return t.tx.UpdateNode(node)
+	}
+
 	oldNode, oldErr := t.tx.GetNode(node.ID)
 	if err := t.tx.UpdateNode(node); err != nil {
 		return err
@@ -116,6 +124,10 @@ func (t *walGraphTransaction) DeleteNode(id NodeID) error {
 }
 
 func (t *walGraphTransaction) CreateEdge(edge *Edge) error {
+	if !t.walEnabled() {
+		return t.tx.CreateEdge(edge)
+	}
+
 	dbName, err := t.walEngine.databaseFromEdge(edge)
 	if err != nil {
 		return err
@@ -128,6 +140,10 @@ func (t *walGraphTransaction) CreateEdge(edge *Edge) error {
 }
 
 func (t *walGraphTransaction) UpdateEdge(edge *Edge) error {
+	if !t.walEnabled() {
+		return t.tx.UpdateEdge(edge)
+	}
+
 	dbName, err := t.walEngine.databaseFromEdge(edge)
 	if err != nil {
 		return err
@@ -145,6 +161,10 @@ func (t *walGraphTransaction) UpdateEdge(edge *Edge) error {
 }
 
 func (t *walGraphTransaction) DeleteEdge(id EdgeID) error {
+	if !t.walEnabled() {
+		return t.tx.DeleteEdge(id)
+	}
+
 	oldEdge, oldErr := t.tx.GetEdge(id)
 	if err := t.tx.DeleteEdge(id); err != nil {
 		return err
@@ -159,6 +179,10 @@ func (t *walGraphTransaction) DeleteEdge(id EdgeID) error {
 }
 
 func (t *walGraphTransaction) BulkCreateEdges(edges []*Edge) error {
+	if !t.walEnabled() {
+		return t.tx.BulkCreateEdges(edges)
+	}
+
 	dbName := t.walEngine.getDatabaseName()
 	cloned := make([]*Edge, 0, len(edges))
 	for _, edge := range edges {

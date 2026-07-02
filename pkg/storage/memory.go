@@ -77,7 +77,11 @@ func (m *MemoryEngine) BeginTransaction() (*BadgerTransaction, error) {
 
 // BeginGraphTransaction starts a backend-neutral graph transaction.
 func (m *MemoryEngine) BeginGraphTransaction() (GraphTransaction, error) {
-	return m.BeginTransaction()
+	tx, err := m.BeginTransaction()
+	if err != nil {
+		return nil, err
+	}
+	return tx, nil
 }
 
 // DeleteByPrefix delegates to the underlying BadgerEngine.

@@ -12,6 +12,7 @@ import (
 var (
 	_ GraphTransaction    = (*BadgerTransaction)(nil)
 	_ GraphTransaction    = (*namespacedGraphTransaction)(nil)
+	_ GraphTransaction    = (*walGraphTransaction)(nil)
 	_ TransactionalEngine = (*BadgerEngine)(nil)
 	_ TransactionalEngine = (*MemoryEngine)(nil)
 	_ TransactionalEngine = (*NamespacedEngine)(nil)

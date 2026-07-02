@@ -51,20 +51,13 @@ func (t *TracedEngine) BeginGraphTransaction() (GraphTransaction, error) {
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
-	txEngine, ok := t.Engine.(TransactionalEngine)
-	if !ok {
-		return nil, ErrNotImplemented
-	}
-	return txEngine.BeginGraphTransaction()
+	return beginGraphTransactionOrNotImplemented(t.Engine)
 }
 
 // EnsureNamespaceMVCC delegates namespace MVCC priming to the wrapped engine
 // when supported.
 func (t *TracedEngine) EnsureNamespaceMVCC(namespace string) error {
-	if primer, ok := t.Engine.(namespaceMVCCPrimer); ok {
-		return primer.EnsureNamespaceMVCC(namespace)
-	}
-	return nil
+	return ensureNamespaceMVCCIfSupported(t.Engine, namespace)
 }
 
 // depositLink records the current span context on the inner AsyncEngine (if

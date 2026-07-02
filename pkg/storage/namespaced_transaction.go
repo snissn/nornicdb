@@ -7,6 +7,8 @@ type namespacedGraphTransaction struct {
 	tx        GraphTransaction
 }
 
+var _ GraphTransaction = (*namespacedGraphTransaction)(nil)
+
 func (t *namespacedGraphTransaction) TransactionID() string { return t.tx.TransactionID() }
 func (t *namespacedGraphTransaction) Commit() error         { return t.tx.Commit() }
 func (t *namespacedGraphTransaction) Rollback() error       { return t.tx.Rollback() }
@@ -118,7 +120,7 @@ func (t *namespacedGraphTransaction) GetNodesByLabel(label string) ([]*Node, err
 	if err != nil {
 		return nil, err
 	}
-	return t.toUserNodes(nodes), nil
+	return t.namespace.filterUserNodes(nodes), nil
 }
 
 func (t *namespacedGraphTransaction) GetFirstNodeByLabel(label string) (*Node, error) {
@@ -137,7 +139,7 @@ func (t *namespacedGraphTransaction) GetOutgoingEdges(nodeID NodeID) ([]*Edge, e
 	if err != nil {
 		return nil, err
 	}
-	return t.toUserEdges(edges), nil
+	return t.namespace.filterUserEdges(edges), nil
 }
 
 func (t *namespacedGraphTransaction) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
@@ -145,7 +147,7 @@ func (t *namespacedGraphTransaction) GetIncomingEdges(nodeID NodeID) ([]*Edge, e
 	if err != nil {
 		return nil, err
 	}
-	return t.toUserEdges(edges), nil
+	return t.namespace.filterUserEdges(edges), nil
 }
 
 func (t *namespacedGraphTransaction) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
@@ -153,7 +155,7 @@ func (t *namespacedGraphTransaction) GetEdgesBetween(startID, endID NodeID) ([]*
 	if err != nil {
 		return nil, err
 	}
-	return t.toUserEdges(edges), nil
+	return t.namespace.filterUserEdges(edges), nil
 }
 
 func (t *namespacedGraphTransaction) GetEdgeBetween(startID, endID NodeID, edgeType string) *Edge {
@@ -169,7 +171,7 @@ func (t *namespacedGraphTransaction) GetEdgesByType(edgeType string) ([]*Edge, e
 	if err != nil {
 		return nil, err
 	}
-	return t.toUserEdges(edges), nil
+	return t.namespace.filterUserEdges(edges), nil
 }
 
 func (t *namespacedGraphTransaction) AllNodes() ([]*Node, error) {
@@ -177,29 +179,9 @@ func (t *namespacedGraphTransaction) AllNodes() ([]*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return t.toUserNodes(nodes), nil
+	return t.namespace.filterUserNodes(nodes), nil
 }
 
 func (t *namespacedGraphTransaction) GetAllNodes() []*Node {
-	return t.toUserNodes(t.tx.GetAllNodes())
-}
-
-func (t *namespacedGraphTransaction) toUserNodes(nodes []*Node) []*Node {
-	out := make([]*Node, 0, len(nodes))
-	for _, node := range nodes {
-		if node != nil && t.namespace.hasNodePrefix(node.ID) {
-			out = append(out, t.namespace.toUserNode(node))
-		}
-	}
-	return out
-}
-
-func (t *namespacedGraphTransaction) toUserEdges(edges []*Edge) []*Edge {
-	out := make([]*Edge, 0, len(edges))
-	for _, edge := range edges {
-		if edge != nil && t.namespace.hasEdgePrefix(edge.ID) {
-			out = append(out, t.namespace.toUserEdge(edge))
-		}
-	}
-	return out
+	return t.namespace.filterUserNodes(t.tx.GetAllNodes())
 }

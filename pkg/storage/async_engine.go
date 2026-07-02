@@ -131,20 +131,13 @@ func (ae *AsyncEngine) HoldFlush() func() {
 // hold the async engine before beginning the transaction; the Cypher executor
 // does that for implicit transaction execution.
 func (ae *AsyncEngine) BeginGraphTransaction() (GraphTransaction, error) {
-	txEngine, ok := ae.engine.(TransactionalEngine)
-	if !ok {
-		return nil, ErrNotImplemented
-	}
-	return txEngine.BeginGraphTransaction()
+	return beginGraphTransactionOrNotImplemented(ae.engine)
 }
 
 // EnsureNamespaceMVCC delegates namespace MVCC priming to the wrapped engine
 // when supported.
 func (ae *AsyncEngine) EnsureNamespaceMVCC(namespace string) error {
-	if primer, ok := ae.engine.(namespaceMVCCPrimer); ok {
-		return primer.EnsureNamespaceMVCC(namespace)
-	}
-	return nil
+	return ensureNamespaceMVCCIfSupported(ae.engine, namespace)
 }
 
 // AsyncEngineConfig configures the async engine behavior.
