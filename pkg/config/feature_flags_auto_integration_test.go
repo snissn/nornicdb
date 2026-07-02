@@ -98,6 +98,7 @@ func TestEdgeProvenanceAutoIntegration_With(t *testing.T) {
 // Tests for PerNodeConfig Auto-Integration feature flag group
 
 func TestPerNodeConfigAutoIntegration_Is(t *testing.T) {
+	ResetFeatureFlags()
 	defer ResetFeatureFlags()
 
 	// After reset, both the atomic and the feature flag are false
