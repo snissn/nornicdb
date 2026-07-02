@@ -1195,7 +1195,7 @@ type BackupableEngine interface {
 }
 
 func (db *DB) rebuildTemporalIndexesNoLock(ctx context.Context) error {
-	if maint, ok := db.baseStorage.(storage.TemporalMaintenanceEngine); ok {
+	if maint, ok := db.temporalMaintenanceNoLock(); ok {
 		return maint.RebuildTemporalIndexes(ctx)
 	}
 	return nil
@@ -1220,7 +1220,7 @@ func (db *DB) PruneTemporalHistory(ctx context.Context, opts storage.TemporalPru
 	if db.closed {
 		return 0, ErrClosed
 	}
-	if maint, ok := db.baseStorage.(storage.TemporalMaintenanceEngine); ok {
+	if maint, ok := db.temporalMaintenanceNoLock(); ok {
 		return maint.PruneTemporalHistory(ctx, opts)
 	}
 	return 0, nil
@@ -1234,7 +1234,7 @@ func (db *DB) RebuildMVCCHeads(ctx context.Context) error {
 	if db.closed {
 		return ErrClosed
 	}
-	if maint, ok := db.baseStorage.(storage.MVCCMaintenanceEngine); ok {
+	if maint, ok := db.mvccMaintenanceNoLock(); ok {
 		return maint.RebuildMVCCHeads(ctx)
 	}
 	return nil
@@ -1248,7 +1248,7 @@ func (db *DB) PruneMVCCVersions(ctx context.Context, opts storage.MVCCPruneOptio
 	if db.closed {
 		return 0, ErrClosed
 	}
-	if maint, ok := db.baseStorage.(storage.MVCCMaintenanceEngine); ok {
+	if maint, ok := db.mvccMaintenanceNoLock(); ok {
 		return maint.PruneMVCCVersions(ctx, opts)
 	}
 	return 0, nil
@@ -1262,7 +1262,7 @@ func (db *DB) LifecycleStatus() (map[string]interface{}, error) {
 	if db.closed {
 		return nil, ErrClosed
 	}
-	if lce, ok := db.baseStorage.(storage.MVCCLifecycleEngine); ok {
+	if lce, ok := db.mvccLifecycleNoLock(); ok {
 		return lce.LifecycleStatus(), nil
 	}
 	return map[string]interface{}{"enabled": false}, nil
@@ -1276,7 +1276,7 @@ func (db *DB) TriggerLifecyclePrune(ctx context.Context) error {
 	if db.closed {
 		return ErrClosed
 	}
-	if lce, ok := db.baseStorage.(storage.MVCCLifecycleEngine); ok {
+	if lce, ok := db.mvccLifecycleNoLock(); ok {
 		return lce.TriggerPruneNow(ctx)
 	}
 	return nil
@@ -1290,7 +1290,7 @@ func (db *DB) PauseLifecycle() error {
 	if db.closed {
 		return ErrClosed
 	}
-	if lce, ok := db.baseStorage.(storage.MVCCLifecycleEngine); ok {
+	if lce, ok := db.mvccLifecycleNoLock(); ok {
 		lce.PauseLifecycle()
 	}
 	return nil
@@ -1304,7 +1304,7 @@ func (db *DB) ResumeLifecycle() error {
 	if db.closed {
 		return ErrClosed
 	}
-	if lce, ok := db.baseStorage.(storage.MVCCLifecycleEngine); ok {
+	if lce, ok := db.mvccLifecycleNoLock(); ok {
 		lce.ResumeLifecycle()
 	}
 	return nil
@@ -1422,7 +1422,7 @@ func (db *DB) Restore(ctx context.Context, path string) error {
 		db.mu.Unlock()
 		return fmt.Errorf("failed to rebuild temporal indexes after restore: %w", err)
 	}
-	if maint, ok := db.baseStorage.(storage.MVCCMaintenanceEngine); ok {
+	if maint, ok := db.mvccMaintenanceNoLock(); ok {
 		if err := maint.RebuildMVCCHeads(ctx); err != nil {
 			db.mu.Unlock()
 			return fmt.Errorf("failed to rebuild mvcc heads after restore: %w", err)

@@ -1068,7 +1068,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// Initialize knowledge-layer decay: wire scorer into BadgerEngine read paths.
 	// The flusher is created here but started later (after buildCtx is initialized).
 	if config.Memory.DecayEnabled {
-		if be := unwrapToBadgerEngine(db.baseStorage); be != nil {
+		if be, ok := storage.FindCapability[*storage.BadgerEngine](db.baseStorage); ok {
 			be.SetDecayEnabled(true)
 			defaultDBName := db.defaultDatabaseName()
 
@@ -1308,13 +1308,13 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// Both rebuild ops are fast (single-pass scans) on a fresh DB; on a
 	// recovered DB they are bounded by node/edge count.
 	bootstrapCtx, bootstrapCancel := context.WithTimeout(db.buildCtx, 4*time.Hour)
-	if maint, ok := db.baseStorage.(storage.TemporalMaintenanceEngine); ok {
+	if maint, ok := db.temporalMaintenanceNoLock(); ok {
 		log.Printf("🕰️ Rebuilding temporal indexes before serving traffic...")
 		if err := maint.RebuildTemporalIndexes(bootstrapCtx); err != nil {
 			log.Printf("⚠️  Temporal index rebuild failed: %v", err)
 		}
 	}
-	if maint, ok := db.baseStorage.(storage.MVCCMaintenanceEngine); ok {
+	if maint, ok := db.mvccMaintenanceNoLock(); ok {
 		log.Printf("🧾 Rebuilding MVCC heads before serving traffic...")
 		if err := maint.RebuildMVCCHeads(bootstrapCtx); err != nil {
 			log.Printf("⚠️  MVCC head rebuild failed: %v", err)
@@ -2268,7 +2268,7 @@ func (db *DB) ClearAllEmbeddings() (int, error) {
 	if _, ok := engine.(*storage.MemoryEngine); ok {
 		return 0, fmt.Errorf("storage engine does not support ClearAllEmbeddings")
 	}
-	if embeddingStorage, ok := unwrapToEmbeddingClearer(engine); ok {
+	if embeddingStorage, ok := findEmbeddingClearer(engine); ok {
 		if idPrefix != "" {
 			return embeddingStorage.ClearAllEmbeddingsForPrefix(idPrefix)
 		}
@@ -2567,16 +2567,6 @@ func (db *DB) Cypher(ctx context.Context, query string, params map[string]any) (
 
 // unwrapToBadgerEngine walks the engine wrapper chain to find the underlying BadgerEngine.
 func unwrapToBadgerEngine(eng storage.Engine) *storage.BadgerEngine {
-	for {
-		switch e := eng.(type) {
-		case *storage.BadgerEngine:
-			return e
-		case interface{ GetInnerEngine() storage.Engine }:
-			eng = e.GetInnerEngine()
-		case interface{ UnwrapEngine() storage.Engine }:
-			eng = e.UnwrapEngine()
-		default:
-			return nil
-		}
-	}
+	be, _ := storage.FindCapability[*storage.BadgerEngine](eng)
+	return be
 }

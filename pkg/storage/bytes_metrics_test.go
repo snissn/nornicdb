@@ -4,7 +4,7 @@
 //   - First-tick: an interval-overridden sweeper populates 5 gauges within
 //     a small wall-clock budget after Start.
 //   - Interval override drives ≥ 2 sweep cycles within the test window.
-//   - Panic recovery: a fake DB panic in EstimateSize does not propagate.
+//   - Panic recovery: a byte-stats provider panic does not propagate.
 //   - Shutdown stops the ticker; no further Set() calls after.
 //   - Race-clean across concurrent puts + sweeps with -race -count=10.
 package storage
@@ -68,7 +68,7 @@ func setupSweeperEnv(t *testing.T, interval time.Duration) (*BadgerEngine, *prom
 	probe := storageProbeAdapter{be: be}
 	bag := observability.NewStorageMetrics(reg, false, probe)
 
-	sweeper := NewBytesMetricsSweeper(bag, be.db, nil /* search */, interval)
+	sweeper := NewBytesMetricsSweeper(bag, be, nil /* search */, interval)
 	return be, reg, bag, sweeper
 }
 
@@ -159,23 +159,46 @@ func TestBytesMetricsSweeper_IntervalOverride(t *testing.T) {
 	<-doneStart
 }
 
-// TestBytesMetricsSweeper_PanicRecovers: a fake panic inside the gauge
-// path does not propagate. We simulate by registering a Set hook that
-// panics — but easier: register a custom probe adapter where the
-// EstimateSize call would panic. Since we can't poison badger.DB easily,
-// we instead invoke sweep() directly with an engine whose db has been
-// closed → EstimateSize on a closed DB panics in some paths; the
-// defer-recover swallow guarantees safety.
+type panicByteStatsProvider struct{}
+
+func (panicByteStatsProvider) StorageByteStats() StorageByteStats {
+	panic("byte stats panic")
+}
+
+type partialByteStatsProvider struct{}
+
+func (partialByteStatsProvider) StorageByteStats() StorageByteStats {
+	return StorageByteStats{
+		Nodes:          1024,
+		Edges:          2048,
+		Index:          4096,
+		IndexSupported: true,
+		WAL:            512,
+		WALSupported:   true,
+	}
+}
+
+// TestBytesMetricsSweeper_PanicRecovers: a provider panic does not propagate.
 func TestBytesMetricsSweeper_PanicRecovers(t *testing.T) {
-	be, _, bag, sweeper := setupSweeperEnv(t, 100*time.Millisecond)
-	_ = bag
-	// Close the engine — subsequent EstimateSize on closed db may panic
-	// or no-op; either way the sweeper's defer-recover must guarantee
-	// no panic propagates from sweep().
-	require.NoError(t, be.Close())
+	_, _, bag, _ := setupSweeperEnv(t, 100*time.Millisecond)
+	sweeper := NewBytesMetricsSweeper(bag, panicByteStatsProvider{}, nil, 100*time.Millisecond)
 	require.NotPanics(t, func() {
 		sweeper.sweep()
 	})
+}
+
+func TestBytesMetricsSweeper_SkipsUnsupportedByteKinds(t *testing.T) {
+	_, reg, bag, _ := setupSweeperEnv(t, 100*time.Millisecond)
+	sweeper := NewBytesMetricsSweeper(bag, partialByteStatsProvider{}, nil, 100*time.Millisecond)
+
+	sweeper.sweep()
+
+	got := gatherBytesByKind(t, reg)
+	require.NotContains(t, got, "nodes")
+	require.NotContains(t, got, "edges")
+	require.Equal(t, float64(4096), got["index"])
+	require.Equal(t, float64(512), got["wal"])
+	require.Equal(t, float64(0), got["search"])
 }
 
 // TestBytesMetricsSweeper_RaceSafe: concurrent puts + sweeps with
@@ -240,7 +263,7 @@ func TestBytesMetricsSweeper_ShutdownStops(t *testing.T) {
 	require.NoError(t, sweeper.Shutdown(context.Background()))
 }
 
-// TestBytesMetricsSweeper_NilGuards verifies that nil metrics or nil db
+// TestBytesMetricsSweeper_NilGuards verifies that nil metrics or nil provider
 // produce a no-op Start that still respects ctx cancellation.
 func TestBytesMetricsSweeper_NilGuards(t *testing.T) {
 	sweeper := NewBytesMetricsSweeper(nil, nil, nil, 10*time.Millisecond)

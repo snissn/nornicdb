@@ -980,26 +980,33 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// 2b''. Plan 04-04: construct StorageMetrics (MET-10) + MVCCMetrics
 	//       (MET-11). The bags register against obs.Registry() — disjoint
-	//       families, no AlreadyRegisteredError risk. Inject into the
-	//       underlying *BadgerEngine via AttachMetrics, which pre-binds
-	//       the four op-duration observers (MET-25). The bytes_metrics
-	//       sweeper is registered as a lifecycle.Component below between
-	//       pprof and workers per RESEARCH §Q4 ordering — it drains AFTER
-	//       workers and BEFORE the telemetry listener so the final scrape
-	//       during drain reflects last-known sizes.
+	//       families, no AlreadyRegisteredError risk. Optional backend
+	//       capabilities decide which storage metrics are wired; Badger still
+	//       receives AttachMetrics to pre-bind hot-path observers (MET-25), and
+	//       TreeDB exposes bounded native byte and count gauges without Badger
+	//       type assertions. The bytes_metrics sweeper is registered as a
+	//       lifecycle.Component below between pprof and workers per RESEARCH §Q4
+	//       ordering — it drains AFTER workers and BEFORE the telemetry listener
+	//       so the final scrape reflects last-known sizes.
 	var bytesSweeper *storage.BytesMetricsSweeper
-	if badgerEngine := unwrapBadgerEngine(db.GetStorage()); badgerEngine != nil {
+	metricsEngine := db.GetStorage()
+	if byteStats, ok := storage.FindCapability[storage.StorageByteStatsProvider](metricsEngine); ok {
 		storageMetrics := observability.NewStorageMetrics(
 			obs.Registry(),
 			cfg.Observability.Metrics.TenantLabelsEnabled,
-			badgerStorageProbe{be: badgerEngine},
+			newEngineStorageProbe(metricsEngine),
 		)
-		mvccMetrics := observability.NewMVCCMetrics(
-			obs.Registry(),
-			cfg.Observability.Metrics.TenantLabelsEnabled,
-			badgerMVCCProbe{be: badgerEngine},
-		)
-		badgerEngine.AttachMetrics(storageMetrics, mvccMetrics)
+		var mvccMetrics *observability.MVCCMetrics
+		if mvccProbe, ok := newEngineMVCCProbe(metricsEngine); ok {
+			mvccMetrics = observability.NewMVCCMetrics(
+				obs.Registry(),
+				cfg.Observability.Metrics.TenantLabelsEnabled,
+				mvccProbe,
+			)
+		}
+		if attacher, ok := storage.FindCapability[storageMetricsAttacher](metricsEngine); ok {
+			attacher.AttachMetrics(storageMetrics, mvccMetrics)
+		}
 
 		// D-07 sweep cadence: 30s default; Plan 04-04 introduces
 		// cfg.Storage.BytesMetricInterval. Override path is exercised by
@@ -1010,7 +1017,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		bytesSweeper = storage.NewBytesMetricsSweeper(
 			storageMetrics,
-			badgerEngine.DB(),
+			byteStats,
 			nil, /* search size callback — Plan 04-05 wires */
 			interval,
 		)

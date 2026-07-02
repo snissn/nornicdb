@@ -8,14 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	treedb "github.com/snissn/gomap/TreeDB"
+	treedbpage "github.com/snissn/gomap/TreeDB/page"
 )
 
 const defaultTreeDBProfile = string(treedb.ProfileLegacyWALDurable)
@@ -379,18 +379,57 @@ func (e *TreeDBEngine) Stats() map[string]string {
 	return e.db.Stats()
 }
 
-// Size returns a best-effort on-disk byte count for the TreeDB directory.
+// Size returns TreeDB's native diagnostic byte estimates for page-file and WAL
+// state.
 func (e *TreeDBEngine) Size() (lsm, vlog int64) {
-	if e.ensureOpen() != nil {
-		return 0, 0
+	stats := e.StorageByteStats()
+	return stats.Index, stats.WAL
+}
+
+// StorageByteStats returns bounded byte gauges for TreeDB observability.
+// TreeDB does not currently expose per-node or per-edge byte attribution, so
+// those gauges are marked unsupported rather than populated by a full graph
+// scan.
+func (e *TreeDBEngine) StorageByteStats() StorageByteStats {
+	return treeDBStorageByteStatsFromStats(e.Stats())
+}
+
+func treeDBStorageByteStatsFromStats(stats map[string]string) StorageByteStats {
+	var out StorageByteStats
+	if pages, ok := parseTreeDBStatInt64(stats, "treedb.pages.total"); ok {
+		out.Index = pages * int64(treedbpage.PageSize)
+		out.IndexSupported = true
 	}
-	_ = filepath.Walk(e.dir, func(_ string, info os.FileInfo, err error) error {
-		if err == nil && info != nil && info.Mode().IsRegular() {
-			lsm += info.Size()
-		}
-		return nil
-	})
-	return lsm, 0
+	if wal, ok := parseTreeDBStatInt64(stats, "treedb.cache.wal_bytes_estimate"); ok {
+		out.WAL = wal
+		out.WALSupported = true
+		return out
+	}
+	if wal, ok := parseTreeDBStatInt64(stats, "treedb.command_wal.bytes"); ok {
+		out.WAL = wal
+		out.WALSupported = true
+		return out
+	}
+	if wal, ok := parseTreeDBStatInt64(stats, "treedb.command_wal.bytes.total"); ok {
+		out.WAL = wal
+		out.WALSupported = true
+	}
+	return out
+}
+
+func parseTreeDBStatInt64(stats map[string]string, key string) (int64, bool) {
+	raw, ok := stats[key]
+	if !ok {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	if value < 0 {
+		value = 0
+	}
+	return value, true
 }
 
 func (e *TreeDBEngine) initializeCounts() error {

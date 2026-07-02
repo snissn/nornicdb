@@ -69,6 +69,28 @@ func TestOpen_StorageBackendSelectorTreeDBUsesNativeDurabilityPath(t *testing.T)
 	require.False(t, info.ReplicationSupported)
 }
 
+func TestOpen_StorageBackendSelectorTreeDBCapabilities(t *testing.T) {
+	cfg := treeDBStorageTestConfig()
+
+	db, err := Open(t.TempDir(), cfg)
+	require.NoError(t, err)
+	defer db.Close()
+
+	caps := db.StorageCapabilities()
+	require.Equal(t, nornicConfig.StorageBackendTreeDB, caps.Backend)
+	require.True(t, caps.StorageMaintenance)
+	require.True(t, caps.StorageByteStats)
+	require.True(t, caps.StorageDiagnostics)
+	require.True(t, caps.TreeDBDurability)
+	require.False(t, caps.TemporalMaintenance)
+	require.False(t, caps.MVCCMaintenance)
+	require.False(t, caps.MVCCLifecycle)
+
+	status, err := db.LifecycleStatus()
+	require.NoError(t, err)
+	require.Equal(t, false, status["enabled"])
+}
+
 func TestOpen_StorageBackendSelectorTreeDBCreateGetReopen(t *testing.T) {
 	cfg := treeDBStorageTestConfig()
 	dir := t.TempDir()
