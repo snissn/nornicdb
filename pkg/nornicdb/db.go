@@ -316,7 +316,7 @@ func resolveStorageBackendForOpen(dataDir string, config *Config) (string, error
 		if config.Database.EncryptionEnabled {
 			return "", fmt.Errorf("treedb storage backend does not support encryption yet")
 		}
-		return "", fmt.Errorf("treedb storage backend is not implemented yet")
+		return nornicConfig.StorageBackendTreeDB, nil
 	default:
 		return "", fmt.Errorf("invalid storage backend %q", backend)
 	}
@@ -347,8 +347,11 @@ func resolveStorageBackendForOpen(dataDir string, config *Config) (string, error
 //   - Directory created if doesn't exist
 //
 // TreeDB Storage (storage_backend=treedb):
-//   - Reserved for the native TreeDB engine integration
-//   - Fails closed until that engine is available
+//   - Uses TreeDB for durable storage
+//   - Uses TreeDB native conditional transactions and revision metadata
+//   - Requires a persistent data directory
+//   - Fails closed for encryption, in-memory mode, memory decay, and cluster
+//     replication until those integrations are implemented
 //
 // In-Memory Storage (dataDir == "" or storage_backend=memory without dataDir):
 //   - Uses memory-only storage
@@ -986,6 +989,10 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			}
 		}
 		fmt.Printf("📦 Wrapped storage with namespace '%s' (all operations are namespaced)\n", defaultDBName)
+	} else if storageBackend == nornicConfig.StorageBackendTreeDB {
+		if err := openTreeDBStorage(db, dataDir, config); err != nil {
+			return nil, err
+		}
 	} else {
 		var baseStorage storage.Engine = storage.NewMemoryEngine()
 		fmt.Println("⚠️  Using in-memory storage (data will not persist)")
@@ -1056,9 +1063,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// globally disabled nobody consumes the marker, so writing it is pure
 	// write amplification on every CreateNode/UpsertNode. Thread the flag
 	// down to the engine once at startup.
-	if be := unwrapToBadgerEngine(db.baseStorage); be != nil {
-		be.SetEmbeddingsEnabled(config.Memory.EmbeddingEnabled)
-	}
+	setEmbeddingsEnabledIfSupported(db.baseStorage, config.Memory.EmbeddingEnabled)
 
 	// Initialize knowledge-layer decay: wire scorer into BadgerEngine read paths.
 	// The flusher is created here but started later (after buildCtx is initialized).
@@ -2260,12 +2265,14 @@ func (db *DB) ClearAllEmbeddings() (int, error) {
 		engine = walEngine.GetEngine()
 	}
 
-	// Now check if we have a BadgerEngine
-	if badgerStorage, ok := engine.(*storage.BadgerEngine); ok {
+	if _, ok := engine.(*storage.MemoryEngine); ok {
+		return 0, fmt.Errorf("storage engine does not support ClearAllEmbeddings")
+	}
+	if embeddingStorage, ok := unwrapToEmbeddingClearer(engine); ok {
 		if idPrefix != "" {
-			return badgerStorage.ClearAllEmbeddingsForPrefix(idPrefix)
+			return embeddingStorage.ClearAllEmbeddingsForPrefix(idPrefix)
 		}
-		return badgerStorage.ClearAllEmbeddings()
+		return embeddingStorage.ClearAllEmbeddings()
 	}
 
 	return 0, fmt.Errorf("storage engine does not support ClearAllEmbeddings")
