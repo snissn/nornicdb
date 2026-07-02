@@ -228,6 +228,28 @@ func normalizeWarmingFlag(v string) string {
 	}
 }
 
+func dataDirExplicitlyConfigured(cmd *cobra.Command) bool {
+	if cmd != nil && cmd.Flags().Changed("data-dir") {
+		return true
+	}
+	return strings.TrimSpace(os.Getenv("NORNICDB_DATA_DIR")) != "" ||
+		strings.TrimSpace(os.Getenv("NEO4J_dbms_directories_data")) != ""
+}
+
+func resolveCLIStorageBackendAndDataDir(cmd *cobra.Command, loadedBackend, flagBackend, dataDir string) (string, string, error) {
+	backend := config.NormalizeStorageBackend(loadedBackend)
+	if cmd != nil && cmd.Flags().Changed("storage-backend") {
+		backend = config.NormalizeStorageBackend(flagBackend)
+	}
+	if err := config.ValidateStorageBackend(backend); err != nil {
+		return "", "", err
+	}
+	if backend == config.StorageBackendMemory && !dataDirExplicitlyConfigured(cmd) {
+		dataDir = ""
+	}
+	return backend, dataDir, nil
+}
+
 func runServe(cmd *cobra.Command, args []string) error {
 	boltPort, _ := cmd.Flags().GetInt("bolt-port")
 	httpPort, _ := cmd.Flags().GetInt("http-port")
@@ -339,6 +361,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	resolvedAddress := resolveBindAddress(cmd, cfg, address, loadedConfigFile)
 	cfg.Server.HTTPAddress = resolvedAddress
 	cfg.Server.BoltAddress = resolvedAddress
+	effectiveStorageBackend, resolvedDataDir, err := resolveCLIStorageBackendAndDataDir(cmd, cfg.Database.StorageBackend, storageBackend, dataDir)
+	if err != nil {
+		return err
+	}
+	storageBackend = effectiveStorageBackend
+	dataDir = resolvedDataDir
 
 	// YAML config file is the source of truth for embedding settings
 	// Always use config file values if they are set (non-zero/non-empty)
@@ -433,7 +461,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("🚀 Starting NornicDB %s\n", buildinfo.DisplayVersion())
-	fmt.Printf("   Data directory:  %s\n", dataDir)
+	if dataDir == "" {
+		fmt.Printf("   Data directory:  in-memory\n")
+	} else {
+		fmt.Printf("   Data directory:  %s\n", dataDir)
+	}
 	fmt.Printf("   Bolt protocol:   bolt://localhost:%d\n", boltPort)
 	fmt.Printf("   HTTP API:        http://localhost:%d\n", httpPort)
 	if cfg.Memory.EmbeddingEnabled {
@@ -483,9 +515,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
-	// Create data directory
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return fmt.Errorf("creating data directory: %w", err)
+	// Create data directory for persistent backends.
+	if dataDir != "" {
+		if err := os.MkdirAll(dataDir, 0755); err != nil {
+			return fmt.Errorf("creating data directory: %w", err)
+		}
 	}
 
 	// Configure database. cfg is the canonical config snapshot built by
@@ -497,9 +531,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// directly: any field that lives on Config now flows through.
 	dbConfig := cfg
 	dbConfig.Database.DataDir = dataDir
-	if cmd.Flags().Changed("storage-backend") {
-		dbConfig.Database.StorageBackend = storageBackend
-	}
+	dbConfig.Database.StorageBackend = storageBackend
 	dbConfig.Server.BoltPort = boltPort
 	dbConfig.Server.HTTPPort = httpPort
 	// Embedding endpoint/credentials are still computed locally from a
@@ -1554,9 +1586,18 @@ http_port: 7474
 func runShell(cmd *cobra.Command, args []string) error {
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 	storageBackend, _ := cmd.Flags().GetString("storage-backend")
+	var err error
+	storageBackend, dataDir, err = resolveCLIStorageBackendAndDataDir(cmd, storageBackend, storageBackend, dataDir)
+	if err != nil {
+		return err
+	}
 
 	// Open database
-	fmt.Printf("📂 Opening database at %s...\n", dataDir)
+	if dataDir == "" {
+		fmt.Printf("📂 Opening in-memory database...\n")
+	} else {
+		fmt.Printf("📂 Opening database at %s...\n", dataDir)
+	}
 	config := nornicdb.DefaultConfig()
 	config.Database.DataDir = dataDir
 	config.Database.StorageBackend = storageBackend
@@ -1635,8 +1676,17 @@ func runDecaySuppress(cmd *cobra.Command, args []string) error {
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 	storageBackend, _ := cmd.Flags().GetString("storage-backend")
 	threshold, _ := cmd.Flags().GetFloat64("threshold")
+	var err error
+	storageBackend, dataDir, err = resolveCLIStorageBackendAndDataDir(cmd, storageBackend, storageBackend, dataDir)
+	if err != nil {
+		return err
+	}
 
-	fmt.Printf("Opening database at %s...\n", dataDir)
+	if dataDir == "" {
+		fmt.Printf("Opening in-memory database...\n")
+	} else {
+		fmt.Printf("Opening database at %s...\n", dataDir)
+	}
 	cfg := nornicdb.DefaultConfig()
 	cfg.Database.DataDir = dataDir
 	cfg.Database.StorageBackend = storageBackend
@@ -1716,8 +1766,17 @@ func applySuppressionCounters(becameSuppressed bool, newlySuppressed, alreadySup
 func runDecayStats(cmd *cobra.Command, args []string) error {
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 	storageBackend, _ := cmd.Flags().GetString("storage-backend")
+	var err error
+	storageBackend, dataDir, err = resolveCLIStorageBackendAndDataDir(cmd, storageBackend, storageBackend, dataDir)
+	if err != nil {
+		return err
+	}
 
-	fmt.Printf("Opening database at %s...\n", dataDir)
+	if dataDir == "" {
+		fmt.Printf("Opening in-memory database...\n")
+	} else {
+		fmt.Printf("Opening database at %s...\n", dataDir)
+	}
 	cfg := nornicdb.DefaultConfig()
 	cfg.Database.DataDir = dataDir
 	cfg.Database.StorageBackend = storageBackend
