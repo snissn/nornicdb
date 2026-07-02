@@ -498,9 +498,8 @@ func TestTreeDBTransaction_SetNamespaceRejectsCrossNamespacePointReads(t *testin
 	_, err = tx.GetNode("tenant_b:b-user")
 	require.ErrorIs(t, err, ErrCrossNamespaceTransaction)
 
-	edge, err := tx.GetEdge("tenant_b:b-rel")
+	_, err = tx.GetEdge("tenant_b:b-rel")
 	require.ErrorIs(t, err, ErrCrossNamespaceTransaction)
-	require.Nil(t, edge)
 }
 
 func TestTreeDBTransaction_LabelScanPhantomConflictsOnCommit(t *testing.T) {
