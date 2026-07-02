@@ -160,7 +160,7 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 		if err != nil {
 			return nil, err
 		}
-		e.applyDeleteReturnProjection(result, cypher, deleteVars)
+		e.applyDeleteReturnProjection(result, cypher, deleteVars, singleDeleteProjectionInfo(deleteVars, deleteProjectionNode))
 		return result, nil
 	}
 
@@ -191,39 +191,24 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 
 	for _, row := range matchResult.Rows {
 		for _, val := range row {
-			// Try to extract node ID or edge ID
-			var nodeID string
-			var edgeID string
-
-			switch v := val.(type) {
-			case map[string]interface{}:
-				if id, ok := v["_edgeId"].(string); ok {
-					edgeID = id
-				} else if id, ok := v["_nodeId"].(string); ok {
-					nodeID = id
-				}
-			case *storage.Node:
-				nodeID = string(v.ID)
-			case *storage.Edge:
-				edgeID = string(v.ID)
-			case string:
-				nodeID = v
-			}
+			deleteTarget := classifyDeleteTargetValue(val)
 
 			// Handle relationship deletion
-			if edgeID != "" {
+			if deleteTarget.kind == deleteProjectionRelationship {
+				edgeID := string(deleteTarget.edgeID)
 				if _, seen := deletedEdgeIDs[edgeID]; seen {
 					continue
 				}
 				deletedEdgeIDs[edgeID] = struct{}{}
-				edgeIDsToDelete = append(edgeIDsToDelete, storage.EdgeID(edgeID))
+				edgeIDsToDelete = append(edgeIDsToDelete, deleteTarget.edgeID)
 				continue
 			}
 
 			// Handle node deletion
-			if nodeID == "" {
+			if deleteTarget.kind != deleteProjectionNode {
 				continue
 			}
+			nodeID := string(deleteTarget.nodeID)
 			if _, seen := deletedNodeIDs[nodeID]; seen {
 				continue
 			}
@@ -261,7 +246,7 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 		result.Stats.RelationshipsDeleted += len(edgeIDsToDelete)
 	}
 
-	e.applyDeleteReturnProjection(result, cypher, deleteVars)
+	e.applyDeleteReturnProjection(result, cypher, deleteVars, inferDeleteProjectionInfo(matchResult.Rows, deleteVars))
 
 	return result, nil
 }
@@ -361,7 +346,7 @@ func (e *StorageExecutor) tryExecuteDeleteWithWithLimitHotPath(ctx context.Conte
 		}
 	}
 
-	e.applyDeleteReturnProjection(result, cypher, deleteVar)
+	e.applyDeleteReturnProjection(result, cypher, deleteVar, singleDeleteProjectionInfo(deleteVar, deleteProjectionNode))
 	return result, true, nil
 }
 
@@ -514,7 +499,115 @@ func wherePartNodePattern(nodePat nodePatternInfo, variable string) nodePatternI
 	return nodePat
 }
 
-func (e *StorageExecutor) applyDeleteReturnProjection(result *ExecuteResult, cypher, deleteVars string) {
+type deleteProjectionKind uint8
+
+const (
+	deleteProjectionUnknown deleteProjectionKind = iota
+	deleteProjectionNode
+	deleteProjectionRelationship
+)
+
+type deleteProjectionInfo struct {
+	kinds map[string]deleteProjectionKind
+}
+
+type deleteTargetValue struct {
+	kind   deleteProjectionKind
+	nodeID storage.NodeID
+	edgeID storage.EdgeID
+}
+
+func singleDeleteProjectionInfo(deleteVar string, kind deleteProjectionKind) deleteProjectionInfo {
+	deleteVar = strings.TrimSpace(deleteVar)
+	if deleteVar == "" {
+		return deleteProjectionInfo{}
+	}
+	return deleteProjectionInfo{kindMap(deleteVar, kind)}
+}
+
+func kindMap(deleteVar string, kind deleteProjectionKind) map[string]deleteProjectionKind {
+	return map[string]deleteProjectionKind{deleteVar: kind}
+}
+
+func classifyDeleteTargetValue(val interface{}) deleteTargetValue {
+	switch v := val.(type) {
+	case map[string]interface{}:
+		if id, ok := v["_edgeId"].(string); ok && id != "" {
+			return deleteTargetValue{kind: deleteProjectionRelationship, edgeID: storage.EdgeID(id)}
+		}
+		if id, ok := v["_nodeId"].(string); ok && id != "" {
+			return deleteTargetValue{kind: deleteProjectionNode, nodeID: storage.NodeID(id)}
+		}
+	case *storage.Node:
+		if v != nil {
+			return deleteTargetValue{kind: deleteProjectionNode, nodeID: v.ID}
+		}
+	case *storage.Edge:
+		if v != nil {
+			return deleteTargetValue{kind: deleteProjectionRelationship, edgeID: v.ID}
+		}
+	case string:
+		if v != "" {
+			return deleteTargetValue{kind: deleteProjectionNode, nodeID: storage.NodeID(v)}
+		}
+	}
+	return deleteTargetValue{}
+}
+
+func inferDeleteProjectionInfo(rows [][]interface{}, deleteVars string) deleteProjectionInfo {
+	vars := strings.Split(deleteVars, ",")
+	if len(vars) == 0 {
+		return deleteProjectionInfo{}
+	}
+	for i := range vars {
+		vars[i] = strings.TrimSpace(vars[i])
+	}
+	info := deleteProjectionInfo{kinds: make(map[string]deleteProjectionKind, len(vars))}
+	for _, row := range rows {
+		for idx, val := range row {
+			if idx >= len(vars) {
+				break
+			}
+			name := vars[idx]
+			if name == "" || info.kindFor(name) != deleteProjectionUnknown {
+				continue
+			}
+			target := classifyDeleteTargetValue(val)
+			if target.kind != deleteProjectionUnknown {
+				info.kinds[name] = target.kind
+			}
+		}
+	}
+	return info
+}
+
+func (i deleteProjectionInfo) kindFor(name string) deleteProjectionKind {
+	if i.kinds == nil {
+		return deleteProjectionUnknown
+	}
+	return i.kinds[strings.TrimSpace(name)]
+}
+
+func deletedCountForProjection(result *ExecuteResult, inner string, info deleteProjectionInfo) int64 {
+	if strings.EqualFold(strings.TrimSpace(inner), "*") {
+		return int64(result.Stats.NodesDeleted + result.Stats.RelationshipsDeleted)
+	}
+	switch info.kindFor(inner) {
+	case deleteProjectionNode:
+		return int64(result.Stats.NodesDeleted)
+	case deleteProjectionRelationship:
+		return int64(result.Stats.RelationshipsDeleted)
+	}
+	if result.Stats.NodesDeleted > 0 && result.Stats.RelationshipsDeleted == 0 {
+		return int64(result.Stats.NodesDeleted)
+	}
+	if result.Stats.RelationshipsDeleted > 0 && result.Stats.NodesDeleted == 0 {
+		return int64(result.Stats.RelationshipsDeleted)
+	}
+	return int64(result.Stats.NodesDeleted)
+}
+
+func (e *StorageExecutor) applyDeleteReturnProjection(result *ExecuteResult, cypher, deleteVars string, info deleteProjectionInfo) {
 	if result == nil {
 		return
 	}
@@ -544,12 +637,7 @@ func (e *StorageExecutor) applyDeleteReturnProjection(result *ExecuteResult, cyp
 		// COUNT() aggregation over deleted nodes/relationships.
 		if strings.HasPrefix(upperExpr, "COUNT(") {
 			inner := strings.TrimSpace(item.expr[6 : len(item.expr)-1])
-			upperInner := strings.ToUpper(inner)
-			if upperInner == "*" {
-				row[i] = int64(result.Stats.NodesDeleted + result.Stats.RelationshipsDeleted)
-			} else {
-				row[i] = int64(result.Stats.NodesDeleted)
-			}
+			row[i] = deletedCountForProjection(result, inner, info)
 			continue
 		}
 
@@ -701,32 +789,18 @@ func (e *StorageExecutor) executeDeleteStreaming(ctx context.Context, matchSegme
 				}
 				for _, row := range fullMatchResult.Rows {
 					for _, val := range row {
-						var nodeID string
-						var edgeID string
-						switch v := val.(type) {
-						case map[string]interface{}:
-							if id, ok := v["_edgeId"].(string); ok {
-								edgeID = id
-							} else if id, ok := v["_nodeId"].(string); ok {
-								nodeID = id
-							}
-						case *storage.Node:
-							nodeID = string(v.ID)
-						case *storage.Edge:
-							edgeID = string(v.ID)
-						case string:
-							nodeID = v
-						}
-						if edgeID != "" {
-							if err := store.DeleteEdge(storage.EdgeID(edgeID)); err == nil {
+						deleteTarget := classifyDeleteTargetValue(val)
+						if deleteTarget.kind == deleteProjectionRelationship {
+							if err := store.DeleteEdge(deleteTarget.edgeID); err == nil {
 								result.Stats.RelationshipsDeleted++
 								batchDeletes++
 							}
 							continue
 						}
-						if nodeID == "" {
+						if deleteTarget.kind != deleteProjectionNode {
 							continue
 						}
+						nodeID := string(deleteTarget.nodeID)
 						edgesCount := 0
 						if needEdgeStats {
 							outgoingEdges, _ := store.GetOutgoingEdges(storage.NodeID(nodeID))

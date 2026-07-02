@@ -55,7 +55,7 @@ CREATE (:Person {id:'p1', team:'red'}),
 	require.Nil(t, nodes)
 
 	res := &ExecuteResult{Stats: &QueryStats{NodesDeleted: 2, RelationshipsDeleted: 3}}
-	exec.applyDeleteReturnProjection(res, "MATCH (n) DELETE n RETURN count(*), count(n), n.name AS nn, n, 42 AS literal", "n")
+	exec.applyDeleteReturnProjection(res, "MATCH (n) DELETE n RETURN count(*), count(n), n.name AS nn, n, 42 AS literal", "n", singleDeleteProjectionInfo("n", deleteProjectionNode))
 	require.Equal(t, []string{"count(*)", "count(n)", "nn", "n", "literal"}, res.Columns)
 	require.Len(t, res.Rows, 1)
 	require.EqualValues(t, 5, res.Rows[0][0])
@@ -63,6 +63,26 @@ CREATE (:Person {id:'p1', team:'red'}),
 	require.Nil(t, res.Rows[0][2])
 	require.Nil(t, res.Rows[0][3])
 	require.EqualValues(t, 42, res.Rows[0][4])
+
+	res = &ExecuteResult{Stats: &QueryStats{RelationshipsDeleted: 3}}
+	exec.applyDeleteReturnProjection(res, "MATCH ()-[r]->() DELETE r RETURN count(r), r, r.kind", "r", singleDeleteProjectionInfo("r", deleteProjectionRelationship))
+	require.Equal(t, []string{"count(r)", "r", "r.kind"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.EqualValues(t, 3, res.Rows[0][0])
+	require.Nil(t, res.Rows[0][1])
+	require.Nil(t, res.Rows[0][2])
+
+	res = &ExecuteResult{Stats: &QueryStats{NodesDeleted: 2, RelationshipsDeleted: 3}}
+	info := inferDeleteProjectionInfo([][]interface{}{{
+		&storage.Node{ID: "n1"},
+		&storage.Edge{ID: "r1"},
+	}}, "n, r")
+	exec.applyDeleteReturnProjection(res, "MATCH (n)-[r]->() DELETE n, r RETURN count(n), count(r), count(*)", "n, r", info)
+	require.Equal(t, []string{"count(n)", "count(r)", "count(*)"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.EqualValues(t, 2, res.Rows[0][0])
+	require.EqualValues(t, 3, res.Rows[0][1])
+	require.EqualValues(t, 5, res.Rows[0][2])
 }
 
 func TestDeleteHelpers_StreamEligibilityAndExecution(t *testing.T) {
@@ -180,6 +200,41 @@ func TestDeleteHelpers_StreamExecution_ExpressionDeleteVarsBranches(t *testing.T
 	verify, err = exec.Execute(ctx, "MATCH (n:Tmp) RETURN count(n)", nil)
 	require.NoError(t, err)
 	require.EqualValues(t, 0, verify.Rows[0][0])
+}
+
+func TestDeleteHelpers_ExecuteDeleteRelationshipCountProjection(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "delete_rel_count_cov")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (a:Tmp {id:'a'}), (b:Tmp {id:'b'}), (a)-[:R]->(b)", nil)
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, "MATCH (a:Tmp {id:'a'})-[r:R]->(b:Tmp {id:'b'}) DELETE r RETURN count(r) AS c", nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.EqualValues(t, 1, res.Rows[0][0])
+
+	verify, err := exec.Execute(ctx, "MATCH ()-[r:R]->() RETURN count(r) AS c", nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, verify.Rows[0][0])
+}
+
+func TestDeleteHelpers_ClassifyDeleteTargetValueAndInferProjectionInfo(t *testing.T) {
+	require.Equal(t, deleteProjectionUnknown, classifyDeleteTargetValue(nil).kind)
+	require.Equal(t, deleteProjectionNode, classifyDeleteTargetValue("n1").kind)
+	require.Equal(t, storage.NodeID("n1"), classifyDeleteTargetValue("n1").nodeID)
+	require.Equal(t, deleteProjectionNode, classifyDeleteTargetValue(map[string]interface{}{"_nodeId": "n2"}).kind)
+	require.Equal(t, deleteProjectionRelationship, classifyDeleteTargetValue(map[string]interface{}{"_edgeId": "r2"}).kind)
+
+	info := inferDeleteProjectionInfo([][]interface{}{{
+		map[string]interface{}{"_nodeId": "n1"},
+		map[string]interface{}{"_edgeId": "r1"},
+	}}, "n, r")
+	require.Equal(t, deleteProjectionNode, info.kindFor("n"))
+	require.Equal(t, deleteProjectionRelationship, info.kindFor("r"))
+	require.Equal(t, deleteProjectionUnknown, info.kindFor("missing"))
 }
 
 func TestWherePartNodePattern(t *testing.T) {

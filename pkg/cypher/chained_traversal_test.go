@@ -4,6 +4,7 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -11,6 +12,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type danglingTraversalEngine struct {
+	*storage.MemoryEngine
+	forcedOutgoing map[storage.NodeID][]*storage.Edge
+	missingNodeIDs map[storage.NodeID]error
+}
+
+func (e *danglingTraversalEngine) GetOutgoingEdges(nodeID storage.NodeID) ([]*storage.Edge, error) {
+	if edges, ok := e.forcedOutgoing[nodeID]; ok {
+		return edges, nil
+	}
+	return e.MemoryEngine.GetOutgoingEdges(nodeID)
+}
+
+func (e *danglingTraversalEngine) GetNode(id storage.NodeID) (*storage.Node, error) {
+	if err, ok := e.missingNodeIDs[id]; ok {
+		return nil, err
+	}
+	return e.MemoryEngine.GetNode(id)
+}
 
 // setupChainedTestData creates a graph for testing chained traversals
 // Graph structure:
@@ -425,6 +446,48 @@ func TestTraverseFromNode(t *testing.T) {
 
 		paths := exec.traverseFromNode(context.Background(), persons[0], match)
 		assert.Nil(t, paths)
+	})
+
+	t.Run("skips dangling adjacency endpoints instead of failing", func(t *testing.T) {
+		inner := &danglingTraversalEngine{
+			MemoryEngine:   storage.NewMemoryEngine(),
+			forcedOutgoing: make(map[storage.NodeID][]*storage.Edge),
+			missingNodeIDs: make(map[storage.NodeID]error),
+		}
+		defer inner.Close()
+		engine := storage.NewNamespacedEngine(inner, "test_traverse")
+
+		exec := NewStorageExecutor(engine)
+		_, err := engine.CreateNode(&storage.Node{ID: "poc-live", Labels: []string{"POC"}, Properties: map[string]interface{}{"name": "POC"}})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&storage.Node{ID: "area-live", Labels: []string{"Area"}, Properties: map[string]interface{}{"name": "Area"}})
+		require.NoError(t, err)
+
+		inner.forcedOutgoing["test_traverse:poc-live"] = []*storage.Edge{
+			{ID: "test_traverse:ok-edge", Type: "BELONGS_TO", StartNode: "test_traverse:poc-live", EndNode: "test_traverse:area-live"},
+			{ID: "test_traverse:dangling-edge", Type: "BELONGS_TO", StartNode: "test_traverse:poc-live", EndNode: "test_traverse:area-missing"},
+		}
+		inner.missingNodeIDs["test_traverse:area-missing"] = errors.New("missing endpoint")
+
+		start, err := engine.GetNode("poc-live")
+		require.NoError(t, err)
+		require.NotNil(t, start)
+
+		match := &TraversalMatch{
+			StartNode: nodePatternInfo{variable: "poc", labels: []string{"POC"}},
+			EndNode:   nodePatternInfo{variable: "a", labels: []string{"Area"}},
+			Relationship: RelationshipPattern{
+				Types:     []string{"BELONGS_TO"},
+				Direction: "outgoing",
+				MinHops:   1,
+				MaxHops:   1,
+			},
+		}
+
+		paths := exec.traverseFromNode(context.Background(), start, match)
+		require.Len(t, paths, 1)
+		require.Len(t, paths[0].Nodes, 2)
+		assert.Equal(t, storage.NodeID("area-live"), paths[0].Nodes[1].ID)
 	})
 }
 

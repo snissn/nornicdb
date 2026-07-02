@@ -1675,6 +1675,28 @@ func (e *StorageExecutor) traverseFromNode(traversalCtx context.Context, startNo
 	return e.findPaths(ctx, startNode, []*storage.Node{startNode}, []*storage.Edge{}, 0, &match.EndNode)
 }
 
+// loadTraversalEndpointNode resolves a traversal endpoint using the same
+// tolerance as the existing traversal path: if the adjacency entry points at a
+// node that no longer loads, the candidate path is skipped rather than failing
+// the whole query. This gives callers one place to share the current dangling-
+// edge semantics.
+func (e *StorageExecutor) loadTraversalEndpointNode(ctx *TraversalContext, nextNodeID storage.NodeID) (*storage.Node, bool) {
+	nextNode := ctx.nodeCache[nextNodeID]
+	if nextNode == nil {
+		var err error
+		nextNode, err = e.storage.GetNode(nextNodeID)
+		if err != nil || nextNode == nil {
+			return nil, false
+		}
+		ctx.nodeCache[nextNodeID] = nextNode
+	}
+	visible, err := nodeVisibleInTemporalViewport(nextNode, ctx.temporalViewport, ctx.temporalChecker)
+	if err != nil || !visible {
+		return nil, false
+	}
+	return nextNode, true
+}
+
 // findPaths performs DFS to find all paths matching the pattern
 func (e *StorageExecutor) findPaths(
 	ctx *TraversalContext,
@@ -1769,18 +1791,8 @@ func (e *StorageExecutor) findPaths(
 			continue
 		}
 
-		// OPTIMIZATION: Use node cache to avoid repeated lookups
-		nextNode := ctx.nodeCache[nextNodeID]
-		if nextNode == nil {
-			var err error
-			nextNode, err = e.storage.GetNode(nextNodeID)
-			if err != nil || nextNode == nil {
-				continue
-			}
-			ctx.nodeCache[nextNodeID] = nextNode
-		}
-		visible, err := nodeVisibleInTemporalViewport(nextNode, ctx.temporalViewport, ctx.temporalChecker)
-		if err != nil || !visible {
+		nextNode, ok := e.loadTraversalEndpointNode(ctx, nextNodeID)
+		if !ok {
 			continue
 		}
 
