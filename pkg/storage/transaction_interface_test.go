@@ -141,3 +141,32 @@ func TestWALEngineBeginGraphTransactionLogsCommittedMutations(t *testing.T) {
 	require.Equal(t, tx.TransactionID(), nodeData.TxID)
 	require.Equal(t, NodeID("n1"), nodeData.Node.ID)
 }
+
+func TestWALEngineBeginGraphTransactionSkipsWALWhenDisabled(t *testing.T) {
+	t.Cleanup(config.WithWALDisabled())
+
+	base := NewMemoryEngine()
+	defer base.Close()
+
+	walDir := t.TempDir()
+	wal, err := NewWAL(walDir, DefaultWALConfig())
+	require.NoError(t, err)
+	walEngine := NewWALEngine(base, wal)
+	defer wal.Close()
+
+	tx, err := walEngine.BeginGraphTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("tenant"))
+
+	_, err = tx.CreateNode(&Node{ID: "tenant:n1", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	_, err = base.GetNode("tenant:n1")
+	require.NoError(t, err)
+
+	entries, err := ReadWALEntriesFromDir(walDir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}

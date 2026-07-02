@@ -3,6 +3,8 @@ package storage
 import (
 	"fmt"
 	"sync"
+
+	"github.com/orneryd/nornicdb/pkg/config"
 )
 
 type walGraphTransaction struct {
@@ -267,7 +269,7 @@ func (t *walGraphTransaction) snapshotEntries() []walGraphTransactionEntry {
 }
 
 func (t *walGraphTransaction) walEnabled() bool {
-	return t.walEngine != nil && t.walEngine.wal != nil
+	return t.walEngine != nil && t.walEngine.wal != nil && config.IsWALEnabled()
 }
 
 func (t *walGraphTransaction) databaseForEntries(entries []walGraphTransactionEntry) (string, error) {
