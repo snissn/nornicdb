@@ -604,6 +604,11 @@ func (t *TreeDBTransaction) DeleteEdge(id EdgeID) error {
 }
 
 func (t *TreeDBTransaction) BulkCreateEdges(edges []*Edge) error {
+	if len(edges) > 0 {
+		if err := t.ensureActive(); err != nil {
+			return err
+		}
+	}
 	t.reserveEdgeCreateBatch(edges)
 	for _, edge := range edges {
 		if err := t.CreateEdge(edge); err != nil {

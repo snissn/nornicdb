@@ -178,6 +178,23 @@ func TestTreeDBTransaction_CreateEdgeEndpointFastPathHonorsPendingAndDeletedNode
 	require.ErrorIs(t, err, ErrInvalidEdge)
 }
 
+func TestTreeDBTransaction_BulkCreateEdgesClosedTransaction(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	require.NoError(t, tx.Rollback())
+
+	require.NoError(t, tx.BulkCreateEdges(nil))
+	err = tx.BulkCreateEdges([]*Edge{{
+		ID:        "test:closed-edge",
+		StartNode: "test:closed-a",
+		EndNode:   "test:closed-b",
+		Type:      "LINKS",
+	}})
+	require.ErrorIs(t, err, ErrTransactionClosed)
+}
+
 func TestNamespacedTreeDBEngine_DirectFastPathStripsNamespaceAndReturnsCopies(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	namespaced := NewNamespacedEngine(engine, "tenant")
