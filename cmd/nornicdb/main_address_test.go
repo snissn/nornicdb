@@ -117,4 +117,38 @@ func TestResolveCLIStorageBackendAndDataDir(t *testing.T) {
 			t.Fatalf("expected explicit data dir to be preserved, got %q", dataDir)
 		}
 	})
+
+	t.Run("treedb backend preserves persistent data dir", func(t *testing.T) {
+		cmd := &cobra.Command{Use: "test"}
+		cmd.Flags().String("data-dir", "./data", "")
+		cmd.Flags().String("storage-backend", config.StorageBackendBadger, "")
+		if err := cmd.Flags().Set("storage-backend", "TreeDB"); err != nil {
+			t.Fatalf("set storage backend: %v", err)
+		}
+
+		backend, dataDir, err := resolveCLIStorageBackendAndDataDir(cmd, config.StorageBackendBadger, "TreeDB", "/var/lib/nornicdb")
+		if err != nil {
+			t.Fatalf("resolve storage backend: %v", err)
+		}
+		if backend != config.StorageBackendTreeDB {
+			t.Fatalf("expected treedb backend, got %q", backend)
+		}
+		if dataDir != "/var/lib/nornicdb" {
+			t.Fatalf("expected TreeDB data dir to be preserved, got %q", dataDir)
+		}
+	})
+
+	t.Run("invalid backend rejected", func(t *testing.T) {
+		cmd := &cobra.Command{Use: "test"}
+		cmd.Flags().String("data-dir", "./data", "")
+		cmd.Flags().String("storage-backend", config.StorageBackendBadger, "")
+		if err := cmd.Flags().Set("storage-backend", "sqlite"); err != nil {
+			t.Fatalf("set storage backend: %v", err)
+		}
+
+		_, _, err := resolveCLIStorageBackendAndDataDir(cmd, config.StorageBackendBadger, "sqlite", "./data")
+		if err == nil {
+			t.Fatal("expected invalid backend error")
+		}
+	})
 }

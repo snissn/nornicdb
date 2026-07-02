@@ -43,6 +43,27 @@ docker run -d \
   timothyswt/nornicdb-arm64-metal:latest
 ```
 
+Badger is the production default storage backend. To opt into TreeDB, configure
+the backend explicitly and keep a persistent data directory mounted:
+
+```bash
+docker run -d \
+  --name nornicdb \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -v /opt/nornicdb/data:/data \
+  -e NORNICDB_ADDRESS=0.0.0.0 \
+  -e NORNICDB_STORAGE_BACKEND=treedb \
+  -e NORNICDB_DATA_DIR=/data \
+  timothyswt/nornicdb-arm64-metal:latest
+```
+
+TreeDB is an opt-in persistent backend. It fails closed for in-memory mode,
+database encryption, memory decay, and non-standalone cluster or raft mode
+until those capability lanes are implemented. See
+[Storage Backends](storage-backends.md) for the complete selector and
+capability matrix.
+
 ### Docker Compose
 
 ```yaml
@@ -274,6 +295,10 @@ tls:
 export NORNICDB_ENCRYPTION_PASSWORD="your-32-char-secure-password"
 ```
 
+Database encryption currently requires the default Badger backend. If
+`NORNICDB_STORAGE_BACKEND=treedb` and encryption is enabled, startup fails
+closed instead of creating an unencrypted TreeDB store.
+
 ## Health Checks
 
 ### HTTP Health Check
@@ -293,7 +318,7 @@ curl http://localhost:7474/status \
 ## See Also
 
 - **[Docker](docker.md)** - Docker-specific configuration
+- **[Storage Backends](storage-backends.md)** - Backend selectors and TreeDB capability gates
 - **[Monitoring](monitoring.md)** - Metrics and alerting
 - **[Scaling](scaling.md)** - Horizontal scaling
 - **[Backup & Restore](backup-restore.md)** - Data protection
-
