@@ -142,12 +142,12 @@ NORNICDB_STRICT_DURABILITY=true
 
 This automatically enables:
 
-| Setting | Value | Effect |
-|---------|-------|--------|
-| WAL Sync Mode | `immediate` | fsync every write |
-| Badger SyncWrites | `true` | Sync underlying storage |
-| TreeDB SyncWrites | `true` | Use TreeDB's synchronous commit path |
-| AsyncEngine Flush | `10ms` | More frequent cache flushes |
+| Setting | Applies to | Value | Effect |
+|---------|-----------|-------|--------|
+| WAL Sync Mode | All backends | `immediate` | fsync every write |
+| SyncWrites | Badger backend only | `true` | Sync Badger's underlying storage |
+| SyncWrites | TreeDB backend only | `true` | Use TreeDB's synchronous commit path |
+| AsyncEngine Flush | All backends | `10ms` | More frequent cache flushes |
 
 ### When to Use Strict Mode
 

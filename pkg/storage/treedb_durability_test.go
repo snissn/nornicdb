@@ -71,6 +71,7 @@ func TestTreeDBEngine_PersistenceReopenCyclesRetainGraphIndexesSchemaAndMetadata
 			SyncWrites: true,
 		})
 		require.NoError(t, err)
+		t.Cleanup(func() { _ = engine.Close() })
 		return engine
 	}
 
@@ -176,6 +177,7 @@ func TestTreeDBEngine_SyncPersistsWritesBeforeReopenAndClosedEngineFailsClosed(t
 	dir := t.TempDir()
 	engine, err := NewTreeDBEngineWithOptions(TreeDBOptions{Dir: dir})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = engine.Close() })
 	require.False(t, engine.DurabilityInfo().SyncWrites)
 
 	require.NoError(t, engine.BulkCreateNodes([]*Node{
@@ -193,6 +195,7 @@ func TestTreeDBEngine_SyncPersistsWritesBeforeReopenAndClosedEngineFailsClosed(t
 
 	reopened, err := NewTreeDBEngineWithOptions(TreeDBOptions{Dir: dir})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
 	got, err := reopened.GetNode("test:sync-a")
 	require.NoError(t, err)
 	require.Equal(t, "a", got.Properties["name"])
@@ -305,6 +308,7 @@ func TestTreeDBEngine_DurableTransactionBoundariesSurviveReopen(t *testing.T) {
 			SyncWrites: true,
 		})
 		require.NoError(t, err)
+		t.Cleanup(func() { _ = engine.Close() })
 		return engine
 	}
 
