@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	treedb "github.com/snissn/gomap/TreeDB"
 )
@@ -745,6 +746,40 @@ func (e *TreeDBEngine) UpdateNode(node *Node) error {
 		return tx.Commit()
 	}
 	if err := tx.UpdateNode(node); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// UpdateNodeEmbedding updates embedding fields on an existing node without creating missing nodes.
+func (e *TreeDBEngine) UpdateNodeEmbedding(node *Node) error {
+	if node == nil {
+		return ErrInvalidData
+	}
+	if node.ID == "" {
+		return ErrInvalidID
+	}
+	if err := treeDBValidPrefixedID("node", string(node.ID)); err != nil {
+		return err
+	}
+	tx, err := e.beginTreeDBPointTransaction()
+	if err != nil {
+		return err
+	}
+	existing, err := tx.GetNode(node.ID)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	next := copyNode(existing)
+	update := copyNode(node)
+	next.ChunkEmbeddings = update.ChunkEmbeddings
+	if update.EmbedMeta != nil {
+		next.EmbedMeta = update.EmbedMeta
+	}
+	next.UpdatedAt = time.Now()
+	if err := tx.UpdateNode(next); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -1806,7 +1841,9 @@ func mapTreeDBError(err error) error {
 		return ErrNotFound
 	case errors.Is(err, treedb.ErrConcurrentModification):
 		return ErrConflict
-	case errors.Is(err, treedb.ErrClosed), errors.Is(err, treedb.ErrConditionalTxnClosed):
+	case errors.Is(err, treedb.ErrConditionalTxnClosed):
+		return ErrTransactionClosed
+	case errors.Is(err, treedb.ErrClosed):
 		return ErrStorageClosed
 	case errors.Is(err, treedb.ErrConditionalTxnUnsupported):
 		return ErrNotImplemented

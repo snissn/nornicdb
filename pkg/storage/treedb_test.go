@@ -21,6 +21,11 @@ func newTestTreeDBEngine(t *testing.T) *TreeDBEngine {
 	return engine
 }
 
+func TestTreeDBErrorMapping_ConditionalTxnClosed(t *testing.T) {
+	require.ErrorIs(t, mapTreeDBError(treedb.ErrConditionalTxnClosed), ErrTransactionClosed)
+	require.ErrorIs(t, mapTreeDBError(treedb.ErrClosed), ErrStorageClosed)
+}
+
 func TestTreeDBEngine_HotBodyCacheLifecycle(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 
@@ -81,6 +86,52 @@ func TestTreeDBEngine_HotBodyCacheLifecycle(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotFound)
 	engine.edgeCacheMu.RLock()
 	_, cachedEdge := engine.edgeCache["test:cache-edge"]
+	engine.edgeCacheMu.RUnlock()
+	require.False(t, cachedEdge)
+}
+
+func TestTreeDBTransaction_CommitDeletedBodiesDoNotRemainCached(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+	_, err = tx.CreateNode(&Node{ID: "test:cache-delete-node", Labels: []string{"Doc"}})
+	require.NoError(t, err)
+	require.NoError(t, tx.DeleteNode("test:cache-delete-node"))
+	require.NoError(t, tx.Commit())
+
+	_, err = engine.GetNode("test:cache-delete-node")
+	require.ErrorIs(t, err, ErrNotFound)
+	engine.nodeCacheMu.RLock()
+	_, cachedNode := engine.nodeCache["test:cache-delete-node"]
+	engine.nodeCacheMu.RUnlock()
+	require.False(t, cachedNode)
+
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:cache-delete-a", Labels: []string{"Doc"}},
+		{ID: "test:cache-delete-b", Labels: []string{"Doc"}},
+	}))
+	rawTx, err = engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx = rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+	require.NoError(t, tx.CreateEdge(&Edge{
+		ID:        "test:cache-delete-edge",
+		StartNode: "test:cache-delete-a",
+		EndNode:   "test:cache-delete-b",
+		Type:      "LINKS",
+	}))
+	require.NoError(t, tx.DeleteEdge("test:cache-delete-edge"))
+	require.NoError(t, tx.Commit())
+
+	_, err = engine.GetEdge("test:cache-delete-edge")
+	require.ErrorIs(t, err, ErrNotFound)
+	engine.edgeCacheMu.RLock()
+	_, cachedEdge := engine.edgeCache["test:cache-delete-edge"]
 	engine.edgeCacheMu.RUnlock()
 	require.False(t, cachedEdge)
 }
@@ -694,6 +745,33 @@ func TestTreeDBTransaction_EdgeBetweenHeadSkipsMovedPendingReplacement(t *testin
 	require.Equal(t, first.ID, engine.GetEdgeBetween("test:move-a", "test:move-c", "KNOWS").ID)
 }
 
+func TestTreeDBTransaction_EdgeBetweenHeadCanPromotePendingReplacement(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	deleted := &Edge{
+		ID:        "test:pending-head-old",
+		StartNode: "test:pending-head-a",
+		EndNode:   "test:pending-head-b",
+		Type:      "KNOWS",
+	}
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("test"))
+
+	tx.pendingEdges = map[EdgeID]*Edge{
+		"test:pending-head-new": {
+			ID:        "test:pending-head-new",
+			StartNode: deleted.StartNode,
+			EndNode:   deleted.EndNode,
+			Type:      deleted.Type,
+		},
+	}
+	replacement, err := tx.replacementEdgeBetweenHead(deleted)
+	require.NoError(t, err)
+	require.Equal(t, EdgeID("test:pending-head-new"), replacement)
+}
+
 func TestTreeDBTransaction_GetFirstNodeByLabelNotFound(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	rawTx, err := engine.BeginGraphTransaction()
@@ -1040,6 +1118,39 @@ func TestTreeDBEngine_PendingEmbeddingsIndex(t *testing.T) {
 	found = engine.FindNodeNeedingEmbedding()
 	require.NotNil(t, found)
 	require.Equal(t, NodeID("test:embed"), found.ID)
+}
+
+func TestTreeDBEngine_UpdateNodeEmbeddingOnlyUpdatesExistingNodes(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	engine.SetEmbeddingsEnabled(true)
+	_, err := engine.CreateNode(&Node{
+		ID:         "test:embed-update",
+		Labels:     []string{"Doc"},
+		Properties: map[string]any{"content": "preserve"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, engine.PendingEmbeddingsCount())
+
+	err = engine.UpdateNodeEmbedding(&Node{
+		ID:              "test:embed-update",
+		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+		EmbedMeta:       map[string]any{"embedding_model": "test-model"},
+	})
+	require.NoError(t, err)
+	updated, err := engine.GetNode("test:embed-update")
+	require.NoError(t, err)
+	require.Equal(t, "preserve", updated.Properties["content"])
+	require.Equal(t, [][]float32{{0.1, 0.2, 0.3}}, updated.ChunkEmbeddings)
+	require.Equal(t, "test-model", updated.EmbedMeta["embedding_model"])
+	require.Equal(t, 0, engine.PendingEmbeddingsCount())
+
+	err = engine.UpdateNodeEmbedding(&Node{
+		ID:              "test:missing-embed-update",
+		ChunkEmbeddings: [][]float32{{0.4}},
+	})
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = engine.GetNode("test:missing-embed-update")
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestTreeDBEngine_EventCallbacks(t *testing.T) {

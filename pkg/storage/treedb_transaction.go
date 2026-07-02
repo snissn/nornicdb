@@ -1183,7 +1183,24 @@ func (t *TreeDBTransaction) replacementEdgeBetweenHead(deleted *Edge) (EdgeID, e
 		replacement = id
 		return nil
 	})
-	return replacement, mapTreeDBError(err)
+	if err != nil {
+		return "", mapTreeDBError(err)
+	}
+	if replacement != "" {
+		return replacement, nil
+	}
+	for id, pending := range t.pendingEdges {
+		if id == "" || id == deleted.ID {
+			continue
+		}
+		if _, removed := t.deletedEdges[id]; removed {
+			continue
+		}
+		if treeDBEdgeMatchesBetween(pending, deleted.StartNode, deleted.EndNode, deleted.Type) {
+			return id, nil
+		}
+	}
+	return "", nil
 }
 
 func (t *TreeDBTransaction) readNodeEdgeGuard(nodeID NodeID) error {

@@ -80,12 +80,6 @@ func (e *TreeDBEngine) applyBodyCache(
 	updatedEdges []*Edge,
 	deletedEdgeIDs []EdgeID,
 ) {
-	for _, id := range deletedNodeIDs {
-		e.cacheDeleteNode(id)
-	}
-	for _, id := range deletedEdgeIDs {
-		e.cacheDeleteEdge(id)
-	}
 	for _, node := range createdNodes {
 		e.cacheStoreNode(node)
 	}
@@ -97,5 +91,11 @@ func (e *TreeDBEngine) applyBodyCache(
 	}
 	for _, edge := range updatedEdges {
 		e.cacheStoreEdge(edge)
+	}
+	for _, id := range deletedNodeIDs {
+		e.cacheDeleteNode(id)
+	}
+	for _, id := range deletedEdgeIDs {
+		e.cacheDeleteEdge(id)
 	}
 }
