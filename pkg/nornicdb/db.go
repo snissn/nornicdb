@@ -311,7 +311,7 @@ func resolveStorageBackendForOpen(dataDir string, config *Config) (string, error
 	case nornicConfig.StorageBackendBadger:
 		return nornicConfig.StorageBackendBadger, nil
 	case nornicConfig.StorageBackendMemory:
-		return "", fmt.Errorf("memory storage backend cannot be used with data directory %q; omit data-dir for in-memory mode", dataDir)
+		return "", fmt.Errorf("memory storage backend cannot be used with data directory %q; use an empty data directory argument for in-memory mode", dataDir)
 	case nornicConfig.StorageBackendTreeDB:
 		if config.Database.EncryptionEnabled {
 			return "", fmt.Errorf("treedb storage backend does not support encryption yet")
