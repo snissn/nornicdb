@@ -142,113 +142,129 @@ func (e *StorageExecutor) callDbIndexFulltextQueryNodes(cypher string) (*Execute
 		return result, nil
 	}
 
-	// Parse query into terms (supports basic AND/OR/NOT)
-	queryTerms, excludeTerms, mustHaveTerms := parseFulltextQuery(query)
-	if len(queryTerms) == 0 && len(mustHaveTerms) == 0 {
+	// Parse the query using the full Lucene-classic parser. Composite
+	// queries like `group_id:"g" AND (term)` require this so the
+	// parenthesized default-field clause is intersected with the field-
+	// scoped clause rather than silently discarded (the pre-parser bug).
+	parsed, err := ParseFulltextQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.IsEmpty() {
 		return result, nil
 	}
 
-	// Get all nodes
 	nodes, err := e.storage.AllNodes()
 	if err != nil {
 		return nil, err
 	}
 
-	// Calculate IDF for all terms (for BM25-like scoring)
-	docFreq := make(map[string]int)
-	totalDocs := 0
+	// First pass: build the per-doc content strings and populate docFreq
+	// for BM25 IDF, restricted to the terms the parser actually scores.
+	type nodeDoc struct {
+		node *storage.Node
+		doc  *ftDoc
+	}
+	docs := make([]nodeDoc, 0, len(nodes))
+	docFreq := make(map[string]int, len(parsed.PrimaryTerms()))
+	var totalDocLen int64
 	for _, node := range nodes {
 		if !matchesLabels(node, targetLabels) {
 			continue
 		}
-		totalDocs++
-
-		// Count documents containing each term
-		content := extractTextContent(node, targetProperties)
-		contentLower := strings.ToLower(content)
-
-		allTerms := append(queryTerms, mustHaveTerms...)
-		for _, term := range allTerms {
-			if strings.Contains(contentLower, term) {
+		doc := buildNodeFulltextDoc(node, targetProperties)
+		if doc == nil {
+			continue
+		}
+		docs = append(docs, nodeDoc{node: node, doc: doc})
+		totalDocLen += int64(doc.contentTokenN)
+		for _, term := range parsed.PrimaryTerms() {
+			if strings.Contains(doc.contentLower, term) {
 				docFreq[term]++
 			}
 		}
 	}
+	totalDocs := len(docs)
+	avgDocLen := 100.0
+	if totalDocs > 0 {
+		avgDocLen = float64(totalDocLen) / float64(totalDocs)
+	}
 
-	// Score each node
+	ctx := &ftEvalCtx{
+		DefaultFields: targetProperties,
+		avgDocLen:     avgDocLen,
+		totalDocs:     totalDocs,
+		docFreq:       docFreq,
+	}
+
 	type scoredNode struct {
 		node  *storage.Node
 		score float64
 	}
-	var scoredNodes []scoredNode
-
-	for _, node := range nodes {
-		// Check label filter
-		if !matchesLabels(node, targetLabels) {
+	scoredNodes := make([]scoredNode, 0, len(docs))
+	for _, d := range docs {
+		matched, score := parsed.Match(ctx, d.doc)
+		if !matched {
 			continue
 		}
-
-		// Get searchable content
-		content := extractTextContent(node, targetProperties)
-		if content == "" {
-			continue
+		if score <= 0 {
+			// A pure field-scoped or presence match still deserves a positive
+			// score so the doc surfaces in the result. Use 1.0 as the floor
+			// (matches the wildcard/presence fast-paths above).
+			score = 1.0
 		}
-		contentLower := strings.ToLower(content)
-
-		// Check exclude terms
-		shouldExclude := false
-		for _, term := range excludeTerms {
-			if strings.Contains(contentLower, term) {
-				shouldExclude = true
-				break
-			}
-		}
-		if shouldExclude {
-			continue
-		}
-
-		// Check must-have terms
-		hasMustHave := true
-		for _, term := range mustHaveTerms {
-			if !strings.Contains(contentLower, term) {
-				hasMustHave = false
-				break
-			}
-		}
-		if !hasMustHave {
-			continue
-		}
-
-		// Calculate BM25-like score
-		score := calculateBM25Score(contentLower, queryTerms, docFreq, totalDocs)
-
-		// Boost for must-have terms
-		for _, term := range mustHaveTerms {
-			if strings.Contains(contentLower, term) {
-				score += 2.0
-			}
-		}
-
-		if score > 0 {
-			scoredNodes = append(scoredNodes, scoredNode{node: node, score: score})
-		}
+		scoredNodes = append(scoredNodes, scoredNode{node: d.node, score: score})
 	}
 
-	// Sort by score descending
 	sort.Slice(scoredNodes, func(i, j int) bool {
+		if scoredNodes[i].score == scoredNodes[j].score {
+			return scoredNodes[i].node.ID < scoredNodes[j].node.ID
+		}
 		return scoredNodes[i].score > scoredNodes[j].score
 	})
 
-	// Convert to result rows
 	for _, sn := range scoredNodes {
-		result.Rows = append(result.Rows, []interface{}{
-			sn.node,
-			sn.score,
-		})
+		result.Rows = append(result.Rows, []interface{}{sn.node, sn.score})
 	}
 	applyFulltextOptions(result, opts)
 
 	return result, nil
+}
+
+// buildNodeFulltextDoc canonicalizes a node into an ftDoc: every declared
+// index property is lower-cased into the properties map, all property
+// values are concatenated into contentLower for BM25 scoring, and the
+// token count is captured for length normalization. Returns nil if the
+// node has no content in any indexed property (empty-doc filter is
+// preserved from the pre-parser path).
+func buildNodeFulltextDoc(node *storage.Node, properties []string) *ftDoc {
+	if node == nil {
+		return nil
+	}
+	props := make(map[string]string, len(node.Properties))
+	rawProps := make(map[string]string, len(node.Properties))
+	for k, v := range node.Properties {
+		if v == nil {
+			continue
+		}
+		raw := fmt.Sprintf("%v", v)
+		if raw == "" {
+			continue
+		}
+		props[strings.ToLower(k)] = strings.ToLower(raw)
+		rawProps[strings.ToLower(k)] = raw
+	}
+	content := extractTextContent(node, properties)
+	if content == "" {
+		return nil
+	}
+	contentLower := strings.ToLower(content)
+	return &ftDoc{
+		properties:    props,
+		rawProperties: rawProps,
+		contentLower:  contentLower,
+		contentTokenN: len(strings.Fields(content)),
+	}
 }
 
 // extractFulltextParams extracts index name and query from a fulltext CALL statement
@@ -295,14 +311,60 @@ func (e *StorageExecutor) extractFulltextParams(cypher string) (indexName, query
 	parts := splitParamsCarefully(params)
 
 	if len(parts) >= 1 {
-		indexName = strings.Trim(strings.TrimSpace(parts[0]), "'\"")
+		indexName = decodeCypherStringLiteral(strings.TrimSpace(parts[0]))
 	}
 
 	if len(parts) >= 2 {
-		query = strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+		query = decodeCypherStringLiteral(strings.TrimSpace(parts[1]))
 	}
 
 	return indexName, query
+}
+
+// decodeCypherStringLiteral strips surrounding single or double quotes from a
+// Cypher string literal and undoes the standard backslash-escape encoding
+// (`\\` -> `\`, `\'` -> `'`, `\"` -> `"`, `\n`, `\t`, `\r`). This is what
+// parameter substitution produces in valueToLiteral for values that end up
+// as the fulltext query string; without this decode step a user query of
+// `Cloud\Trail` reaches the Lucene parser as `Cloud\\Trail`, defeating the
+// escape rule.
+func decodeCypherStringLiteral(s string) string {
+	if len(s) < 2 {
+		return s
+	}
+	first, last := s[0], s[len(s)-1]
+	if (first != '\'' && first != '"') || first != last {
+		return s
+	}
+	inner := s[1 : len(s)-1]
+	var b strings.Builder
+	b.Grow(len(inner))
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		if c == '\\' && i+1 < len(inner) {
+			next := inner[i+1]
+			switch next {
+			case '\\', '\'', '"':
+				b.WriteByte(next)
+			case 'n':
+				b.WriteByte('\n')
+			case 't':
+				b.WriteByte('\t')
+			case 'r':
+				b.WriteByte('\r')
+			default:
+				// Unknown escape — preserve both characters so the Lucene
+				// parser can apply its own rules (e.g. `\T` should still be
+				// literal T after Lucene-level decoding).
+				b.WriteByte('\\')
+				b.WriteByte(next)
+			}
+			i++
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 type fulltextQueryOptions struct {

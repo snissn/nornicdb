@@ -5,6 +5,117 @@ All notable changes to NornicDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **GPU-accelerated HNSW construction on CUDA and Vulkan.**
+  New `pkg/search/hnsw_build_cuda.go` and `hnsw_build_vulkan.go` add optional
+  GPU build backends for HNSW graph construction, with matching stubs for
+  builds without CUDA/Vulkan support. `pkg/gpu/cuda/cuda_bridge.go` gains the
+  CUDA bridge functions; `pkg/gpu/vulkan/compute.go` adds a rewritten Vulkan
+  compute pipeline with dedicated shaders (`hnsw_build_cosine.comp`,
+  `hnsw_build_topk_rows.comp` and their compiled SPIR-V). Falls back to CPU
+  build when GPU backends are unavailable. Follow-up commit tightens Vulkan
+  shader dispatch/binding performance (`perf(hnsw): optimize vulkan`).
+
+### Fixed
+
+- **Fulltext query parser: `field:"value" AND (term)` now intersects correctly.**
+  `db.index.fulltext.queryNodes` / `queryRelationships` previously tokenized the
+  query with a whitespace splitter that had no notion of parenthesized groups,
+  field-scoped clauses, or Lucene escape sequences. The Graphiti integration
+  shape `group_id:"g" AND (<terms>)` silently discarded the parenthesized
+  default-field clause — a real term and a nonsense term returned the identical
+  result set, making the lexical arm of hybrid search term-blind. Replaced the
+  ad-hoc tokenizer with a proper Lucene-classic recursive-descent parser
+  (`pkg/cypher/fulltext_query.go`) plus per-document evaluator that supports
+  the full grammar: boolean AND/OR/NOT with parens and nesting, `+`/`-`
+  mandatory/prohibited clause prefixes, phrase queries and proximity
+  (`"a b"~n`), fuzzy (`term~n`, Levenshtein), range queries (`[a TO b]`,
+  `{a TO b}` with mixed inclusivity), boost (`^n`), wildcards (`?`, `*`
+  including leading and mid-token), regex (`/re/`), and full Lucene escape
+  rules (`\X` decodes to literal `X` for any X — fixes the `Cloud\Trail`
+  zero-hits case). Reference implementation: Neo4j's `MultiFieldQueryParser`
+  with `setAllowLeadingWildcard(true)`. Added `decodeCypherStringLiteral` in
+  `pkg/cypher/call_fulltext.go` so backslash escapes survive round-trip
+  through Cypher parameter substitution.
+- **Post-WITH `WHERE` filtering and grouped aggregation restored.**
+  A cluster of Cypher `WHERE` evaluation issues against clean graph queries:
+  - Split post-`WITH WHERE` from `WITH` projections so it is applied as a
+    filter instead of being absorbed into the preceding alias.
+  - Preserve grouped `WITH` aggregation semantics for `OPTIONAL MATCH` rows,
+    including `COUNT(c)` over null optional targets.
+  - Honor inline target labels/properties in relationship pattern predicates
+    such as `NOT (t)-[:R]->(:C {met:false})`.
+  - Evaluate bare boolean properties in traversal `WHERE` clauses so
+    `WHERE NOT c.met` returns rows where `c.met` is false.
+  - Allow multiple relationship `CREATE` clauses with inline endpoint nodes
+    in one statement.
+  Touched: `pkg/cypher/clauses.go`, `create_pipeline_helpers.go`,
+  `executor_mutations.go`, `match_rows.go`, `traversal.go` plus new
+  `pkg/cypher/stats_query_test.go`.
+- **DDL / CALL-tail / UNWIND / typed conversion cluster fixes.**
+  - Preserve cardinality constraint parser errors for malformed
+    `REQUIRE MAX COUNT` DDL.
+  - Avoid compiling CALL-tail regex predicates using `=~` as equality
+    comparisons.
+  - Fix post-`UNWIND WHERE` boundary parsing so equality/inequality filters
+    apply correctly.
+  - Prefer explicit typed assignment conversions before generic reflect
+    conversion.
+  - Deterministic coverage tests added for schema DDL, CALL-tail predicates,
+    helper branches, UNWIND filtering, and typed result assignment
+    (`pkg/cypher/coverage_lift_test.go` +1163 lines).
+
+### Performance
+
+- **Match/merge hot path from Graphify workloads.**
+  `pkg/cypher/match_multi.go`, `merge.go`, and `pkg/storage/schema.go` gain a
+  fast pattern-property index lookup so multi-pattern `MATCH`/`MERGE`
+  statements hit the schema index directly instead of scanning candidates.
+  New benchmark (`graphify_push_profile_bench_test.go`) and
+  pattern-property regression tests (`match_pattern_property_index_test.go`)
+  guard the change.
+- **Vulkan compute shaders tuned.**
+  Dispatch/binding refactor in `pkg/gpu/vulkan/compute.go` following the GPU
+  HNSW build feature.
+
+### Changed
+
+- **Dependency refresh — Go modules.**
+  - `google.golang.org/api` v0.286.0 → v0.287.0
+  - `google.golang.org/grpc` v1.81.1 → v1.82.0
+  - `github.com/googleapis/enterprise-certificate-proxy` v0.3.16 → v0.3.17
+    (indirect)
+  - `google.golang.org/genproto/googleapis/rpc` bumped to 20260622175928
+    (indirect)
+- **Dependency refresh — UI npm packages.**
+  - `@ornery/ui-grid-core` / `-react` / `-vanilla` ^1.0.6 → ^1.0.8
+  - `lucide-react` ^1.22.0 → ^1.23.0
+  - `neo4j-driver` ^6.1.0 → ^6.2.0
+  - `react-router-dom` ^7.18.0 → ^7.18.1
+  - `three` ^0.184.0 → ^0.185.0
+- **Dependabot workflow versions refreshed** across `.github/workflows/`
+  (`cd-llama-cpu.yml`, `cd-llama-cuda.yml`, `cd.yml`, `ci.yml`,
+  `docs-pages.yml`, `release-macos.yml`).
+- **Documentation.** `README.md` copy tweak. ORM/Neo4j-compatible streaming
+  driver plan (`plans/`) expanded with implementation detail (+556/-189).
+
+### Tests
+
+- New `pkg/cypher/coverage_lift_test.go` (+1163 lines) exercising DDL,
+  CALL-tail predicates, UNWIND filtering, and typed assignment.
+- New `pkg/cypher/kalman_functions_test.go` covering the Kalman helper
+  branches.
+- New `pkg/cypher/fulltext_query_test.go` and
+  `pkg/cypher/call_fulltext_parser_test.go` covering the full Lucene-classic
+  grammar surface plus e2e regressions against the Graphiti bug repro.
+- New `pkg/cypher/stats_query_test.go`, `match_pattern_property_index_test.go`,
+  `graphify_push_profile_bench_test.go` guarding the WHERE-semantics and
+  hot-path match/merge changes.
+- `pkg/search/hnsw_build_gpu_test.go` extended for GPU-build coverage.
+
 ## [v1.1.10] - 2026-06-29
 
 Maintenance release: dependency refresh, llama.cpp upgrade, Cypher Graphiti ingest fixes, and expanded test coverage.

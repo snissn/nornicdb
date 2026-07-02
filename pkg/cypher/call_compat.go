@@ -174,91 +174,110 @@ func (e *StorageExecutor) callDbIndexFulltextQueryRelationships(cypher string) (
 		return nil, err
 	}
 
-	queryTerms, excludeTerms, mustHaveTerms := parseFulltextQuery(query)
-	if len(queryTerms) == 0 && len(mustHaveTerms) == 0 {
+	parsed, err := ParseFulltextQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.IsEmpty() {
 		return result, nil
 	}
 
-	type relationshipFulltextDoc struct {
-		edge         *storage.Edge
-		contentLower string
-		score        float64
+	type edgeDoc struct {
+		edge *storage.Edge
+		doc  *ftDoc
 	}
-	docs := make([]relationshipFulltextDoc, 0, len(edges))
-	docFreq := make(map[string]int)
+	docs := make([]edgeDoc, 0, len(edges))
+	docFreq := make(map[string]int, len(parsed.PrimaryTerms()))
+	var totalDocLen int64
 	for _, edge := range edges {
 		if !matchesRelationshipTypes(edge, targetTypes) {
 			continue
 		}
-		content := extractEdgeTextContent(edge, targetProperties)
-		if content == "" {
+		doc := buildEdgeFulltextDoc(edge, targetProperties)
+		if doc == nil {
 			continue
 		}
-		contentLower := strings.ToLower(content)
-		docs = append(docs, relationshipFulltextDoc{edge: edge, contentLower: contentLower})
-		for _, term := range queryTerms {
-			if strings.Contains(contentLower, term) {
-				docFreq[term]++
-			}
-		}
-		for _, term := range mustHaveTerms {
-			if strings.Contains(contentLower, term) {
+		docs = append(docs, edgeDoc{edge: edge, doc: doc})
+		totalDocLen += int64(doc.contentTokenN)
+		for _, term := range parsed.PrimaryTerms() {
+			if strings.Contains(doc.contentLower, term) {
 				docFreq[term]++
 			}
 		}
 	}
 	totalDocs := len(docs)
-
-	scoredDocs := docs[:0]
-	for i := range docs {
-		doc := &docs[i]
-		excluded := false
-		for _, term := range excludeTerms {
-			if strings.Contains(doc.contentLower, term) {
-				excluded = true
-				break
-			}
-		}
-		if excluded {
-			continue
-		}
-
-		hasMustHave := true
-		for _, term := range mustHaveTerms {
-			if !strings.Contains(doc.contentLower, term) {
-				hasMustHave = false
-				break
-			}
-		}
-		if !hasMustHave {
-			continue
-		}
-
-		score := calculateBM25Score(doc.contentLower, queryTerms, docFreq, totalDocs)
-		for _, term := range mustHaveTerms {
-			if strings.Contains(doc.contentLower, term) {
-				score += 2.0
-			}
-		}
-		if score > 0 {
-			doc.score = score
-			scoredDocs = append(scoredDocs, *doc)
-		}
+	avgDocLen := 100.0
+	if totalDocs > 0 {
+		avgDocLen = float64(totalDocLen) / float64(totalDocs)
 	}
 
-	sort.Slice(scoredDocs, func(i, j int) bool {
-		if scoredDocs[i].score == scoredDocs[j].score {
-			return scoredDocs[i].edge.ID < scoredDocs[j].edge.ID
+	ctx := &ftEvalCtx{
+		DefaultFields: targetProperties,
+		avgDocLen:     avgDocLen,
+		totalDocs:     totalDocs,
+		docFreq:       docFreq,
+	}
+
+	type scoredEdge struct {
+		edge  *storage.Edge
+		score float64
+	}
+	scored := make([]scoredEdge, 0, len(docs))
+	for _, d := range docs {
+		matched, score := parsed.Match(ctx, d.doc)
+		if !matched {
+			continue
 		}
-		return scoredDocs[i].score > scoredDocs[j].score
+		if score <= 0 {
+			score = 1.0
+		}
+		scored = append(scored, scoredEdge{edge: d.edge, score: score})
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return scored[i].edge.ID < scored[j].edge.ID
+		}
+		return scored[i].score > scored[j].score
 	})
-	result.Rows = make([][]interface{}, 0, len(scoredDocs))
-	for _, doc := range scoredDocs {
-		result.Rows = append(result.Rows, []interface{}{edgeToMap(doc.edge), doc.score})
+	result.Rows = make([][]interface{}, 0, len(scored))
+	for _, s := range scored {
+		result.Rows = append(result.Rows, []interface{}{edgeToMap(s.edge), s.score})
 	}
 	applyFulltextOptions(result, opts)
 
 	return result, nil
+}
+
+// buildEdgeFulltextDoc mirrors buildNodeFulltextDoc for relationships.
+func buildEdgeFulltextDoc(edge *storage.Edge, properties []string) *ftDoc {
+	if edge == nil {
+		return nil
+	}
+	props := make(map[string]string, len(edge.Properties))
+	rawProps := make(map[string]string, len(edge.Properties))
+	for k, v := range edge.Properties {
+		if v == nil {
+			continue
+		}
+		raw := fmt.Sprintf("%v", v)
+		if raw == "" {
+			continue
+		}
+		props[strings.ToLower(k)] = strings.ToLower(raw)
+		rawProps[strings.ToLower(k)] = raw
+	}
+	content := extractEdgeTextContent(edge, properties)
+	if content == "" {
+		return nil
+	}
+	contentLower := strings.ToLower(content)
+	return &ftDoc{
+		properties:    props,
+		rawProperties: rawProps,
+		contentLower:  contentLower,
+		contentTokenN: len(strings.Fields(content)),
+	}
 }
 
 // edgeHasNonEmptyProperty mirrors nodeHasNonEmptyProperty: the
