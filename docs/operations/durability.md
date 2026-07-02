@@ -140,7 +140,8 @@ For maximum data safety, enable strict durability:
 NORNICDB_STRICT_DURABILITY=true
 ```
 
-This automatically enables:
+This automatically enables the durability settings that apply to the selected
+storage backend:
 
 | Setting | Applies to | Value | Effect |
 |---------|-----------|-------|--------|

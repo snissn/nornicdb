@@ -71,7 +71,9 @@ func TestTreeDBEngine_PersistenceReopenCyclesRetainGraphIndexesSchemaAndMetadata
 			SyncWrites: true,
 		})
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = engine.Close() })
+		t.Cleanup(func() {
+			_ = engine.Close()
+		})
 		return engine
 	}
 
@@ -177,7 +179,9 @@ func TestTreeDBEngine_SyncPersistsWritesBeforeReopenAndClosedEngineFailsClosed(t
 	dir := t.TempDir()
 	engine, err := NewTreeDBEngineWithOptions(TreeDBOptions{Dir: dir})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = engine.Close() })
+	t.Cleanup(func() {
+		_ = engine.Close()
+	})
 	require.False(t, engine.DurabilityInfo().SyncWrites)
 
 	require.NoError(t, engine.BulkCreateNodes([]*Node{
@@ -195,7 +199,9 @@ func TestTreeDBEngine_SyncPersistsWritesBeforeReopenAndClosedEngineFailsClosed(t
 
 	reopened, err := NewTreeDBEngineWithOptions(TreeDBOptions{Dir: dir})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = reopened.Close() })
+	t.Cleanup(func() {
+		_ = reopened.Close()
+	})
 	got, err := reopened.GetNode("test:sync-a")
 	require.NoError(t, err)
 	require.Equal(t, "a", got.Properties["name"])
@@ -405,6 +411,18 @@ func requireTreeDBDurabilitySchema(t *testing.T, engine *TreeDBEngine) {
 func requireTreeDBDurableGraphState(t *testing.T, engine *TreeDBEngine, want treeDBDurableGraphExpectation) {
 	t.Helper()
 
+	requireTreeDBNodeState(t, engine, want)
+	requireTreeDBLabelLookups(t, engine, want)
+	requireTreeDBCounts(t, engine)
+	requireTreeDBEdgeState(t, engine)
+	requireTreeDBPendingEmbeddingState(t, engine)
+	requireTreeDBSchemaIndexes(t, engine, want)
+	requireTreeDBUniqueConstraintEnforced(t, engine)
+}
+
+func requireTreeDBNodeState(t *testing.T, engine *TreeDBEngine, want treeDBDurableGraphExpectation) {
+	t.Helper()
+
 	alice, err := engine.GetNode("test:alice")
 	require.NoError(t, err)
 	require.Equal(t, want.aliceLabels, alice.Labels)
@@ -428,6 +446,10 @@ func requireTreeDBDurableGraphState(t *testing.T, engine *TreeDBEngine, want tre
 	batch, err := engine.BatchGetNodes([]NodeID{"test:alice", "test:bob"})
 	require.NoError(t, err)
 	require.Len(t, batch, 2)
+}
+
+func requireTreeDBLabelLookups(t *testing.T, engine *TreeDBEngine, want treeDBDurableGraphExpectation) {
+	t.Helper()
 
 	people, err := engine.GetNodesByLabel("person")
 	require.NoError(t, err)
@@ -440,6 +462,10 @@ func requireTreeDBDurableGraphState(t *testing.T, engine *TreeDBEngine, want tre
 	reviewers, err := engine.GetNodesByLabel("reviewer")
 	require.NoError(t, err)
 	require.ElementsMatch(t, want.reviewerIDs, treeDBNodeIDs(reviewers))
+}
+
+func requireTreeDBCounts(t *testing.T, engine *TreeDBEngine) {
+	t.Helper()
 
 	labelCount, err := engine.NodeCountByLabelInNamespace("test", "Person")
 	require.NoError(t, err)
@@ -451,6 +477,10 @@ func requireTreeDBDurableGraphState(t *testing.T, engine *TreeDBEngine, want tre
 	require.NoError(t, err)
 	require.Equal(t, int64(1), edgeCount)
 	require.Contains(t, engine.ListNamespaces(), "test")
+}
+
+func requireTreeDBEdgeState(t *testing.T, engine *TreeDBEngine) {
+	t.Helper()
 
 	edge, err := engine.GetEdge("test:knows")
 	require.NoError(t, err)
@@ -476,11 +506,19 @@ func requireTreeDBDurableGraphState(t *testing.T, engine *TreeDBEngine, want tre
 	head := engine.GetEdgeBetween("test:alice", "test:bob", "KNOWS")
 	require.NotNil(t, head)
 	require.Equal(t, EdgeID("test:knows"), head.ID)
+}
+
+func requireTreeDBPendingEmbeddingState(t *testing.T, engine *TreeDBEngine) {
+	t.Helper()
 
 	pending := engine.FindNodeNeedingEmbedding()
 	require.NotNil(t, pending)
 	require.Equal(t, NodeID("test:pending-doc"), pending.ID)
 	require.Equal(t, 1, engine.PendingEmbeddingsCount())
+}
+
+func requireTreeDBSchemaIndexes(t *testing.T, engine *TreeDBEngine, want treeDBDurableGraphExpectation) {
+	t.Helper()
 
 	schema := engine.GetSchemaForNamespace("test")
 	require.NotNil(t, schema)
@@ -489,6 +527,8 @@ func requireTreeDBDurableGraphState(t *testing.T, engine *TreeDBEngine, want tre
 	require.True(t, found)
 	if want.uniqueCacheComplete {
 		require.True(t, cacheComplete)
+	} else {
+		require.False(t, cacheComplete)
 	}
 
 	emailMatches := schema.PropertyIndexLookup("Person", "email", "alice@example.com")
@@ -518,8 +558,12 @@ func requireTreeDBDurableGraphState(t *testing.T, engine *TreeDBEngine, want tre
 	require.True(t, ok)
 	_, ok = schema.GetVectorIndex("doc_embedding_idx")
 	require.True(t, ok)
+}
 
-	_, err = engine.CreateNode(&Node{
+func requireTreeDBUniqueConstraintEnforced(t *testing.T, engine *TreeDBEngine) {
+	t.Helper()
+
+	_, err := engine.CreateNode(&Node{
 		ID:     "test:duplicate-email",
 		Labels: []string{"Person"},
 		Properties: map[string]any{
