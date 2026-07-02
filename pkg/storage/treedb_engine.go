@@ -48,16 +48,27 @@ type TreeDBOptions struct {
 
 // TreeDBDurabilityInfo reports the durable write path selected for TreeDBEngine.
 type TreeDBDurabilityInfo struct {
-	Dir                  string
-	Profile              string
-	DurabilityMode       string
-	WritePathMode        string
-	RedoLog              string
-	NativeWAL            bool
-	CommandWAL           bool
-	NornicWAL            bool
-	AsyncWrites          bool
-	SyncWrites           bool
+	// Dir is the persistent TreeDB directory used by the engine.
+	Dir string
+	// Profile is the parsed TreeDB profile name used to open the database.
+	Profile string
+	// DurabilityMode is TreeDB's live durability mode when the handle is open.
+	DurabilityMode string
+	// WritePathMode is TreeDB's live write-path mode from diagnostic stats.
+	WritePathMode string
+	// RedoLog describes the active redo-log policy: on, off, or command_wal.
+	RedoLog string
+	// NativeWAL reports whether TreeDB's native redo log protects writes.
+	NativeWAL bool
+	// CommandWAL reports whether TreeDB command-WAL replay is active.
+	CommandWAL bool
+	// NornicWAL reports whether NornicDB wraps TreeDB with its own WAL.
+	NornicWAL bool
+	// AsyncWrites reports whether this backend acknowledges asynchronous writes.
+	AsyncWrites bool
+	// SyncWrites reports whether commits force TreeDB synchronous commit.
+	SyncWrites bool
+	// ReplicationSupported reports whether this path is ready for raft replay.
 	ReplicationSupported bool
 }
 
@@ -75,6 +86,8 @@ type TreeDBEngine struct {
 	commandWAL bool
 	log        *slog.Logger
 
+	// dbMu protects TreeDB diagnostic reads that lack TreeDB's lifecycle lock.
+	dbMu   sync.RWMutex
 	closed atomic.Bool
 
 	nodeCount atomic.Int64
@@ -218,6 +231,13 @@ func (e *TreeDBEngine) TreeDB() *treedb.DB {
 }
 
 // DurabilityInfo returns the TreeDB durability and wrapper decisions for this engine.
+//
+// Example:
+//
+//	info := engine.DurabilityInfo()
+//	if info.SyncWrites && info.NativeWAL {
+//		// writes are acknowledged after TreeDB's native synchronous commit path
+//	}
 func (e *TreeDBEngine) DurabilityInfo() TreeDBDurabilityInfo {
 	if e == nil {
 		return TreeDBDurabilityInfo{}
@@ -232,6 +252,10 @@ func (e *TreeDBEngine) DurabilityInfo() TreeDBDurabilityInfo {
 		AsyncWrites:          false,
 		SyncWrites:           e.syncWrites,
 		ReplicationSupported: false,
+	}
+	if e.ensureOpen() == nil {
+		e.dbMu.RLock()
+		defer e.dbMu.RUnlock()
 	}
 	if e.ensureOpen() == nil {
 		info.DurabilityMode = e.db.DurabilityMode()
@@ -300,6 +324,8 @@ func (e *TreeDBEngine) Close() error {
 	if !e.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	e.dbMu.Lock()
+	defer e.dbMu.Unlock()
 	return mapTreeDBError(e.db.Close())
 }
 
@@ -342,6 +368,11 @@ func (e *TreeDBEngine) VacuumIndexOnline(ctx context.Context) error {
 
 // Stats returns TreeDB diagnostic stats.
 func (e *TreeDBEngine) Stats() map[string]string {
+	if err := e.ensureOpen(); err != nil {
+		return nil
+	}
+	e.dbMu.RLock()
+	defer e.dbMu.RUnlock()
 	if err := e.ensureOpen(); err != nil {
 		return nil
 	}

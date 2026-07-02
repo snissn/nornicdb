@@ -2,7 +2,10 @@ package storage
 
 import (
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	treedb "github.com/snissn/gomap/TreeDB"
 	"github.com/stretchr/testify/require"
@@ -42,20 +45,65 @@ func TestTreeDBEngine_DurabilityInfoAfterCloseUsesCachedPolicy(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, engine.Close())
 
+	var info TreeDBDurabilityInfo
 	require.NotPanics(t, func() {
-		info := engine.DurabilityInfo()
-		require.Equal(t, dir, info.Dir)
-		require.Equal(t, string(treedb.ProfileLegacyWALDurable), info.Profile)
-		require.Equal(t, "on", info.RedoLog)
-		require.True(t, info.NativeWAL)
-		require.False(t, info.CommandWAL)
-		require.False(t, info.NornicWAL)
-		require.False(t, info.AsyncWrites)
-		require.True(t, info.SyncWrites)
-		require.False(t, info.ReplicationSupported)
-		require.Empty(t, info.DurabilityMode)
-		require.Empty(t, info.WritePathMode)
+		info = engine.DurabilityInfo()
 	})
+	require.Equal(t, dir, info.Dir)
+	require.Equal(t, string(treedb.ProfileLegacyWALDurable), info.Profile)
+	require.Equal(t, "on", info.RedoLog)
+	require.True(t, info.NativeWAL)
+	require.False(t, info.CommandWAL)
+	require.False(t, info.NornicWAL)
+	require.False(t, info.AsyncWrites)
+	require.True(t, info.SyncWrites)
+	require.False(t, info.ReplicationSupported)
+	require.Empty(t, info.DurabilityMode)
+	require.Empty(t, info.WritePathMode)
+}
+
+func TestTreeDBEngine_DurabilityInfoAndStatsConcurrentClose(t *testing.T) {
+	engine, err := NewTreeDBEngineWithOptions(TreeDBOptions{
+		Dir:        t.TempDir(),
+		SyncWrites: true,
+	})
+	require.NoError(t, err)
+
+	start := make(chan struct{})
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	var wg sync.WaitGroup
+	var ops atomic.Uint64
+	defer func() {
+		stopOnce.Do(func() { close(stop) })
+		wg.Wait()
+	}()
+
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = engine.DurabilityInfo()
+					_ = engine.Stats()
+					ops.Add(1)
+				}
+			}
+		}()
+	}
+
+	close(start)
+	require.Eventually(t, func() bool {
+		return ops.Load() >= 100
+	}, time.Second, time.Millisecond)
+
+	require.NoError(t, engine.Close())
+	stopOnce.Do(func() { close(stop) })
 }
 
 func TestTreeDBEngine_CommandWALProfilesFailClosed(t *testing.T) {
