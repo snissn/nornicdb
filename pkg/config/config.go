@@ -232,6 +232,7 @@ type DatabaseConfig struct {
 	// StrictDurability enables maximum safety settings (opt-in):
 	// - WAL: immediate sync (fsync every write)
 	// - Badger: SyncWrites=true
+	// - TreeDB: CommitSync for graph writes
 	// - AsyncEngine: smaller flush interval (10ms)
 	// WARNING: 2-5x slower writes. Use for financial/critical data only.
 	// Environment: NORNICDB_STRICT_DURABILITY

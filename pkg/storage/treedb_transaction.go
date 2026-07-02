@@ -315,7 +315,7 @@ func (t *TreeDBTransaction) Commit() error {
 		return fmt.Errorf("constraint violation: %w", err)
 	}
 	var err error
-	if t.engine.syncWrites && !t.implicit {
+	if t.engine.syncWrites {
 		err = t.tx.CommitSync()
 	} else {
 		err = t.tx.Commit()

@@ -46,6 +46,32 @@ type TreeDBOptions struct {
 	Logger                  *slog.Logger
 }
 
+// TreeDBDurabilityInfo reports the durable write path selected for TreeDBEngine.
+type TreeDBDurabilityInfo struct {
+	// Dir is the persistent TreeDB directory used by the engine.
+	Dir string
+	// Profile is the parsed TreeDB profile name used to open the database.
+	Profile string
+	// DurabilityMode is TreeDB's live durability mode when the handle is open.
+	DurabilityMode string
+	// WritePathMode is TreeDB's live write-path mode from diagnostic stats.
+	WritePathMode string
+	// RedoLog describes the active redo-log policy: on, off, or command_wal.
+	RedoLog string
+	// NativeWAL reports whether TreeDB's native redo log protects writes.
+	NativeWAL bool
+	// CommandWAL reports whether TreeDB command-WAL replay is active.
+	CommandWAL bool
+	// NornicWAL reports whether NornicDB wraps TreeDB with its own WAL.
+	NornicWAL bool
+	// AsyncWrites reports whether this backend acknowledges asynchronous writes.
+	AsyncWrites bool
+	// SyncWrites reports whether commits force TreeDB synchronous commit.
+	SyncWrites bool
+	// ReplicationSupported reports whether this path is ready for raft replay.
+	ReplicationSupported bool
+}
+
 // TreeDBEngine stores the NornicDB property graph directly in TreeDB.
 //
 // TreeDBEngine uses TreeDB's native conditional transactions for graph writes.
@@ -54,9 +80,14 @@ type TreeDBOptions struct {
 type TreeDBEngine struct {
 	db         *treedb.DB
 	dir        string
+	profile    string
 	syncWrites bool
+	nativeWAL  bool
+	commandWAL bool
 	log        *slog.Logger
 
+	// dbMu protects TreeDB diagnostic reads that lack TreeDB's lifecycle lock.
+	dbMu   sync.RWMutex
 	closed atomic.Bool
 
 	nodeCount atomic.Int64
@@ -154,7 +185,10 @@ func NewTreeDBEngineWithOptions(opts TreeDBOptions) (*TreeDBEngine, error) {
 	e := &TreeDBEngine{
 		db:                  db,
 		dir:                 opts.Dir,
+		profile:             string(profile),
 		syncWrites:          opts.SyncWrites,
+		nativeWAL:           treeDBProfileUsesNativeWAL(profile),
+		commandWAL:          tdOpts.CommandWAL,
 		log:                 logger.With("component", "storage", "engine", "treedb"),
 		schema:              NewSchemaManager(),
 		schemas:             make(map[string]*SchemaManager),
@@ -179,12 +213,70 @@ func NewTreeDBEngineWithOptions(opts TreeDBOptions) (*TreeDBEngine, error) {
 	return e, nil
 }
 
+func treeDBProfileUsesNativeWAL(profile treedb.Profile) bool {
+	switch profile {
+	case treedb.ProfileDurable, treedb.ProfileLegacyWALDurable, treedb.ProfileWALOnFast, treedb.ProfileLegacyWALRelaxedFast:
+		return true
+	default:
+		return false
+	}
+}
+
 // TreeDB returns the underlying TreeDB handle. Callers must not close it.
 func (e *TreeDBEngine) TreeDB() *treedb.DB {
 	if e == nil {
 		return nil
 	}
 	return e.db
+}
+
+// DurabilityInfo returns the TreeDB durability and wrapper decisions for this engine.
+//
+// Example:
+//
+//	info := engine.DurabilityInfo()
+//	if info.SyncWrites && info.NativeWAL {
+//		// writes are acknowledged after TreeDB's native synchronous commit path
+//	}
+func (e *TreeDBEngine) DurabilityInfo() TreeDBDurabilityInfo {
+	if e == nil {
+		return TreeDBDurabilityInfo{}
+	}
+	info := TreeDBDurabilityInfo{
+		Dir:                  e.dir,
+		Profile:              e.profile,
+		RedoLog:              treeDBRedoLogPolicy(e.nativeWAL),
+		NativeWAL:            e.nativeWAL,
+		CommandWAL:           e.commandWAL,
+		NornicWAL:            false,
+		AsyncWrites:          false,
+		SyncWrites:           e.syncWrites,
+		ReplicationSupported: false,
+	}
+	if e.ensureOpen() == nil {
+		e.dbMu.RLock()
+		defer e.dbMu.RUnlock()
+	}
+	if e.ensureOpen() == nil {
+		info.DurabilityMode = e.db.DurabilityMode()
+		stats := e.db.Stats()
+		if mode := stats["treedb.write_path.mode"]; mode != "" {
+			info.WritePathMode = mode
+		}
+		if redoLog := stats["treedb.write_path.redo_log"]; redoLog != "" {
+			info.RedoLog = redoLog
+		}
+		info.CommandWAL = info.RedoLog == "command_wal" || info.WritePathMode == "command_wal_cached"
+		info.NativeWAL = info.RedoLog != "off"
+	}
+	return info
+}
+
+func treeDBRedoLogPolicy(nativeWAL bool) string {
+	if nativeWAL {
+		return "on"
+	}
+	return "off"
 }
 
 // Logger returns the engine logger for wrappers.
@@ -232,6 +324,8 @@ func (e *TreeDBEngine) Close() error {
 	if !e.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	e.dbMu.Lock()
+	defer e.dbMu.Unlock()
 	return mapTreeDBError(e.db.Close())
 }
 
@@ -274,6 +368,11 @@ func (e *TreeDBEngine) VacuumIndexOnline(ctx context.Context) error {
 
 // Stats returns TreeDB diagnostic stats.
 func (e *TreeDBEngine) Stats() map[string]string {
+	if err := e.ensureOpen(); err != nil {
+		return nil
+	}
+	e.dbMu.RLock()
+	defer e.dbMu.RUnlock()
 	if err := e.ensureOpen(); err != nil {
 		return nil
 	}
