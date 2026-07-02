@@ -31,18 +31,18 @@
 // paths.
 //
 // D-07 bytes{kind} is populated by a 30s lifecycle.Component sweep that
-// calls `badger.DB.EstimateSize(prefix)` for each prefix. Sweep lives in
-// pkg/storage/bytes_metrics.go (Plan 04-04-04). RESEARCH §Q3.
+// calls the selected backend's bounded storage-byte capability. Sweep lives
+// in pkg/storage/bytes_metrics.go (Plan 04-04-04). RESEARCH §Q3.
 //
-// MET-25 hot path: per-op observation uses pre-bound BoundLatencyObserver
-// cached in BadgerEngine struct fields at constructor time. The bag's
-// OpDuration.Bind("get") is hoisted out of the request loop. CompactionDuration
-// is bound at compaction-event hook attachment.
+// MET-25 hot path: backends that expose AttachMetrics cache pre-bound
+// BoundLatencyObserver handles at constructor time. The bag's
+// OpDuration.Bind("get") is hoisted out of the request loop.
+// CompactionDuration is bound at compaction-event hook attachment.
 //
-// RISK-6 wal_lag_bytes semantics: best-effort heuristic estimate of WAL
-// backlog (vlog size minus LSM size from `badger.DB.Size()`). Alerting
-// SHOULD use 5-minute trends, not single scrapes. The metric is documented
-// here and in the bytes_metrics.go sweeper that populates it.
+// RISK-6 wal_lag_bytes semantics: best-effort backend-specific estimate of
+// write-log backlog. Alerting SHOULD use 5-minute trends, not single scrapes.
+// The metric is documented here and in the bytes_metrics.go sweeper that
+// populates it.
 //
 // D-08 forward-compat: NewStorageMetrics(reg, tenantLabelsEnabled, probe)
 // decides whether the `database` label is included in IndexRebuildTotal
@@ -81,9 +81,8 @@ var AllowedStorageResults = []string{"success", "failure", "aborted"}
 // StorageProbe is the seam between pkg/storage stat accessors and the
 // observability nodes_total / edges_total GaugeFunc callbacks (D-02d
 // leaf-package boundary — pkg/observability never imports pkg/storage).
-// *BadgerEngine's existing NodeCount() / EdgeCount() return (int64, error);
-// callers wrap the error-discarding form via a thin adapter at the
-// cmd/nornicdb wiring site (see Plan 04-04-07).
+// Storage engines return (int64, error); callers wrap the error-discarding
+// form via a thin adapter at the cmd/nornicdb wiring site (see Plan 04-04-07).
 //
 // IDDictCounterNodes / IDDictCounterEdges expose the monotonic counters
 // of allocated numIDs. IDDictFreelistNodes / IDDictFreelistEdges report
@@ -101,8 +100,8 @@ type StorageProbe interface {
 }
 
 // StorageMetrics is the typed handle-bag (CONTEXT D-02 / D-02a) for the
-// storage subsystem. One bag per Provider; constructed at cmd/nornicdb
-// startup and injected into *BadgerEngine via AttachMetrics(...).
+// storage subsystem. One bag per Provider; constructed at cmd/nornicdb startup.
+// Backends that expose AttachMetrics receive the bag for hot-path observers.
 //
 // Hot-path discipline (MET-25): the storage struct caches
 // BoundLatencyObserver in struct fields at constructor time so per-op
@@ -117,7 +116,7 @@ type StorageMetrics struct {
 	Bytes *prometheus.GaugeVec
 
 	// OpDuration is the per-op latency histogram. Hot-path observation
-	// uses pre-bound observers cached in BadgerEngine struct fields
+	// uses pre-bound observers cached by backends that expose AttachMetrics
 	// (MET-25). Phase-3-locked LatencyBucketsSeconds.
 	OpDuration *LatencyHistogram
 
@@ -129,10 +128,9 @@ type StorageMetrics struct {
 	// CompactionDuration histograms compaction wall-clock time per level.
 	CompactionDuration *LatencyHistogram
 
-	// WALLagBytes is a heuristic estimate of WAL backlog (vlog size
-	// minus LSM size from badger.DB.Size()). Best-effort; alerting
-	// should use 5-minute trends, not single scrapes. RESEARCH §Q3 /
-	// RISK-6.
+	// WALLagBytes is a backend-specific heuristic estimate of write-log
+	// backlog. Best-effort; alerting should use 5-minute trends, not single
+	// scrapes. RESEARCH §Q3 / RISK-6.
 	WALLagBytes prometheus.Gauge
 
 	// IndexRebuildTotal counts index-rebuild events by [database], index,
@@ -153,10 +151,10 @@ type StorageMetrics struct {
 //   - bytes/op_duration aggregate across databases at the storage layer
 //     (per-DB lives at Cypher subsystem, Plan 04-03).
 //   - nodes_total/edges_total are process-wide gauges.
-//   - compactions/wal are BadgerDB-level — single physical database.
+//   - compactions/wal are backend-level — single physical database.
 //
-// probe is the StorageProbe accessor surface — typically *BadgerEngine.
-// nil is tolerated as a defensive fallback (returns 0 from each gauge).
+// probe is the StorageProbe accessor surface. nil is tolerated as a defensive
+// fallback (returns 0 from each gauge).
 func NewStorageMetrics(reg *prometheus.Registry, tenantLabelsEnabled bool, probe StorageProbe) *StorageMetrics {
 	bag := &StorageMetrics{
 		tenantLabelsEnabled: tenantLabelsEnabled,
@@ -298,7 +296,7 @@ func NewStorageMetrics(reg *prometheus.Registry, tenantLabelsEnabled bool, probe
 			Name:      "op_duration_seconds",
 			Help: "Storage operation latency by op (closed enum: get, put, " +
 				"delete, scan). Hot-path: pre-bound observers cached in " +
-				"BadgerEngine struct fields (MET-25).",
+				"backend fields via AttachMetrics (MET-25).",
 		},
 		[]string{"op"})
 
@@ -324,8 +322,8 @@ func NewStorageMetrics(reg *prometheus.Registry, tenantLabelsEnabled bool, probe
 		Namespace: "nornicdb",
 		Subsystem: "storage",
 		Name:      "wal_lag_bytes",
-		Help: "Heuristic estimate of WAL backlog (vlog size minus LSM " +
-			"size from badger.DB.Size()). Best-effort; alerting should " +
+		Help: "Backend-specific heuristic estimate of write-log backlog. " +
+			"Best-effort; alerting should " +
 			"use 5-minute trends, not single scrapes (RISK-6).",
 	})
 	reg.MustRegister(bag.WALLagBytes)

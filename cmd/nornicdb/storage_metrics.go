@@ -1,100 +1,107 @@
 // Plan 04-04-07: cmd/nornicdb wiring for StorageMetrics + MVCCMetrics.
-//
-// unwrapBadgerEngine walks the storage engine wrapper chain
-// (NamespacedEngine → AsyncEngine → WALEngine → BadgerEngine) until it
-// hits the underlying *storage.BadgerEngine. The walk is type-assertion
-// based and tolerates future wrapper additions: each layer exposes either
-// GetEngine() or GetInnerEngine().
-//
-// badgerStorageProbe + badgerMVCCProbe are the thin adapters that satisfy
-// observability.StorageProbe / observability.MVCCProbe by routing into
-// the *BadgerEngine accessors. The error returns from the engine's
-// NodeCount/EdgeCount are dropped — the GaugeFunc surface only cares
-// about a numeric value, and the engine's defer-recover already protects
-// against panic on closed-engine paths.
+// The adapters below route metrics through storage capability interfaces so
+// Badger keeps its existing metrics and TreeDB can expose supported metrics
+// without concrete-engine checks in startup wiring.
 package main
 
 import (
+	"github.com/orneryd/nornicdb/pkg/observability"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
-// unwrapBadgerEngine walks the storage.Engine wrapper chain until it hits
-// the underlying *storage.BadgerEngine. Returns nil when the chain does
-// not terminate at a BadgerEngine (e.g. MemoryEngine in tests, or a
-// future engine implementation).
-func unwrapBadgerEngine(engine storage.Engine) *storage.BadgerEngine {
-	for i := 0; i < 8; i++ { // safety bound; current depth is 3
-		if be, ok := engine.(*storage.BadgerEngine); ok {
-			return be
-		}
-		// NamespacedEngine
-		if ns, ok := engine.(*storage.NamespacedEngine); ok {
-			engine = ns.GetInnerEngine()
-			continue
-		}
-		// AsyncEngine
-		if ae, ok := engine.(*storage.AsyncEngine); ok {
-			engine = ae.GetEngine()
-			continue
-		}
-		// WALEngine
-		if we, ok := engine.(*storage.WALEngine); ok {
-			engine = we.GetEngine()
-			continue
-		}
-		// Anything else: bail.
-		return nil
+type storageMetricsAttacher interface {
+	AttachMetrics(*observability.StorageMetrics, *observability.MVCCMetrics)
+}
+
+type idDictionaryStatsProvider interface {
+	IDDictCounters() (nodeMax, edgeMax uint64)
+	IDDictFreelistPending() (nodes, edges int64)
+}
+
+// engineStorageProbe satisfies observability.StorageProbe for any storage
+// engine. ID dictionary gauges are populated only when the backend implements
+// the optional idDictionaryStatsProvider capability.
+type engineStorageProbe struct {
+	engine storage.Engine
+	idDict idDictionaryStatsProvider
+}
+
+func newEngineStorageProbe(engine storage.Engine) engineStorageProbe {
+	idDict, _ := storage.FindCapability[idDictionaryStatsProvider](engine)
+	return engineStorageProbe{engine: engine, idDict: idDict}
+}
+
+func (p engineStorageProbe) NodeCount() int64 {
+	if p.engine == nil {
+		return 0
 	}
-	return nil
-}
-
-// badgerStorageProbe satisfies observability.StorageProbe.
-type badgerStorageProbe struct {
-	be *storage.BadgerEngine
-}
-
-func (p badgerStorageProbe) NodeCount() int64 {
-	n, err := p.be.NodeCount()
+	n, err := p.engine.NodeCount()
 	if err != nil {
 		return 0
 	}
 	return n
 }
 
-func (p badgerStorageProbe) EdgeCount() int64 {
-	n, err := p.be.EdgeCount()
+func (p engineStorageProbe) EdgeCount() int64 {
+	if p.engine == nil {
+		return 0
+	}
+	n, err := p.engine.EdgeCount()
 	if err != nil {
 		return 0
 	}
 	return n
 }
 
-func (p badgerStorageProbe) IDDictCounterNodes() uint64 {
-	n, _ := p.be.IDDictCounters()
+func (p engineStorageProbe) IDDictCounterNodes() uint64 {
+	if p.idDict == nil {
+		return 0
+	}
+	n, _ := p.idDict.IDDictCounters()
 	return n
 }
 
-func (p badgerStorageProbe) IDDictCounterEdges() uint64 {
-	_, e := p.be.IDDictCounters()
+func (p engineStorageProbe) IDDictCounterEdges() uint64 {
+	if p.idDict == nil {
+		return 0
+	}
+	_, e := p.idDict.IDDictCounters()
 	return e
 }
 
-func (p badgerStorageProbe) IDDictFreelistNodes() int64 {
-	n, _ := p.be.IDDictFreelistPending()
+func (p engineStorageProbe) IDDictFreelistNodes() int64 {
+	if p.idDict == nil {
+		return 0
+	}
+	n, _ := p.idDict.IDDictFreelistPending()
 	return n
 }
 
-func (p badgerStorageProbe) IDDictFreelistEdges() int64 {
-	_, e := p.be.IDDictFreelistPending()
+func (p engineStorageProbe) IDDictFreelistEdges() int64 {
+	if p.idDict == nil {
+		return 0
+	}
+	_, e := p.idDict.IDDictFreelistPending()
 	return e
 }
 
-// badgerMVCCProbe satisfies observability.MVCCProbe by routing to the
-// RISK-2 accessors shipped in Plan 04-04-01.
-type badgerMVCCProbe struct {
-	be *storage.BadgerEngine
+type mvccStatsProvider interface {
+	PinnedBytes() int64
+	OldestReaderAgeSeconds() float64
+	ActiveReaders() int64
 }
 
-func (p badgerMVCCProbe) PinnedBytes() int64              { return p.be.PinnedBytes() }
-func (p badgerMVCCProbe) OldestReaderAgeSeconds() float64 { return p.be.OldestReaderAgeSeconds() }
-func (p badgerMVCCProbe) ActiveReaders() int64            { return p.be.ActiveReaders() }
+// engineMVCCProbe satisfies observability.MVCCProbe when the backend exposes
+// MVCC metrics. Unsupported backends simply do not register MVCC metrics.
+type engineMVCCProbe struct {
+	provider mvccStatsProvider
+}
+
+func newEngineMVCCProbe(engine storage.Engine) (engineMVCCProbe, bool) {
+	provider, ok := storage.FindCapability[mvccStatsProvider](engine)
+	return engineMVCCProbe{provider: provider}, ok
+}
+
+func (p engineMVCCProbe) PinnedBytes() int64              { return p.provider.PinnedBytes() }
+func (p engineMVCCProbe) OldestReaderAgeSeconds() float64 { return p.provider.OldestReaderAgeSeconds() }
+func (p engineMVCCProbe) ActiveReaders() int64            { return p.provider.ActiveReaders() }

@@ -55,39 +55,11 @@ func openTreeDBStorage(db *DB, dataDir string, config *Config) error {
 }
 
 func setEmbeddingsEnabledIfSupported(eng storage.Engine, enabled bool) {
-	if gate := unwrapToEmbeddingGate(eng); gate != nil {
+	if gate, ok := storage.FindCapability[embeddingGate](eng); ok {
 		gate.SetEmbeddingsEnabled(enabled)
 	}
 }
 
-func unwrapToEmbeddingGate(eng storage.Engine) embeddingGate {
-	for eng != nil {
-		switch e := eng.(type) {
-		case embeddingGate:
-			return e
-		case interface{ GetInnerEngine() storage.Engine }:
-			eng = e.GetInnerEngine()
-		case interface{ UnwrapEngine() storage.Engine }:
-			eng = e.UnwrapEngine()
-		default:
-			return nil
-		}
-	}
-	return nil
-}
-
-func unwrapToEmbeddingClearer(eng storage.Engine) (embeddingClearer, bool) {
-	for eng != nil {
-		switch e := eng.(type) {
-		case embeddingClearer:
-			return e, true
-		case interface{ GetInnerEngine() storage.Engine }:
-			eng = e.GetInnerEngine()
-		case interface{ UnwrapEngine() storage.Engine }:
-			eng = e.UnwrapEngine()
-		default:
-			return nil, false
-		}
-	}
-	return nil, false
+func findEmbeddingClearer(eng storage.Engine) (embeddingClearer, bool) {
+	return storage.FindCapability[embeddingClearer](eng)
 }

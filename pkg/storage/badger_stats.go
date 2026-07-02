@@ -219,6 +219,40 @@ func (b *BadgerEngine) Size() (lsm, vlog int64) {
 	return b.db.Size()
 }
 
+// StorageByteStats returns bounded byte gauges for observability. It preserves
+// the legacy Badger metrics semantics: nodes/edges/index use EstimateSize on
+// stable key-prefix buckets and WAL is the best-effort vlog-minus-LSM heuristic.
+func (b *BadgerEngine) StorageByteStats() StorageByteStats {
+	if b.ensureOpen() != nil {
+		return StorageByteStats{}
+	}
+	nodeKey, nodeValue := b.db.EstimateSize([]byte{prefixNode})
+	edgeKey, edgeValue := b.db.EstimateSize([]byte{prefixEdge})
+
+	var indexKey, indexValue uint64
+	for _, p := range []byte{prefixLabelIndex, prefixEdgeBetweenIndex, prefixTemporalIndex} {
+		k, v := b.db.EstimateSize([]byte{p})
+		indexKey += k
+		indexValue += v
+	}
+
+	lsm, vlog := b.db.Size()
+	wal := vlog - lsm
+	if wal < 0 {
+		wal = 0
+	}
+	return StorageByteStats{
+		Nodes:          int64(nodeKey + nodeValue),
+		NodesSupported: true,
+		Edges:          int64(edgeKey + edgeValue),
+		EdgesSupported: true,
+		Index:          int64(indexKey + indexValue),
+		IndexSupported: true,
+		WAL:            wal,
+		WALSupported:   true,
+	}
+}
+
 // FindNodeNeedingEmbedding returns a node that needs embedding.
 // Uses Badger's secondary index (prefixPendingEmbed) for O(1) lookup.
 //
