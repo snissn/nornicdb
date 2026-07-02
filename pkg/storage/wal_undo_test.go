@@ -155,6 +155,48 @@ func TestUndoDeleteNode(t *testing.T) {
 	}
 }
 
+func TestUndoDeleteNodeRestoresCascadedEdges(t *testing.T) {
+	base := NewMemoryEngine()
+	defer base.Close()
+	engine := NewNamespacedEngine(base, "test")
+
+	oldNode := &Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}}
+	otherNode := &Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}}
+	oldEdge := &Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS", Properties: map[string]interface{}{"since": "2024"}}
+
+	_, err := engine.CreateNode(oldNode)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(otherNode)
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(oldEdge))
+
+	data, err := json.Marshal(WALDeleteData{ID: "n1", OldNode: oldNode, OldEdges: []*Edge{oldEdge}})
+	require.NoError(t, err)
+	entry := WALEntry{
+		Sequence:  3,
+		Operation: OpDeleteNode,
+		Data:      data,
+		Checksum:  crc32Checksum(data),
+		Database:  "test",
+	}
+
+	require.NoError(t, ReplayWALEntry(engine, entry))
+	_, err = engine.GetNode("n1")
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = engine.GetEdge("e1")
+	require.ErrorIs(t, err, ErrNotFound)
+
+	require.NoError(t, UndoWALEntry(engine, entry))
+	node, err := engine.GetNode("n1")
+	require.NoError(t, err)
+	require.Equal(t, "Alice", node.Properties["name"])
+	edge, err := engine.GetEdge("e1")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("n1"), edge.StartNode)
+	require.Equal(t, NodeID("n2"), edge.EndNode)
+	require.Equal(t, "2024", edge.Properties["since"])
+}
+
 // TestUndoWithoutBeforeImage verifies error on missing undo data.
 func TestUndoWithoutBeforeImage(t *testing.T) {
 	base := NewMemoryEngine()
@@ -254,6 +296,12 @@ func TestGetEntryTxID(t *testing.T) {
 			op:       OpTxBegin,
 			data:     WALTxData{TxID: "tx-789"},
 			expected: "tx-789",
+		},
+		{
+			name:     "tx prepare",
+			op:       OpTxPrepare,
+			data:     WALTxData{TxID: "tx-prepared"},
+			expected: "tx-prepared",
 		},
 		{
 			name:     "edge with tx",
@@ -395,6 +443,124 @@ func TestRecoverIncompleteTransaction(t *testing.T) {
 	}
 }
 
+func TestRecoverWithTransactionsPreparedWithoutTerminalMarkerFailsClosed(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	dir := t.TempDir()
+	cfg := &WALConfig{Dir: dir, SyncMode: "immediate"}
+	wal, err := NewWAL(dir, cfg)
+	require.NoError(t, err)
+
+	require.NoError(t, wal.AppendWithDatabase(OpTxBegin, WALTxData{TxID: "tx-prepared"}, "test"))
+	require.NoError(t, wal.AppendWithDatabase(OpCreateNode, WALNodeData{
+		Node: &Node{ID: "n1", Labels: []string{"Prepared"}},
+		TxID: "tx-prepared",
+	}, "test"))
+	_, err = wal.AppendTxPrepare("test", "tx-prepared", 1)
+	require.NoError(t, err)
+	require.NoError(t, wal.Close())
+
+	baseEngine, result, err := RecoverWithTransactions(dir, "")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrRecoveryFailed)
+	require.NotNil(t, baseEngine)
+	require.Contains(t, result.InDoubtTransactions, "tx-prepared")
+	require.Equal(t, 0, result.CommittedTransactions)
+	require.Equal(t, 0, result.RolledBackTransactions)
+	require.True(t, result.HasErrors())
+
+	_, getErr := baseEngine.GetNode("test:n1")
+	require.ErrorIs(t, getErr, ErrNotFound)
+}
+
+func TestRecoverFromWALWithResultUsesTransactionAwareReplay(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	t.Run("aborted transaction is not replayed as non-transactional", func(t *testing.T) {
+		dir := t.TempDir()
+		wal, err := NewWAL(dir, &WALConfig{Dir: dir, SyncMode: "immediate"})
+		require.NoError(t, err)
+
+		require.NoError(t, wal.AppendWithDatabase(OpTxBegin, WALTxData{TxID: "tx-aborted"}, "test"))
+		require.NoError(t, wal.AppendWithDatabase(OpCreateNode, WALNodeData{
+			Node: &Node{ID: "n1", Labels: []string{"Aborted"}},
+			TxID: "tx-aborted",
+		}, "test"))
+		_, err = wal.AppendTxPrepare("test", "tx-aborted", 1)
+		require.NoError(t, err)
+		_, err = wal.AppendTxAbort("test", "tx-aborted", "commit rejected")
+		require.NoError(t, err)
+		require.NoError(t, wal.Close())
+
+		baseEngine, result, err := RecoverFromWALWithResult(dir, "")
+		require.NoError(t, err)
+		require.Equal(t, 0, result.Failed)
+		require.Equal(t, 1, result.Skipped)
+
+		_, getErr := baseEngine.GetNode("test:n1")
+		require.ErrorIs(t, getErr, ErrNotFound)
+	})
+
+	t.Run("prepared transaction without terminal marker fails closed", func(t *testing.T) {
+		dir := t.TempDir()
+		wal, err := NewWAL(dir, &WALConfig{Dir: dir, SyncMode: "immediate"})
+		require.NoError(t, err)
+
+		require.NoError(t, wal.AppendWithDatabase(OpTxBegin, WALTxData{TxID: "tx-prepared"}, "test"))
+		require.NoError(t, wal.AppendWithDatabase(OpCreateNode, WALNodeData{
+			Node: &Node{ID: "n1", Labels: []string{"Prepared"}},
+			TxID: "tx-prepared",
+		}, "test"))
+		_, err = wal.AppendTxPrepare("test", "tx-prepared", 1)
+		require.NoError(t, err)
+		require.NoError(t, wal.Close())
+
+		baseEngine, result, err := RecoverFromWALWithResult(dir, "")
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrRecoveryFailed)
+		require.NotNil(t, baseEngine)
+		require.Equal(t, 1, result.Failed)
+
+		_, getErr := baseEngine.GetNode("test:n1")
+		require.ErrorIs(t, getErr, ErrNotFound)
+	})
+
+	t.Run("committed transaction replays after earlier non-transactional dependencies", func(t *testing.T) {
+		dir := t.TempDir()
+		wal, err := NewWAL(dir, &WALConfig{Dir: dir, SyncMode: "immediate"})
+		require.NoError(t, err)
+
+		require.NoError(t, wal.AppendWithDatabase(OpCreateNode, WALNodeData{
+			Node: &Node{ID: "n1", Labels: []string{"Dependency"}},
+		}, "test"))
+		require.NoError(t, wal.AppendWithDatabase(OpCreateNode, WALNodeData{
+			Node: &Node{ID: "n2", Labels: []string{"Dependency"}},
+		}, "test"))
+		require.NoError(t, wal.AppendWithDatabase(OpTxBegin, WALTxData{TxID: "tx-edge"}, "test"))
+		require.NoError(t, wal.AppendWithDatabase(OpCreateEdge, WALEdgeData{
+			Edge: &Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "DEPENDS_ON"},
+			TxID: "tx-edge",
+		}, "test"))
+		_, err = wal.AppendTxPrepare("test", "tx-edge", 1)
+		require.NoError(t, err)
+		_, err = wal.AppendTxCommit("test", "tx-edge", 1)
+		require.NoError(t, err)
+		require.NoError(t, wal.Close())
+
+		baseEngine, result, err := RecoverFromWALWithResult(dir, "")
+		require.NoError(t, err)
+		require.Equal(t, 0, result.Failed)
+		require.Equal(t, 3, result.Applied)
+
+		engine := NewNamespacedEngine(baseEngine, "test")
+		edge, getErr := engine.GetEdge("e1")
+		require.NoError(t, getErr)
+		require.Equal(t, EdgeID("e1"), edge.ID)
+	})
+}
+
 // TestRecoverAbortedTransaction verifies aborted transactions don't apply.
 func TestRecoverAbortedTransaction(t *testing.T) {
 	config.EnableWAL()
@@ -524,7 +690,7 @@ func TestRecoverWithTransactions_ErrorAccountingPaths(t *testing.T) {
 	}, "test"))
 	require.NoError(t, wal.AppendWithDatabase(OpTxCommit, WALTxData{TxID: "tx-failed-commit"}, "test"))
 
-	// Incomplete transaction with an operation that cannot be undone cleanly.
+	// Incomplete transaction entries are skipped during ordered WAL recovery.
 	require.NoError(t, wal.AppendWithDatabase(OpTxBegin, WALTxData{TxID: "tx-incomplete-undo-err"}, "test"))
 	require.NoError(t, wal.AppendWithDatabase(OpCreateEdge, WALEdgeData{
 		Edge: &Edge{
@@ -554,10 +720,10 @@ func TestRecoverWithTransactions_ErrorAccountingPaths(t *testing.T) {
 
 	require.Equal(t, 1, result.CommittedTransactions)
 	require.Equal(t, 1, result.RolledBackTransactions)
-	require.Equal(t, 2, result.NonTxApplied)
+	require.Equal(t, 1, result.NonTxApplied)
 
 	require.Contains(t, result.FailedTransactions, "tx-failed-commit")
-	require.NotEmpty(t, result.UndoErrors)
+	require.Empty(t, result.UndoErrors)
 	require.NotEmpty(t, result.NonTxErrors)
 	require.True(t, result.HasErrors())
 }
@@ -568,6 +734,7 @@ func TestRecoveryResultSummary(t *testing.T) {
 		CommittedTransactions:  5,
 		RolledBackTransactions: 2,
 		AbortedTransactions:    1,
+		InDoubtTransactions:    []string{"tx-prepared"},
 		NonTxApplied:           10,
 		UndoErrors:             []string{"error1"},
 	}
@@ -580,6 +747,7 @@ func TestRecoveryResultSummary(t *testing.T) {
 	if !result.HasErrors() {
 		t.Error("HasErrors should return true when there are undo errors")
 	}
+	require.Contains(t, summary, "indoubt=1")
 }
 
 // =============================================================================
@@ -723,6 +891,23 @@ func TestReplayAndUndoBulkWALEntries(t *testing.T) {
 		require.Nil(t, e)
 	})
 
+	t.Run("bulk create edges undo uses entry database with base engine", func(t *testing.T) {
+		baseEngine := NewMemoryEngine()
+		engine := NewNamespacedEngine(baseEngine, "test")
+		for _, n := range nodes {
+			_, err := engine.CreateNode(n)
+			require.NoError(t, err)
+		}
+		data, _ := json.Marshal(WALBulkEdgesData{Edges: edges})
+		entry := WALEntry{Operation: OpBulkEdges, Data: data, Checksum: crc32Checksum(data), Database: "test"}
+		require.NoError(t, ReplayWALEntry(baseEngine, entry))
+		e, _ := engine.GetEdge("e1")
+		require.NotNil(t, e)
+		require.NoError(t, UndoWALEntry(baseEngine, entry))
+		_, err := engine.GetEdge("e1")
+		require.ErrorIs(t, err, ErrNotFound)
+	})
+
 	t.Run("bulk delete nodes then undo", func(t *testing.T) {
 		baseEngine := NewMemoryEngine()
 		engine := NewNamespacedEngine(baseEngine, "test")
@@ -736,6 +921,22 @@ func TestReplayAndUndoBulkWALEntries(t *testing.T) {
 		n, _ := engine.GetNode("n1")
 		require.Nil(t, n)
 		require.NoError(t, UndoWALEntry(engine, entry))
+		require.NotNil(t, mustGetNodeForWALTest(t, engine, "n1"))
+	})
+
+	t.Run("bulk delete nodes undo uses entry database with base engine", func(t *testing.T) {
+		baseEngine := NewMemoryEngine()
+		engine := NewNamespacedEngine(baseEngine, "test")
+		for _, n := range nodes {
+			_, err := engine.CreateNode(n)
+			require.NoError(t, err)
+		}
+		data, _ := json.Marshal(WALBulkDeleteNodesData{IDs: []string{"n1", "n2"}, OldNodes: nodes})
+		entry := WALEntry{Operation: OpBulkDeleteNodes, Data: data, Checksum: crc32Checksum(data), Database: "test"}
+		require.NoError(t, ReplayWALEntry(baseEngine, entry))
+		_, err := engine.GetNode("n1")
+		require.ErrorIs(t, err, ErrNotFound)
+		require.NoError(t, UndoWALEntry(baseEngine, entry))
 		require.NotNil(t, mustGetNodeForWALTest(t, engine, "n1"))
 	})
 
@@ -756,6 +957,25 @@ func TestReplayAndUndoBulkWALEntries(t *testing.T) {
 		e, _ = engine.GetEdge("e1")
 		require.NotNil(t, e)
 	})
+
+	t.Run("bulk delete edges undo uses entry database with base engine", func(t *testing.T) {
+		baseEngine := NewMemoryEngine()
+		engine := NewNamespacedEngine(baseEngine, "test")
+		for _, n := range nodes {
+			_, err := engine.CreateNode(n)
+			require.NoError(t, err)
+		}
+		require.NoError(t, engine.CreateEdge(edges[0]))
+		data, _ := json.Marshal(WALBulkDeleteEdgesData{IDs: []string{"e1"}, OldEdges: edges})
+		entry := WALEntry{Operation: OpBulkDeleteEdges, Data: data, Checksum: crc32Checksum(data), Database: "test"}
+		require.NoError(t, ReplayWALEntry(baseEngine, entry))
+		_, err := engine.GetEdge("e1")
+		require.ErrorIs(t, err, ErrNotFound)
+		require.NoError(t, UndoWALEntry(baseEngine, entry))
+		edge, err := engine.GetEdge("e1")
+		require.NoError(t, err)
+		require.NotNil(t, edge)
+	})
 }
 
 func TestReplayAndUndoWALEntry_ErrorBranches(t *testing.T) {
@@ -763,7 +983,7 @@ func TestReplayAndUndoWALEntry_ErrorBranches(t *testing.T) {
 	engine := NewNamespacedEngine(baseEngine, "test")
 
 	t.Run("marker operations are noops", func(t *testing.T) {
-		for _, op := range []OperationType{OpCheckpoint, OpTxBegin, OpTxCommit, OpTxAbort} {
+		for _, op := range []OperationType{OpCheckpoint, OpTxBegin, OpTxPrepare, OpTxCommit, OpTxAbort} {
 			require.NoError(t, ReplayWALEntry(engine, WALEntry{Operation: op}))
 			require.NoError(t, UndoWALEntry(engine, WALEntry{Operation: op}))
 		}
@@ -797,6 +1017,16 @@ func TestReplayAndUndoWALEntry_ErrorBranches(t *testing.T) {
 		data, _ = json.Marshal(WALBulkDeleteEdgesData{IDs: []string{"e1"}})
 		err = UndoWALEntry(engine, WALEntry{Operation: OpBulkDeleteEdges, Data: data, Database: "test"})
 		require.ErrorIs(t, err, ErrNoUndoData)
+	})
+
+	t.Run("bulk create undo rejects nil entries", func(t *testing.T) {
+		data, _ := json.Marshal(WALBulkNodesData{Nodes: []*Node{nil}})
+		err := UndoWALEntry(engine, WALEntry{Operation: OpBulkNodes, Data: data, Database: "test"})
+		require.ErrorIs(t, err, ErrInvalidData)
+
+		data, _ = json.Marshal(WALBulkEdgesData{Edges: []*Edge{nil}})
+		err = UndoWALEntry(engine, WALEntry{Operation: OpBulkEdges, Data: data, Database: "test"})
+		require.ErrorIs(t, err, ErrInvalidData)
 	})
 
 	t.Run("single entity undo requires before image", func(t *testing.T) {

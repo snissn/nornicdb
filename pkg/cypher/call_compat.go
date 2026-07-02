@@ -1091,7 +1091,7 @@ func (e *StorageExecutor) callTxSetMetadata(ctx context.Context, cypher string) 
 	}
 
 	// Get the transaction and set metadata
-	tx, ok := e.txContext.tx.(*storage.BadgerTransaction)
+	tx, ok := e.txContext.tx.(storage.GraphTransaction)
 	if !ok {
 		return nil, fmt.Errorf("transaction type not supported for metadata")
 	}

@@ -1,8 +1,9 @@
 // Package storage - Transaction types shared between storage implementations.
 //
-// This file defines shared transaction types used by BadgerTransaction.
-// All transactions in NornicDB use Badger's native transaction system which
-// provides real ACID guarantees through the Write-Ahead Log (WAL).
+// This file defines the backend-neutral graph transaction contract used by
+// Cypher and public DB transaction closures. BadgerTransaction implements this
+// contract today; TreeDB and other native backends can implement it without
+// exposing Badger-specific concrete types.
 //
 // # ACID Guarantees
 //
@@ -14,10 +15,10 @@
 //
 // # Usage
 //
-// All engines (including MemoryEngine) use BadgerTransaction:
+// Engines that support transactions implement TransactionalEngine:
 //
 //	engine := storage.NewMemoryEngine() // or NewBadgerEngine()
-//	tx, err := engine.BeginTransaction()
+//	tx, err := engine.BeginGraphTransaction()
 //	if err != nil {
 //	    return err
 //	}
@@ -100,8 +101,86 @@ type Operation struct {
 	FreshID bool
 }
 
+// GraphTransaction is the backend-neutral transaction API required by Cypher.
+//
+// It intentionally models the graph operations, lifecycle controls, and
+// executor tuning knobs used by transactionStorageWrapper without requiring a
+// concrete BadgerTransaction. Implementations must provide snapshot-isolated
+// reads, read-your-writes behavior, atomic commit/rollback, namespace pinning,
+// and commit-time constraint validation semantics equivalent to Badger.
+type GraphTransaction interface {
+	// Lifecycle and identity.
+	TransactionID() string
+	Commit() error
+	Rollback() error
+	IsActive() bool
+	OperationCount() int
+
+	// Namespace and executor tuning.
+	Namespace() string
+	SetNamespace(ns string) error
+	SetDeferredConstraintValidation(deferValidation bool) error
+	SetSkipCreateExistenceCheck(skip bool) error
+	SetImplicit(implicit bool) error
+	HasPendingNodeMutations() bool
+
+	// Metadata.
+	SetMetadata(metadata map[string]interface{}) error
+	GetMetadata() map[string]interface{}
+
+	// Graph writes.
+	CreateNode(node *Node) (NodeID, error)
+	UpdateNode(node *Node) error
+	DeleteNode(id NodeID) error
+	CreateEdge(edge *Edge) error
+	UpdateEdge(edge *Edge) error
+	DeleteEdge(id EdgeID) error
+	BulkCreateEdges(edges []*Edge) error
+
+	// Graph reads. Reads must include this transaction's pending mutations and
+	// exclude pending deletes.
+	GetNode(id NodeID) (*Node, error)
+	GetEdge(id EdgeID) (*Edge, error)
+	GetNodesByLabel(label string) ([]*Node, error)
+	GetFirstNodeByLabel(label string) (*Node, error)
+	GetOutgoingEdges(nodeID NodeID) ([]*Edge, error)
+	GetIncomingEdges(nodeID NodeID) ([]*Edge, error)
+	GetEdgesBetween(startID, endID NodeID) ([]*Edge, error)
+	GetEdgeBetween(startID, endID NodeID, edgeType string) *Edge
+	GetEdgesByType(edgeType string) ([]*Edge, error)
+	AllNodes() ([]*Node, error)
+	GetAllNodes() []*Node
+}
+
+// TransactionalEngine is implemented by storage engines that can create native
+// graph transactions.
+type TransactionalEngine interface {
+	BeginGraphTransaction() (GraphTransaction, error)
+}
+
+// namespaceMVCCPrimer is implemented by engines that can eagerly load
+// namespace-local MVCC state before opening or pinning a transaction snapshot.
+type namespaceMVCCPrimer interface {
+	EnsureNamespaceMVCC(namespace string) error
+}
+
+func beginGraphTransactionOrNotImplemented(engine Engine) (GraphTransaction, error) {
+	txEngine, ok := engine.(TransactionalEngine)
+	if !ok {
+		return nil, ErrNotImplemented
+	}
+	return txEngine.BeginGraphTransaction()
+}
+
+func ensureNamespaceMVCCIfSupported(engine Engine, namespace string) error {
+	if primer, ok := engine.(namespaceMVCCPrimer); ok {
+		return primer.EnsureNamespaceMVCC(namespace)
+	}
+	return nil
+}
+
 // Transaction is the public closure-facing transaction type used by DB.Update and DB.View.
-type Transaction = BadgerTransaction
+type Transaction = GraphTransaction
 
 // copyNode creates a deep copy of a node.
 // Used by transactions to preserve state for rollback.

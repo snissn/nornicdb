@@ -117,6 +117,23 @@ func (n *NamespacedEngine) GetInnerEngine() Engine {
 	return n.inner
 }
 
+// BeginGraphTransaction starts a transaction on the inner engine and pins it to
+// this namespace before returning it.
+func (n *NamespacedEngine) BeginGraphTransaction() (GraphTransaction, error) {
+	if err := ensureNamespaceMVCCIfSupported(n.inner, n.namespace); err != nil {
+		return nil, err
+	}
+	tx, err := beginGraphTransactionOrNotImplemented(n.inner)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.SetNamespace(n.namespace); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &namespacedGraphTransaction{namespace: n, tx: tx}, nil
+}
+
 // prefixNodeID adds namespace prefix to a node ID.
 // "123" → "tenant_a:123"
 func (n *NamespacedEngine) prefixNodeID(id NodeID) NodeID {
@@ -162,6 +179,26 @@ func (n *NamespacedEngine) hasNodePrefix(id NodeID) bool {
 
 func (n *NamespacedEngine) hasEdgePrefix(id EdgeID) bool {
 	return strings.HasPrefix(string(id), n.namespace+n.separator)
+}
+
+func (n *NamespacedEngine) filterUserNodes(nodes []*Node) []*Node {
+	out := make([]*Node, 0, len(nodes))
+	for _, node := range nodes {
+		if node != nil && n.hasNodePrefix(node.ID) {
+			out = append(out, n.toUserNode(node))
+		}
+	}
+	return out
+}
+
+func (n *NamespacedEngine) filterUserEdges(edges []*Edge) []*Edge {
+	out := make([]*Edge, 0, len(edges))
+	for _, edge := range edges {
+		if edge != nil && n.hasEdgePrefix(edge.ID) {
+			out = append(out, n.toUserEdge(edge))
+		}
+	}
+	return out
 }
 
 // toUserNode returns a node with the namespace prefix stripped from its ID.
@@ -353,17 +390,7 @@ func (n *NamespacedEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	var filtered []*Node
-	for _, node := range allNodes {
-		if node == nil {
-			continue
-		}
-		if n.hasNodePrefix(node.ID) {
-			filtered = append(filtered, n.toUserNode(node))
-		}
-	}
-	return filtered, nil
+	return n.filterUserNodes(allNodes), nil
 }
 
 func (n *NamespacedEngine) GetFirstNodeByLabel(label string) (*Node, error) {
@@ -425,14 +452,7 @@ func (n *NamespacedEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 		return nil, err
 	}
 
-	// Filter to edges in our namespace and unprefix
-	var filtered []*Edge
-	for _, edge := range edges {
-		if n.hasEdgePrefix(edge.ID) {
-			filtered = append(filtered, n.toUserEdge(edge))
-		}
-	}
-	return filtered, nil
+	return n.filterUserEdges(edges), nil
 }
 
 func (n *NamespacedEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
@@ -443,14 +463,7 @@ func (n *NamespacedEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 		return nil, err
 	}
 
-	// Filter to edges in our namespace and unprefix
-	var filtered []*Edge
-	for _, edge := range edges {
-		if n.hasEdgePrefix(edge.ID) {
-			filtered = append(filtered, n.toUserEdge(edge))
-		}
-	}
-	return filtered, nil
+	return n.filterUserEdges(edges), nil
 }
 
 // GetAdjacentEdges fetches both directions through a single inner call when
@@ -477,18 +490,7 @@ func (n *NamespacedEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, er
 		outgoing, incoming = out, in
 	}
 
-	var filteredOut, filteredIn []*Edge
-	for _, edge := range outgoing {
-		if n.hasEdgePrefix(edge.ID) {
-			filteredOut = append(filteredOut, n.toUserEdge(edge))
-		}
-	}
-	for _, edge := range incoming {
-		if n.hasEdgePrefix(edge.ID) {
-			filteredIn = append(filteredIn, n.toUserEdge(edge))
-		}
-	}
-	return filteredOut, filteredIn, nil
+	return n.filterUserEdges(outgoing), n.filterUserEdges(incoming), nil
 }
 
 func (n *NamespacedEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
@@ -500,14 +502,7 @@ func (n *NamespacedEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, erro
 		return nil, err
 	}
 
-	// Filter to edges in our namespace and unprefix
-	var filtered []*Edge
-	for _, edge := range edges {
-		if n.hasEdgePrefix(edge.ID) {
-			filtered = append(filtered, n.toUserEdge(edge))
-		}
-	}
-	return filtered, nil
+	return n.filterUserEdges(edges), nil
 }
 
 func (n *NamespacedEngine) GetEdgeBetween(startID, endID NodeID, edgeType string) *Edge {
@@ -530,13 +525,7 @@ func (n *NamespacedEngine) GetEdgesByType(edgeType string) ([]*Edge, error) {
 		return nil, err
 	}
 
-	var filtered []*Edge
-	for _, edge := range allEdges {
-		if n.hasEdgePrefix(edge.ID) {
-			filtered = append(filtered, n.toUserEdge(edge))
-		}
-	}
-	return filtered, nil
+	return n.filterUserEdges(allEdges), nil
 }
 
 // GetNodesByLabelVisibleAt resolves snapshot-visible label queries within the namespace.
@@ -549,13 +538,7 @@ func (n *NamespacedEngine) GetNodesByLabelVisibleAt(label string, version MVCCVe
 	if err != nil {
 		return nil, err
 	}
-	var filtered []*Node
-	for _, node := range allNodes {
-		if n.hasNodePrefix(node.ID) {
-			filtered = append(filtered, n.toUserNode(node))
-		}
-	}
-	return filtered, nil
+	return n.filterUserNodes(allNodes), nil
 }
 
 // GetEdgesByTypeVisibleAt resolves snapshot-visible edge-type queries within the namespace.
@@ -568,13 +551,7 @@ func (n *NamespacedEngine) GetEdgesByTypeVisibleAt(edgeType string, version MVCC
 	if err != nil {
 		return nil, err
 	}
-	var filtered []*Edge
-	for _, edge := range allEdges {
-		if n.hasEdgePrefix(edge.ID) {
-			filtered = append(filtered, n.toUserEdge(edge))
-		}
-	}
-	return filtered, nil
+	return n.filterUserEdges(allEdges), nil
 }
 
 // GetEdgesBetweenVisibleAt resolves snapshot-visible topology queries within the namespace.
@@ -587,13 +564,7 @@ func (n *NamespacedEngine) GetEdgesBetweenVisibleAt(startID, endID NodeID, versi
 	if err != nil {
 		return nil, err
 	}
-	filtered := make([]*Edge, 0, len(edges))
-	for _, edge := range edges {
-		if n.hasEdgePrefix(edge.ID) {
-			filtered = append(filtered, n.toUserEdge(edge))
-		}
-	}
-	return filtered, nil
+	return n.filterUserEdges(edges), nil
 }
 
 func (n *NamespacedEngine) AllNodes() ([]*Node, error) {
@@ -602,13 +573,7 @@ func (n *NamespacedEngine) AllNodes() ([]*Node, error) {
 		return nil, err
 	}
 
-	var filtered []*Node
-	for _, node := range allNodes {
-		if n.hasNodePrefix(node.ID) {
-			filtered = append(filtered, n.toUserNode(node))
-		}
-	}
-	return filtered, nil
+	return n.filterUserNodes(allNodes), nil
 }
 
 func (n *NamespacedEngine) AllEdges() ([]*Edge, error) {
@@ -617,24 +582,11 @@ func (n *NamespacedEngine) AllEdges() ([]*Edge, error) {
 		return nil, err
 	}
 
-	var filtered []*Edge
-	for _, edge := range allEdges {
-		if n.hasEdgePrefix(edge.ID) {
-			filtered = append(filtered, n.toUserEdge(edge))
-		}
-	}
-	return filtered, nil
+	return n.filterUserEdges(allEdges), nil
 }
 
 func (n *NamespacedEngine) GetAllNodes() []*Node {
-	allNodes := n.inner.GetAllNodes()
-	var filtered []*Node
-	for _, node := range allNodes {
-		if n.hasNodePrefix(node.ID) {
-			filtered = append(filtered, n.toUserNode(node))
-		}
-	}
-	return filtered
+	return n.filterUserNodes(n.inner.GetAllNodes())
 }
 
 // ============================================================================
@@ -1068,12 +1020,7 @@ func (n *NamespacedEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) 
 func (n *NamespacedEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn func(nodes []*Node) error) error {
 	if streamer, ok := n.inner.(StreamingEngine); ok {
 		return streamer.StreamNodeChunks(ctx, chunkSize, func(nodes []*Node) error {
-			var filtered []*Node
-			for _, node := range nodes {
-				if n.hasNodePrefix(node.ID) {
-					filtered = append(filtered, n.toUserNode(node))
-				}
-			}
+			filtered := n.filterUserNodes(nodes)
 			if len(filtered) > 0 {
 				return fn(filtered)
 			}

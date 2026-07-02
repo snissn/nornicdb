@@ -18,7 +18,7 @@ var firstUseGraphPattern = regexp.MustCompile(`(?is)\bUSE\s+([A-Za-z_][A-Za-z0-9
 
 // TransactionContext holds the active transaction for a Cypher session.
 type TransactionContext struct {
-	tx              interface{} // *storage.BadgerTransaction (MemoryEngine now wraps BadgerEngine)
+	tx              interface{} // storage.GraphTransaction or *fabric.FabricTransaction
 	engine          storage.Engine
 	active          bool
 	wal             *storage.WAL
@@ -92,10 +92,8 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 		}, nil
 	}
 
-	// Start transaction for any engine that supports BeginTransaction.
-	txEngine, ok := engine.(interface {
-		BeginTransaction() (*storage.BadgerTransaction, error)
-	})
+	// Start transaction for any engine that supports backend-neutral graph transactions.
+	txEngine, ok := engine.(storage.TransactionalEngine)
 	if !ok {
 		return nil, fmt.Errorf("engine does not support transactions")
 	}
@@ -106,7 +104,7 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 			}
 		}
 	}
-	tx, err := txEngine.BeginTransaction()
+	tx, err := txEngine.BeginGraphTransaction()
 	if err != nil {
 		return nil, fmt.Errorf("failed to start transaction: %w", err)
 	}
@@ -124,10 +122,10 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 		tx:     tx,
 		engine: engine,
 		active: true,
-		txID:   tx.ID,
+		txID:   tx.TransactionID(),
 	}
 	if wal, dbName := e.resolveWALAndDatabase(); wal != nil {
-		walSeq, walErr := wal.AppendTxBegin(dbName, tx.ID, nil)
+		walSeq, walErr := wal.AppendTxBegin(dbName, tx.TransactionID(), nil)
 		if walErr != nil {
 			_ = tx.Rollback()
 			return nil, fmt.Errorf("failed to write WAL tx begin: %w", walErr)
@@ -150,15 +148,13 @@ func (e *StorageExecutor) handleCommit() (*ExecuteResult, error) {
 		return nil, fmt.Errorf("no active transaction")
 	}
 
-	// Commit based on transaction type
-	// All engines now use BadgerTransaction (MemoryEngine wraps BadgerEngine)
 	var (
 		err     error
 		receipt *storage.Receipt
 		opCount int
 	)
 	switch tx := e.txContext.tx.(type) {
-	case *storage.BadgerTransaction:
+	case storage.GraphTransaction:
 		opCount = tx.OperationCount()
 		err = tx.Commit()
 	case *fabric.FabricTransaction:
@@ -225,11 +221,9 @@ func (e *StorageExecutor) handleRollback() (*ExecuteResult, error) {
 		return nil, fmt.Errorf("no active transaction")
 	}
 
-	// Rollback based on transaction type
-	// All engines now use BadgerTransaction (MemoryEngine wraps BadgerEngine)
 	var err error
 	switch tx := e.txContext.tx.(type) {
-	case *storage.BadgerTransaction:
+	case storage.GraphTransaction:
 		err = tx.Rollback()
 	case *fabric.FabricTransaction:
 		// If already rolled back, treat as idempotent rollback success.
@@ -292,8 +286,7 @@ func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher strin
 		return e.executeWithoutTransaction(ctx, cypher, upperQuery)
 	}
 
-	// All engines now use BadgerTransaction (MemoryEngine wraps BadgerEngine)
-	tx, ok := e.txContext.tx.(*storage.BadgerTransaction)
+	tx, ok := e.txContext.tx.(storage.GraphTransaction)
 	if !ok {
 		return nil, fmt.Errorf("unknown transaction type")
 	}

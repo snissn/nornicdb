@@ -726,21 +726,25 @@ func TestWAL_Append(t *testing.T) {
 
 		beginSeq, err := wal.AppendTxBegin("testdb", "tx-1", map[string]string{"source": "test"})
 		require.NoError(t, err)
+		prepareSeq, err := wal.AppendTxPrepare("testdb", "tx-1", 2)
+		require.NoError(t, err)
 		commitSeq, err := wal.AppendTxCommit("testdb", "tx-1", 2)
 		require.NoError(t, err)
 		abortSeq, err := wal.AppendTxAbort("testdb", "tx-2", "test abort")
 		require.NoError(t, err)
 
 		assert.Equal(t, uint64(1), beginSeq)
-		assert.Equal(t, uint64(2), commitSeq)
-		assert.Equal(t, uint64(3), abortSeq)
+		assert.Equal(t, uint64(2), prepareSeq)
+		assert.Equal(t, uint64(3), commitSeq)
+		assert.Equal(t, uint64(4), abortSeq)
 
 		entries, err := ReadWALEntries(filepath.Join(dir, "wal.log"))
 		require.NoError(t, err)
-		require.Len(t, entries, 3)
+		require.Len(t, entries, 4)
 		assert.Equal(t, OpTxBegin, entries[0].Operation)
-		assert.Equal(t, OpTxCommit, entries[1].Operation)
-		assert.Equal(t, OpTxAbort, entries[2].Operation)
+		assert.Equal(t, OpTxPrepare, entries[1].Operation)
+		assert.Equal(t, OpTxCommit, entries[2].Operation)
+		assert.Equal(t, OpTxAbort, entries[3].Operation)
 
 		var beginData WALTxData
 		require.NoError(t, json.Unmarshal(entries[0].Data, &beginData))
@@ -3352,7 +3356,10 @@ func TestCloneNodeForWAL(t *testing.T) {
 		assert.Equal(t, NodeID("node-1"), result.ID)
 		// Original should be unchanged
 		assert.Equal(t, NodeID("mydb:node-1"), node.ID)
-		// Properties should be the same reference (shallow clone)
+
+		node.Labels[0] = "Changed"
+		node.Properties["name"] = "Mutated"
+		assert.Equal(t, []string{"Person"}, result.Labels)
 		assert.Equal(t, "Alice", result.Properties["name"])
 	})
 }
@@ -3379,5 +3386,10 @@ func TestCloneEdgeForWAL(t *testing.T) {
 		assert.Equal(t, "KNOWS", result.Type)
 		// Original should be unchanged
 		assert.Equal(t, EdgeID("mydb:edge-1"), edge.ID)
+
+		edge.Type = "CHANGED"
+		edge.Properties["since"] = 2026
+		assert.Equal(t, "KNOWS", result.Type)
+		assert.Equal(t, 2020, result.Properties["since"])
 	})
 }

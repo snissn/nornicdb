@@ -1728,14 +1728,8 @@ func isIgnorableCypherFormatRune(r rune) bool {
 	}
 }
 
-// TransactionCapableEngine is an engine that supports ACID transactions.
-// Used for type assertion to wrap implicit writes in rollback-capable transactions.
-type TransactionCapableEngine interface {
-	BeginTransaction() (*storage.BadgerTransaction, error)
-}
-
 type implicitTxEngines struct {
-	txEngine    TransactionCapableEngine
+	txEngine    storage.TransactionalEngine
 	asyncEngine *storage.AsyncEngine
 	namespace   string
 }
@@ -1758,10 +1752,8 @@ func (e *StorageExecutor) resolveImplicitTxEngines() implicitTxEngines {
 				out.asyncEngine = ae
 			}
 		}
-		if out.txEngine == nil {
-			if tc, ok := engine.(TransactionCapableEngine); ok {
-				out.txEngine = tc
-			}
+		if tc, ok := engine.(storage.TransactionalEngine); ok && !isDelegatingImplicitTxWrapper(engine) {
+			out.txEngine = tc
 		}
 
 		switch wrapper := engine.(type) {
@@ -1777,6 +1769,15 @@ func (e *StorageExecutor) resolveImplicitTxEngines() implicitTxEngines {
 	}
 
 	return out
+}
+
+func isDelegatingImplicitTxWrapper(engine storage.Engine) bool {
+	switch engine.(type) {
+	case *storage.NamespacedEngine, *storage.WALEngine, *storage.AsyncEngine, *storage.TracedEngine:
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *StorageExecutor) tryAsyncCreateNodeBatch(ctx context.Context, cypher string) (*ExecuteResult, error, bool) {
@@ -2062,7 +2063,7 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 			}
 		}
 	}
-	tx, err := txEngine.BeginTransaction()
+	tx, err := txEngine.BeginGraphTransaction()
 	if err != nil {
 		return nil, fmt.Errorf("failed to start implicit transaction: %w", err)
 	}
@@ -2095,7 +2096,7 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 	// Optional WAL transaction markers for receipts.
 	var wal *storage.WAL
 	var walSeqStart uint64
-	txID := tx.ID
+	txID := tx.TransactionID()
 	var dbName string
 	if txID != "" {
 		wal, dbName = e.resolveWALAndDatabase()
@@ -2359,11 +2360,12 @@ func (e *StorageExecutor) resolveWALAndDatabase() (*storage.WAL, string) {
 	return nil, dbName
 }
 
-// transactionStorageWrapper wraps a BadgerTransaction to implement storage.Engine
-// for use in implicit transaction execution. It routes writes through the transaction
-// (for atomicity/rollback) and reads through the underlying engine (for performance).
+// transactionStorageWrapper wraps a graph transaction to implement storage.Engine
+// for use in implicit transaction execution. It routes writes and read-your-writes
+// reads through the transaction, falling back to the underlying engine only for
+// operations the transaction interface does not expose directly.
 type transactionStorageWrapper struct {
-	tx               *storage.BadgerTransaction
+	tx               storage.GraphTransaction
 	underlying       storage.Engine // For read operations not supported by transaction
 	namespace        string
 	separator        string
