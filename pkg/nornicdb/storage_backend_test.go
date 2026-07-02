@@ -138,6 +138,9 @@ func TestOpen_StorageBackendSelectorBackendNeutralGraphWorkflow(t *testing.T) {
 				map[string]interface{}{"name": "Ada", "kind": "person"},
 			)
 			require.NoError(t, err)
+			readAuthor, err := db.GetNode(ctx, author.ID)
+			require.NoError(t, err)
+			requireWorkflowAuthorState(t, readAuthor)
 
 			document, err := db.CreateNode(ctx,
 				[]string{"N1WorkflowDocument"},
@@ -150,10 +153,7 @@ func TestOpen_StorageBackendSelectorBackendNeutralGraphWorkflow(t *testing.T) {
 				"status": "reviewed",
 			})
 			require.NoError(t, err)
-			require.Equal(t, "N1 validated", updatedDocument.Properties["title"])
-			require.Equal(t, "1", updatedDocument.Properties["version"])
-			require.Equal(t, "reviewed", updatedDocument.Properties["status"])
-			require.ElementsMatch(t, []string{"N1WorkflowDocument"}, updatedDocument.Labels)
+			requireWorkflowDocumentState(t, updatedDocument)
 
 			createdEdge, err := db.CreateEdge(ctx, author.ID, document.ID, "AUTHORED", map[string]interface{}{
 				"role": "primary",
@@ -204,16 +204,11 @@ func TestOpen_StorageBackendSelectorBackendNeutralGraphWorkflow(t *testing.T) {
 
 			reopenedAuthor, err := reopened.GetNode(ctx, author.ID)
 			require.NoError(t, err)
-			require.Equal(t, "Ada", reopenedAuthor.Properties["name"])
-			require.Equal(t, "person", reopenedAuthor.Properties["kind"])
-			require.ElementsMatch(t, []string{"N1WorkflowPerson", "Author"}, reopenedAuthor.Labels)
+			requireWorkflowAuthorState(t, reopenedAuthor)
 
 			reopenedDocument, err := reopened.GetNode(ctx, document.ID)
 			require.NoError(t, err)
-			require.Equal(t, "N1 validated", reopenedDocument.Properties["title"])
-			require.Equal(t, "1", reopenedDocument.Properties["version"])
-			require.Equal(t, "reviewed", reopenedDocument.Properties["status"])
-			require.ElementsMatch(t, []string{"N1WorkflowDocument"}, reopenedDocument.Labels)
+			requireWorkflowDocumentState(t, reopenedDocument)
 
 			reopenedEdge, err := reopened.GetEdge(ctx, createdEdge.ID)
 			require.NoError(t, err)
@@ -315,4 +310,21 @@ func requireEdgePresent(t *testing.T, edges []*GraphEdge, id string) {
 		}
 	}
 	require.Failf(t, "edge not found", "edge %q not found in %#v", id, edges)
+}
+
+func requireWorkflowAuthorState(t *testing.T, node *Node) {
+	t.Helper()
+
+	require.Equal(t, "Ada", node.Properties["name"])
+	require.Equal(t, "person", node.Properties["kind"])
+	require.ElementsMatch(t, []string{"N1WorkflowPerson", "Author"}, node.Labels)
+}
+
+func requireWorkflowDocumentState(t *testing.T, node *Node) {
+	t.Helper()
+
+	require.Equal(t, "N1 validated", node.Properties["title"])
+	require.Equal(t, "1", node.Properties["version"])
+	require.Equal(t, "reviewed", node.Properties["status"])
+	require.ElementsMatch(t, []string{"N1WorkflowDocument"}, node.Labels)
 }
