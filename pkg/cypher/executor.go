@@ -1752,7 +1752,7 @@ func (e *StorageExecutor) resolveImplicitTxEngines() implicitTxEngines {
 				out.asyncEngine = ae
 			}
 		}
-		if tc, ok := engine.(storage.TransactionalEngine); ok {
+		if tc, ok := engine.(storage.TransactionalEngine); ok && !isDelegatingImplicitTxWrapper(engine) {
 			out.txEngine = tc
 		}
 
@@ -1769,6 +1769,15 @@ func (e *StorageExecutor) resolveImplicitTxEngines() implicitTxEngines {
 	}
 
 	return out
+}
+
+func isDelegatingImplicitTxWrapper(engine storage.Engine) bool {
+	switch engine.(type) {
+	case *storage.NamespacedEngine, *storage.WALEngine, *storage.AsyncEngine, *storage.TracedEngine:
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *StorageExecutor) tryAsyncCreateNodeBatch(ctx context.Context, cypher string) (*ExecuteResult, error, bool) {

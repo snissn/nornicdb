@@ -253,12 +253,19 @@ func (t *walGraphTransaction) Commit() error {
 			return fmt.Errorf("wal: failed to log transaction %s: %w", entry.op, err)
 		}
 	}
-	if err := t.tx.Commit(); err != nil {
-		_, _ = t.walEngine.wal.AppendTxAbort(dbName, t.TransactionID(), err.Error())
-		return err
-	}
+	// Write the commit marker before applying the wrapped transaction so a
+	// marker write failure can still roll back the uncommitted transaction.
+	// If the process exits after the marker and before the wrapped commit,
+	// recovery treats the WAL as the source of truth and replays the tx.
 	if _, err := t.walEngine.wal.AppendTxCommit(dbName, t.TransactionID(), len(entries)); err != nil {
+		_ = t.tx.Rollback()
 		return fmt.Errorf("wal: failed to log transaction commit: %w", err)
+	}
+	if err := t.tx.Commit(); err != nil {
+		if _, abortErr := t.walEngine.wal.AppendTxAbort(dbName, t.TransactionID(), err.Error()); abortErr != nil {
+			return fmt.Errorf("wal: wrapped transaction commit failed after WAL commit marker (%v), and failed to log abort: %w", err, abortErr)
+		}
+		return err
 	}
 	return nil
 }

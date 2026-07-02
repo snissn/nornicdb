@@ -218,3 +218,50 @@ func TestWALEngineBeginGraphTransactionDeleteNodeRecordsCascadedEdges(t *testing
 	require.Equal(t, NodeID("n1"), data.OldEdges[0].StartNode)
 	require.Equal(t, NodeID("n2"), data.OldEdges[0].EndNode)
 }
+
+func TestWALEngineBeginGraphTransactionCommitFailureLogsAbortAfterMarker(t *testing.T) {
+	config.EnableWAL()
+	t.Cleanup(config.DisableWAL)
+
+	base := NewMemoryEngine()
+	defer base.Close()
+	require.NoError(t, base.GetSchemaForNamespace("tenant").AddConstraint(Constraint{
+		Name:       "unique_person_name",
+		Type:       ConstraintUnique,
+		Label:      "Person",
+		Properties: []string{"name"},
+	}))
+
+	walDir := t.TempDir()
+	wal, err := NewWAL(walDir, DefaultWALConfig())
+	require.NoError(t, err)
+	walEngine := NewWALEngine(base, wal)
+	defer wal.Close()
+
+	tx, err := walEngine.BeginGraphTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+	require.NoError(t, tx.SetNamespace("tenant"))
+	require.NoError(t, tx.SetDeferredConstraintValidation(true))
+
+	_, err = tx.CreateNode(&Node{ID: "tenant:n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}})
+	require.NoError(t, err)
+	_, err = tx.CreateNode(&Node{ID: "tenant:n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}})
+	require.NoError(t, err)
+
+	require.Error(t, tx.Commit())
+
+	entries, err := ReadWALEntriesFromDir(walDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 5)
+	require.Equal(t, OpTxBegin, entries[0].Operation)
+	require.Equal(t, OpCreateNode, entries[1].Operation)
+	require.Equal(t, OpCreateNode, entries[2].Operation)
+	require.Equal(t, OpTxCommit, entries[3].Operation)
+	require.Equal(t, OpTxAbort, entries[4].Operation)
+
+	_, err = base.GetNode("tenant:n1")
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = base.GetNode("tenant:n2")
+	require.ErrorIs(t, err, ErrNotFound)
+}

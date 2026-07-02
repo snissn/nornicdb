@@ -578,6 +578,25 @@ func TestExecuteWithImplicitTransaction_Branches(t *testing.T) {
 		require.Equal(t, int64(1), readBack.Rows[0][0])
 	})
 
+	t.Run("fallback when only delegating wrapper advertises tx", func(t *testing.T) {
+		base := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(base, "test")
+		wal, err := storage.NewWAL(t.TempDir(), storage.DefaultWALConfig())
+		require.NoError(t, err)
+		defer wal.Close()
+
+		wrapped := storage.NewWALEngine(&nonTransactionalEngine{Engine: store}, wal)
+		exec := NewStorageExecutor(wrapped)
+
+		result, err := exec.executeWithImplicitTransaction(ctx, "CREATE (:FallbackWrappedTx {id:'1'})", "CREATE (:FALLBACKWRAPPEDTX {ID:'1'})")
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		readBack, err := exec.Execute(ctx, "MATCH (n:FallbackWrappedTx {id:'1'}) RETURN count(n)", nil)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), readBack.Rows[0][0])
+	})
+
 	t.Run("begin transaction failure", func(t *testing.T) {
 		base := newTestMemoryEngine(t)
 		store := storage.NewNamespacedEngine(base, "test")
