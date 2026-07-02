@@ -122,11 +122,14 @@ func (t *namespacedGraphTransaction) GetNodesByLabel(label string) ([]*Node, err
 }
 
 func (t *namespacedGraphTransaction) GetFirstNodeByLabel(label string) (*Node, error) {
-	node, err := t.tx.GetFirstNodeByLabel(label)
+	nodes, err := t.GetNodesByLabel(label)
 	if err != nil {
 		return nil, err
 	}
-	return t.namespace.toUserNode(node), nil
+	if len(nodes) == 0 {
+		return nil, ErrNotFound
+	}
+	return nodes[0], nil
 }
 
 func (t *namespacedGraphTransaction) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {

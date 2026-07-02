@@ -63,13 +63,17 @@ func (w *WALEngine) ListNamespaces() []string {
 	return nil
 }
 
-// BeginGraphTransaction delegates transaction creation to the wrapped engine.
+// BeginGraphTransaction starts a WAL-aware transaction on the wrapped engine.
 func (w *WALEngine) BeginGraphTransaction() (GraphTransaction, error) {
 	txEngine, ok := w.engine.(TransactionalEngine)
 	if !ok {
 		return nil, ErrNotImplemented
 	}
-	return txEngine.BeginGraphTransaction()
+	tx, err := txEngine.BeginGraphTransaction()
+	if err != nil {
+		return nil, err
+	}
+	return &walGraphTransaction{walEngine: w, tx: tx}, nil
 }
 
 // EnsureNamespaceMVCC delegates namespace MVCC priming to the wrapped engine
@@ -477,6 +481,14 @@ func (w *WALEngine) databaseFromNode(node *Node) string {
 	return w.getDatabaseName()
 }
 
+func (w *WALEngine) databaseFromNodeID(id NodeID) (dbName string, unprefixedID string) {
+	dbName, unprefixedID = w.getDatabaseName(), string(id)
+	if parsedDB, parsedID, ok := ParseDatabasePrefix(string(id)); ok {
+		dbName, unprefixedID = parsedDB, parsedID
+	}
+	return dbName, unprefixedID
+}
+
 func (w *WALEngine) databaseFromEdge(edge *Edge) (string, error) {
 	if edge == nil {
 		return w.getDatabaseName(), nil
@@ -504,6 +516,14 @@ func (w *WALEngine) databaseFromEdge(edge *Edge) (string, error) {
 		}
 	}
 	return dbName, nil
+}
+
+func (w *WALEngine) databaseFromEdgeID(id EdgeID) (dbName string, unprefixedID string) {
+	dbName, unprefixedID = w.getDatabaseName(), string(id)
+	if parsedDB, parsedID, ok := ParseDatabasePrefix(string(id)); ok {
+		dbName, unprefixedID = parsedDB, parsedID
+	}
+	return dbName, unprefixedID
 }
 
 func cloneNodeForWAL(dbName string, node *Node) *Node {
