@@ -21,15 +21,18 @@ NORNICDB_DATA_DIR=/var/lib/nornicdb
 ```yaml
 database:
   storage_backend: treedb
-  data_dir: /var/lib/nornicdb
 ```
 
-The legacy YAML shape also works:
+When using `nornicdb serve`, set the runtime data directory with
+`--data-dir` or `NORNICDB_DATA_DIR`. YAML `database.data_dir` is parsed for
+configuration consumers, but `serve` resolves the directory from its flag/env
+path before opening storage.
+
+The legacy YAML backend shape also works:
 
 ```yaml
 storage:
   backend: treedb
-  path: /var/lib/nornicdb
 ```
 
 Backend names are case-insensitive and canonicalized to `badger`, `treedb`, or
