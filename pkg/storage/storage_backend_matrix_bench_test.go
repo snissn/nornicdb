@@ -163,8 +163,8 @@ func BenchmarkPersistentBadgerEngine_GetNodesByLabel(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if len(nodes) == 0 {
-			b.Fatal("expected benchmark nodes")
+		if len(nodes) != storageBackendBenchReadNodes {
+			b.Fatalf("expected %d nodes, got %d", storageBackendBenchReadNodes, len(nodes))
 		}
 	}
 }
@@ -384,8 +384,8 @@ func BenchmarkTreeDBEngine_GetNodesByLabel(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if len(nodes) == 0 {
-			b.Fatal("expected benchmark nodes")
+		if len(nodes) != storageBackendBenchReadNodes {
+			b.Fatalf("expected %d nodes, got %d", storageBackendBenchReadNodes, len(nodes))
 		}
 	}
 }

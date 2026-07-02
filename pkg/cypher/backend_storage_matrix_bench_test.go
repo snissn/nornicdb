@@ -88,7 +88,9 @@ func benchmarkBackendCypherBareCreate(b *testing.B, exec *StorageExecutor, _ sto
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		b.StopTimer()
 		refreshBackendCypherRows(rows, i*backendCypherBatchSize)
+		b.StartTimer()
 		if _, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows}); err != nil {
 			b.Fatal(err)
 		}
@@ -106,9 +108,7 @@ func benchmarkBackendCypherLabelCount(b *testing.B, exec *StorageExecutor, engin
 		if err != nil {
 			b.Fatal(err)
 		}
-		if len(result.Rows) != 1 {
-			b.Fatalf("expected one row, got %d", len(result.Rows))
-		}
+		requireBackendCypherSingleInt(b, result, "count", backendCypherReadNodes)
 	}
 }
 
@@ -123,9 +123,7 @@ func benchmarkBackendCypherRelationshipCount(b *testing.B, exec *StorageExecutor
 		if err != nil {
 			b.Fatal(err)
 		}
-		if len(result.Rows) != 1 {
-			b.Fatalf("expected one row, got %d", len(result.Rows))
-		}
+		requireBackendCypherSingleInt(b, result, "count", backendCypherReadNodes-1)
 	}
 }
 
@@ -148,9 +146,7 @@ func benchmarkBackendCypherShortestPath(b *testing.B, exec *StorageExecutor, eng
 		if err != nil {
 			b.Fatal(err)
 		}
-		if len(result.Rows) != 1 {
-			b.Fatalf("expected one row, got %d", len(result.Rows))
-		}
+		requireBackendCypherSingleInt(b, result, "hops", backendCypherPathNodes-1)
 	}
 }
 
@@ -172,6 +168,31 @@ func refreshBackendCypherRows(rows []interface{}, base int) {
 		row := rows[i].(map[string]interface{})
 		row["productID"] = int64(base + i)
 		row["productName"] = fmt.Sprintf("Product-%d", base+i)
+	}
+}
+
+func requireBackendCypherSingleInt(b *testing.B, result *ExecuteResult, column string, want int) {
+	b.Helper()
+	if len(result.Rows) != 1 {
+		b.Fatalf("expected one row, got %d", len(result.Rows))
+	}
+	columnIndex := -1
+	for i, gotColumn := range result.Columns {
+		if gotColumn == column {
+			columnIndex = i
+			break
+		}
+	}
+	if columnIndex < 0 {
+		b.Fatalf("expected column %q in columns %#v", column, result.Columns)
+	}
+	row := result.Rows[0]
+	if columnIndex >= len(row) {
+		b.Fatalf("expected column %q at index %d in row %#v", column, columnIndex, row)
+	}
+	got := row[columnIndex]
+	if gotInt := toInt64(got); gotInt != int64(want) {
+		b.Fatalf("expected %s=%d, got %v (%T)", column, want, got, got)
 	}
 }
 
