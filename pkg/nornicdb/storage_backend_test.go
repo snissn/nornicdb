@@ -116,6 +116,130 @@ func TestOpen_StorageBackendSelectorTreeDBCreateGetReopen(t *testing.T) {
 	require.Equal(t, []string{"TreeDBOpen"}, again.Labels)
 }
 
+func TestOpen_StorageBackendSelectorBackendNeutralGraphWorkflow(t *testing.T) {
+	tests := []struct {
+		name    string
+		backend string
+	}{
+		{name: "badger", backend: nornicConfig.StorageBackendBadger},
+		{name: "treedb", backend: nornicConfig.StorageBackendTreeDB},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ctx := context.Background()
+
+			db, err := Open(dir, backendWorkflowTestConfig(tt.backend))
+			require.NoError(t, err)
+
+			author, err := db.CreateNode(ctx,
+				[]string{"N1WorkflowPerson", "Author"},
+				map[string]interface{}{"name": "Ada", "kind": "person"},
+			)
+			require.NoError(t, err)
+			readAuthor, err := db.GetNode(ctx, author.ID)
+			require.NoError(t, err)
+			requireWorkflowAuthorState(t, readAuthor)
+
+			document, err := db.CreateNode(ctx,
+				[]string{"N1WorkflowDocument"},
+				map[string]interface{}{"title": "N1 draft", "version": "1"},
+			)
+			require.NoError(t, err)
+
+			updatedDocument, err := db.UpdateNode(ctx, document.ID, map[string]interface{}{
+				"title":  "N1 validated",
+				"status": "reviewed",
+			})
+			require.NoError(t, err)
+			requireWorkflowDocumentState(t, updatedDocument)
+
+			createdEdge, err := db.CreateEdge(ctx, author.ID, document.ID, "AUTHORED", map[string]interface{}{
+				"role": "primary",
+			})
+			require.NoError(t, err)
+			require.Equal(t, author.ID, createdEdge.Source)
+			require.Equal(t, document.ID, createdEdge.Target)
+			require.Equal(t, "AUTHORED", createdEdge.Type)
+			require.Equal(t, "primary", createdEdge.Properties["role"])
+
+			readEdge, err := db.GetEdge(ctx, createdEdge.ID)
+			require.NoError(t, err)
+			require.Equal(t, createdEdge.ID, readEdge.ID)
+			require.Equal(t, "primary", readEdge.Properties["role"])
+
+			edgesForAuthor, err := db.GetEdgesForNode(ctx, author.ID)
+			require.NoError(t, err)
+			requireEdgePresent(t, edgesForAuthor, createdEdge.ID)
+
+			labels, err := db.GetLabels(ctx)
+			require.NoError(t, err)
+			require.Contains(t, labels, "N1WorkflowPerson")
+			require.Contains(t, labels, "Author")
+			require.Contains(t, labels, "N1WorkflowDocument")
+
+			types, err := db.GetRelationshipTypes(ctx)
+			require.NoError(t, err)
+			require.Contains(t, types, "AUTHORED")
+
+			transient, err := db.CreateNode(ctx,
+				[]string{"N1WorkflowTransient"},
+				map[string]interface{}{"state": "temporary"},
+			)
+			require.NoError(t, err)
+			transientEdge, err := db.CreateEdge(ctx, transient.ID, author.ID, "TEMP_REL", map[string]interface{}{"scope": "delete"})
+			require.NoError(t, err)
+			require.NoError(t, db.DeleteNode(ctx, transient.ID))
+			_, err = db.GetNode(ctx, transient.ID)
+			require.ErrorIs(t, err, ErrNotFound)
+			_, err = db.GetEdge(ctx, transientEdge.ID)
+			require.ErrorIs(t, err, ErrNotFound)
+
+			require.NoError(t, db.Close())
+
+			reopened, err := Open(dir, backendWorkflowTestConfig(tt.backend))
+			require.NoError(t, err)
+			defer reopened.Close()
+
+			reopenedAuthor, err := reopened.GetNode(ctx, author.ID)
+			require.NoError(t, err)
+			requireWorkflowAuthorState(t, reopenedAuthor)
+
+			reopenedDocument, err := reopened.GetNode(ctx, document.ID)
+			require.NoError(t, err)
+			requireWorkflowDocumentState(t, reopenedDocument)
+
+			reopenedEdge, err := reopened.GetEdge(ctx, createdEdge.ID)
+			require.NoError(t, err)
+			require.Equal(t, author.ID, reopenedEdge.Source)
+			require.Equal(t, document.ID, reopenedEdge.Target)
+			require.Equal(t, "AUTHORED", reopenedEdge.Type)
+			require.Equal(t, "primary", reopenedEdge.Properties["role"])
+
+			reopenedEdgesForDocument, err := reopened.GetEdgesForNode(ctx, document.ID)
+			require.NoError(t, err)
+			requireEdgePresent(t, reopenedEdgesForDocument, createdEdge.ID)
+
+			reopenedLabels, err := reopened.GetLabels(ctx)
+			require.NoError(t, err)
+			require.Contains(t, reopenedLabels, "N1WorkflowPerson")
+			require.Contains(t, reopenedLabels, "N1WorkflowDocument")
+			require.NotContains(t, reopenedLabels, "N1WorkflowTransient")
+
+			reopenedTypes, err := reopened.GetRelationshipTypes(ctx)
+			require.NoError(t, err)
+			require.Contains(t, reopenedTypes, "AUTHORED")
+			require.NotContains(t, reopenedTypes, "TEMP_REL")
+
+			_, err = reopened.GetNode(ctx, transient.ID)
+			require.ErrorIs(t, err, ErrNotFound)
+			_, err = reopened.GetEdge(ctx, transientEdge.ID)
+			require.ErrorIs(t, err, ErrNotFound)
+		})
+	}
+}
+
 func TestOpen_StorageBackendSelectorTreeDBRequiresPersistentDataDir(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Database.StorageBackend = nornicConfig.StorageBackendTreeDB
@@ -162,4 +286,45 @@ func treeDBStorageTestConfig() *Config {
 	cfg.Memory.SearchVectorWarming = "lazy"
 	cfg.Memory.DecayEnabled = false
 	return cfg
+}
+
+func backendWorkflowTestConfig(backend string) *Config {
+	cfg := DefaultConfig()
+	cfg.Database.StorageBackend = backend
+	cfg.Database.AsyncWritesEnabled = false
+	cfg.Memory.SearchBM25Enabled = false
+	cfg.Memory.SearchBM25Warming = "lazy"
+	cfg.Memory.SearchVectorEnabled = false
+	cfg.Memory.SearchVectorWarming = "lazy"
+	cfg.Memory.DecayEnabled = false
+	cfg.Memory.EmbeddingEnabled = false
+	return cfg
+}
+
+func requireEdgePresent(t *testing.T, edges []*GraphEdge, id string) {
+	t.Helper()
+
+	for _, edge := range edges {
+		if edge.ID == id {
+			return
+		}
+	}
+	require.Failf(t, "edge not found", "edge %q not found in %#v", id, edges)
+}
+
+func requireWorkflowAuthorState(t *testing.T, node *Node) {
+	t.Helper()
+
+	require.Equal(t, "Ada", node.Properties["name"])
+	require.Equal(t, "person", node.Properties["kind"])
+	require.ElementsMatch(t, []string{"N1WorkflowPerson", "Author"}, node.Labels)
+}
+
+func requireWorkflowDocumentState(t *testing.T, node *Node) {
+	t.Helper()
+
+	require.Equal(t, "N1 validated", node.Properties["title"])
+	require.Equal(t, "1", node.Properties["version"])
+	require.Equal(t, "reviewed", node.Properties["status"])
+	require.ElementsMatch(t, []string{"N1WorkflowDocument"}, node.Labels)
 }
