@@ -81,6 +81,7 @@ Features:
 	serveCmd.Flags().Int("http-port", getEnvInt("NORNICDB_HTTP_PORT", 7474), "HTTP API port")
 	serveCmd.Flags().String("address", getEnvStr("NORNICDB_ADDRESS", "127.0.0.1"), "Bind address (127.0.0.1 for localhost only, 0.0.0.0 for all interfaces)")
 	serveCmd.Flags().String("data-dir", getEnvStr("NORNICDB_DATA_DIR", "./data"), "Data directory")
+	serveCmd.Flags().String("storage-backend", getEnvStr("NORNICDB_STORAGE_BACKEND", config.StorageBackendBadger), "Storage backend: badger, treedb, memory")
 	serveCmd.Flags().Bool("upgrade-storage", getEnvBool("NORNICDB_UPGRADE_STORAGE", false), "Authorize one-way upgrade of the data directory's storage version through every migration arm this binary understands. Back up before enabling.")
 	serveCmd.Flags().String("embedding-provider", getEnvStr("NORNICDB_EMBEDDING_PROVIDER", "local"), "Embedding provider: local, ollama, openai")
 	serveCmd.Flags().String("embedding-url", getEnvStr("NORNICDB_EMBEDDING_API_URL", "http://localhost:11434"), "Embedding API URL (ollama/openai)")
@@ -153,6 +154,7 @@ Features:
 		RunE:  runShell,
 	}
 	shellCmd.Flags().String("data-dir", getEnvStr("NORNICDB_DATA_DIR", "./data"), "Data directory")
+	shellCmd.Flags().String("storage-backend", getEnvStr("NORNICDB_STORAGE_BACKEND", config.StorageBackendBadger), "Storage backend: badger, treedb, memory")
 	shellCmd.Flags().String("uri", "bolt://localhost:7687", "NornicDB URI (for future Bolt client support)")
 	rootCmd.AddCommand(shellCmd)
 
@@ -167,6 +169,7 @@ Features:
 		RunE:  runDecaySuppress,
 	}
 	decaySuppressCmd.Flags().String("data-dir", getEnvStr("NORNICDB_DATA_DIR", "./data"), "Data directory")
+	decaySuppressCmd.Flags().String("storage-backend", getEnvStr("NORNICDB_STORAGE_BACKEND", config.StorageBackendBadger), "Storage backend: badger, treedb, memory")
 	decaySuppressCmd.Flags().Float64("threshold", 0.05, "Visibility suppression threshold (default: 0.05)")
 	decayCmd.AddCommand(decaySuppressCmd)
 
@@ -176,6 +179,7 @@ Features:
 		RunE:  runDecayStats,
 	}
 	decayStatsCmd.Flags().String("data-dir", getEnvStr("NORNICDB_DATA_DIR", "./data"), "Data directory")
+	decayStatsCmd.Flags().String("storage-backend", getEnvStr("NORNICDB_STORAGE_BACKEND", config.StorageBackendBadger), "Storage backend: badger, treedb, memory")
 	decayCmd.AddCommand(decayStatsCmd)
 	rootCmd.AddCommand(decayCmd)
 
@@ -229,6 +233,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	httpPort, _ := cmd.Flags().GetInt("http-port")
 	address, _ := cmd.Flags().GetString("address")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
+	storageBackend, _ := cmd.Flags().GetString("storage-backend")
 	upgradeStorage, _ := cmd.Flags().GetBool("upgrade-storage")
 	embeddingProvider, _ := cmd.Flags().GetString("embedding-provider")
 	embeddingURL, _ := cmd.Flags().GetString("embedding-url")
@@ -492,6 +497,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// directly: any field that lives on Config now flows through.
 	dbConfig := cfg
 	dbConfig.Database.DataDir = dataDir
+	if cmd.Flags().Changed("storage-backend") {
+		dbConfig.Database.StorageBackend = storageBackend
+	}
 	dbConfig.Server.BoltPort = boltPort
 	dbConfig.Server.HTTPPort = httpPort
 	// Embedding endpoint/credentials are still computed locally from a
@@ -1545,11 +1553,13 @@ http_port: 7474
 
 func runShell(cmd *cobra.Command, args []string) error {
 	dataDir, _ := cmd.Flags().GetString("data-dir")
+	storageBackend, _ := cmd.Flags().GetString("storage-backend")
 
 	// Open database
 	fmt.Printf("📂 Opening database at %s...\n", dataDir)
 	config := nornicdb.DefaultConfig()
 	config.Database.DataDir = dataDir
+	config.Database.StorageBackend = storageBackend
 
 	db, err := nornicdb.Open(dataDir, config)
 	if err != nil {
@@ -1623,11 +1633,13 @@ func runShell(cmd *cobra.Command, args []string) error {
 
 func runDecaySuppress(cmd *cobra.Command, args []string) error {
 	dataDir, _ := cmd.Flags().GetString("data-dir")
+	storageBackend, _ := cmd.Flags().GetString("storage-backend")
 	threshold, _ := cmd.Flags().GetFloat64("threshold")
 
 	fmt.Printf("Opening database at %s...\n", dataDir)
 	cfg := nornicdb.DefaultConfig()
 	cfg.Database.DataDir = dataDir
+	cfg.Database.StorageBackend = storageBackend
 	cfg.Memory.DecayEnabled = true
 
 	db, err := nornicdb.Open(dataDir, cfg)
@@ -1703,10 +1715,12 @@ func applySuppressionCounters(becameSuppressed bool, newlySuppressed, alreadySup
 
 func runDecayStats(cmd *cobra.Command, args []string) error {
 	dataDir, _ := cmd.Flags().GetString("data-dir")
+	storageBackend, _ := cmd.Flags().GetString("storage-backend")
 
 	fmt.Printf("Opening database at %s...\n", dataDir)
 	cfg := nornicdb.DefaultConfig()
 	cfg.Database.DataDir = dataDir
+	cfg.Database.StorageBackend = storageBackend
 	cfg.Memory.DecayEnabled = true
 
 	db, err := nornicdb.Open(dataDir, cfg)

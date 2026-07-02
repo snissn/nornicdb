@@ -294,6 +294,34 @@ type DatabaseAndStorage struct {
 	IsComposite bool
 }
 
+func resolveStorageBackendForOpen(dataDir string, config *Config) (string, error) {
+	backend := nornicConfig.NormalizeStorageBackend(config.Database.StorageBackend)
+	if err := nornicConfig.ValidateStorageBackend(backend); err != nil {
+		return "", err
+	}
+
+	if dataDir == "" {
+		if backend == nornicConfig.StorageBackendTreeDB {
+			return "", fmt.Errorf("treedb storage backend requires a persistent data directory; in-memory TreeDB mode is not implemented")
+		}
+		return nornicConfig.StorageBackendMemory, nil
+	}
+
+	switch backend {
+	case nornicConfig.StorageBackendBadger:
+		return nornicConfig.StorageBackendBadger, nil
+	case nornicConfig.StorageBackendMemory:
+		return "", fmt.Errorf("memory storage backend cannot be used with data directory %q; omit data-dir for in-memory mode", dataDir)
+	case nornicConfig.StorageBackendTreeDB:
+		if config.Database.EncryptionEnabled {
+			return "", fmt.Errorf("treedb storage backend does not support encryption yet")
+		}
+		return "", fmt.Errorf("treedb storage backend is not implemented yet")
+	default:
+		return "", fmt.Errorf("invalid storage backend %q", backend)
+	}
+}
+
 // Open opens or creates a NornicDB database at the specified directory.
 //
 // This initializes all database components including storage, decay management,
@@ -312,13 +340,17 @@ type DatabaseAndStorage struct {
 //
 // # Storage Modes
 //
-// Persistent Storage (dataDir != ""):
+// Persistent Storage (dataDir != "", storage_backend=badger):
 //   - Uses BadgerDB for durable storage
 //   - Data survives process restarts
 //   - Suitable for production use
 //   - Directory created if doesn't exist
 //
-// In-Memory Storage (dataDir == ""):
+// TreeDB Storage (storage_backend=treedb):
+//   - Reserved for the native TreeDB engine integration
+//   - Fails closed until that engine is available
+//
+// In-Memory Storage (dataDir == "" or storage_backend=memory without dataDir):
 //   - Uses memory-only storage
 //   - Data lost on process exit
 //   - Faster for testing/development
@@ -572,6 +604,11 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		config = DefaultConfig()
 	}
 	config.Database.DataDir = dataDir
+	storageBackend, err := resolveStorageBackendForOpen(dataDir, config)
+	if err != nil {
+		return nil, err
+	}
+	config.Database.StorageBackend = storageBackend
 	// Defensive defaults for the per-DB search-index master switches.
 	// Two distinct cases to handle correctly:
 	//
@@ -609,7 +646,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	}
 
 	// Initialize storage - use BadgerEngine for persistence, MemoryEngine for testing
-	if dataDir != "" {
+	if storageBackend == nornicConfig.StorageBackendBadger {
 		// Configure BadgerDB based on memory mode
 		// HighPerformance uses ~1GB RAM, LowMemory uses ~50MB
 		badgerOpts := storage.BadgerOptions{
