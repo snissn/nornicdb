@@ -982,7 +982,7 @@ func (e *TreeDBEngine) BulkCreateNodes(nodes []*Node) error {
 	if err != nil {
 		return err
 	}
-	tx.tx.ReserveWrites(len(nodes) * 8)
+	tx.reserveNodeCreateBatch(nodes)
 	for _, node := range nodes {
 		if _, err := tx.CreateNode(node); err != nil {
 			_ = tx.Rollback()
@@ -998,12 +998,9 @@ func (e *TreeDBEngine) BulkCreateEdges(edges []*Edge) error {
 	if err != nil {
 		return err
 	}
-	tx.tx.ReserveWrites(len(edges) * 16)
-	for _, edge := range edges {
-		if err := tx.CreateEdge(edge); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
+	if err := tx.BulkCreateEdges(edges); err != nil {
+		_ = tx.Rollback()
+		return err
 	}
 	return tx.Commit()
 }
