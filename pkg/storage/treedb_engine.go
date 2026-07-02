@@ -233,7 +233,7 @@ func (e *TreeDBEngine) DurabilityInfo() TreeDBDurabilityInfo {
 		SyncWrites:           e.syncWrites,
 		ReplicationSupported: false,
 	}
-	if e.db != nil {
+	if e.db != nil && !e.closed.Load() {
 		info.DurabilityMode = e.db.DurabilityMode()
 		stats := e.db.Stats()
 		if mode := stats["treedb.write_path.mode"]; mode != "" {
