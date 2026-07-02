@@ -47,6 +47,7 @@ type NamespacedEngine struct {
 	inner     Engine
 	namespace string
 	separator string // Default ":"
+	prefix    string
 
 	// log is the structured *slog.Logger for namespace-scoped emissions.
 	// Resolved lazily: if the inner engine implements StructuredLogger
@@ -61,6 +62,14 @@ type NamespacedEngine struct {
 // derive a child logger without constructor plumbing.
 type StructuredLogger interface {
 	Logger() *slog.Logger
+}
+
+type namespaceDirectNodeReader interface {
+	getNodeWithNamespacePrefix(prefix string, id NodeID) (*Node, error)
+}
+
+type namespaceDirectEdgeReader interface {
+	getEdgeWithNamespacePrefix(prefix string, id EdgeID) (*Edge, error)
 }
 
 // Logger returns the BadgerEngine's structured logger (D-01 accessor).
@@ -99,10 +108,12 @@ func (n *NamespacedEngine) namespaceLog() *slog.Logger {
 //
 // The namespace is used as a key prefix for all operations.
 func NewNamespacedEngine(inner Engine, namespace string) *NamespacedEngine {
+	separator := ":"
 	return &NamespacedEngine{
 		inner:     inner,
 		namespace: namespace,
-		separator: ":",
+		separator: separator,
+		prefix:    namespace + separator,
 	}
 }
 
@@ -140,16 +151,15 @@ func (n *NamespacedEngine) prefixNodeID(id NodeID) NodeID {
 	if n.hasNodePrefix(id) {
 		return id
 	}
-	return NodeID(n.namespace + n.separator + string(id))
+	return NodeID(n.prefix + string(id))
 }
 
 // unprefixNodeID removes namespace prefix from a node ID.
 // "tenant_a:123" → "123"
 func (n *NamespacedEngine) unprefixNodeID(id NodeID) NodeID {
-	prefix := n.namespace + n.separator
 	s := string(id)
-	if strings.HasPrefix(s, prefix) {
-		return NodeID(s[len(prefix):])
+	if strings.HasPrefix(s, n.prefix) {
+		return NodeID(s[len(n.prefix):])
 	}
 	return id
 }
@@ -159,26 +169,25 @@ func (n *NamespacedEngine) prefixEdgeID(id EdgeID) EdgeID {
 	if n.hasEdgePrefix(id) {
 		return id
 	}
-	return EdgeID(n.namespace + n.separator + string(id))
+	return EdgeID(n.prefix + string(id))
 }
 
 // unprefixEdgeID removes namespace prefix from an edge ID.
 func (n *NamespacedEngine) unprefixEdgeID(id EdgeID) EdgeID {
-	prefix := n.namespace + n.separator
 	s := string(id)
-	if strings.HasPrefix(s, prefix) {
-		return EdgeID(s[len(prefix):])
+	if strings.HasPrefix(s, n.prefix) {
+		return EdgeID(s[len(n.prefix):])
 	}
 	return id
 }
 
 // hasNodePrefix checks if an ID belongs to this namespace.
 func (n *NamespacedEngine) hasNodePrefix(id NodeID) bool {
-	return strings.HasPrefix(string(id), n.namespace+n.separator)
+	return strings.HasPrefix(string(id), n.prefix)
 }
 
 func (n *NamespacedEngine) hasEdgePrefix(id EdgeID) bool {
-	return strings.HasPrefix(string(id), n.namespace+n.separator)
+	return strings.HasPrefix(string(id), n.prefix)
 }
 
 func (n *NamespacedEngine) filterUserNodes(nodes []*Node) []*Node {
@@ -270,6 +279,9 @@ func (n *NamespacedEngine) CreateNode(node *Node) (NodeID, error) {
 }
 
 func (n *NamespacedEngine) GetNode(id NodeID) (*Node, error) {
+	if direct, ok := n.inner.(namespaceDirectNodeReader); ok {
+		return direct.getNodeWithNamespacePrefix(n.prefix, id)
+	}
 	// Always prefix the ID (user-facing API always receives unprefixed IDs)
 	namespacedID := n.prefixNodeID(id)
 	node, err := n.inner.GetNode(namespacedID)
@@ -347,6 +359,9 @@ func (n *NamespacedEngine) CreateEdge(edge *Edge) error {
 }
 
 func (n *NamespacedEngine) GetEdge(id EdgeID) (*Edge, error) {
+	if direct, ok := n.inner.(namespaceDirectEdgeReader); ok {
+		return direct.getEdgeWithNamespacePrefix(n.prefix, id)
+	}
 	namespacedID := n.prefixEdgeID(id)
 	edge, err := n.inner.GetEdge(namespacedID)
 	if err != nil {

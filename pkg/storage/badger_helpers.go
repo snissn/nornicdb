@@ -15,12 +15,12 @@ import (
 
 // nodeKey creates a key for storing a node.
 func nodeKey(id NodeID) []byte {
-	return append([]byte{prefixNode}, []byte(id)...)
+	return append([]byte{prefixNode}, string(id)...)
 }
 
 // edgeKey creates a key for storing an edge.
 func edgeKey(id EdgeID) []byte {
-	return append([]byte{prefixEdge}, []byte(id)...)
+	return append([]byte{prefixEdge}, string(id)...)
 }
 
 // mvccSequenceKey returns the legacy engine-global MVCC sequence key.

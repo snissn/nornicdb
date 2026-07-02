@@ -27,12 +27,30 @@ func TestOpen_StorageBackendSelectorMemoryRequiresEmptyDataDir(t *testing.T) {
 	require.ErrorContains(t, err, "memory storage backend cannot be used with data directory")
 }
 
-func TestOpen_StorageBackendSelectorTreeDBNotImplemented(t *testing.T) {
+func TestOpen_StorageBackendSelectorTreeDBOpens(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Database.StorageBackend = nornicConfig.StorageBackendTreeDB
+	cfg.Memory.SearchBM25Enabled = false
+	cfg.Memory.SearchBM25Warming = "lazy"
+	cfg.Memory.SearchVectorEnabled = false
+	cfg.Memory.SearchVectorWarming = "lazy"
+	cfg.Memory.DecayEnabled = false
+
+	db, err := Open(t.TempDir(), cfg)
+	require.NoError(t, err)
+	defer db.Close()
+
+	require.Equal(t, nornicConfig.StorageBackendTreeDB, db.config.Database.StorageBackend)
+	require.False(t, db.config.Database.AsyncWritesEnabled)
+	require.IsType(t, &storage.TreeDBEngine{}, db.GetBaseStorageForManager())
+}
+
+func TestOpen_StorageBackendSelectorTreeDBRequiresPersistentDataDir(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Database.StorageBackend = nornicConfig.StorageBackendTreeDB
 
-	_, err := Open(t.TempDir(), cfg)
-	require.ErrorContains(t, err, "treedb storage backend is not implemented yet")
+	_, err := Open("", cfg)
+	require.ErrorContains(t, err, "treedb storage backend requires a persistent data directory")
 }
 
 func TestOpen_StorageBackendSelectorTreeDBEncryptionFailsClosed(t *testing.T) {
@@ -43,4 +61,13 @@ func TestOpen_StorageBackendSelectorTreeDBEncryptionFailsClosed(t *testing.T) {
 
 	_, err := Open(t.TempDir(), cfg)
 	require.ErrorContains(t, err, "treedb storage backend does not support encryption yet")
+}
+
+func TestOpen_StorageBackendSelectorTreeDBMemoryDecayFailsClosed(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Database.StorageBackend = nornicConfig.StorageBackendTreeDB
+	cfg.Memory.DecayEnabled = true
+
+	_, err := Open(t.TempDir(), cfg)
+	require.ErrorContains(t, err, "treedb storage backend does not support memory decay yet")
 }
