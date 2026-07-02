@@ -1203,6 +1203,69 @@ func LoadSnapshot(path string) (*Snapshot, error) {
 	return &snapshot, nil
 }
 
+func restoreSnapshotForRecovery(engine *MemoryEngine, snapshot *Snapshot) (uint64, error) {
+	if snapshot == nil {
+		return 0, nil
+	}
+
+	dbName := recoverySnapshotDatabase(snapshot)
+	stripSnapshotDatabasePrefixes(snapshot, dbName)
+
+	namespacedEngine := NewNamespacedEngine(engine, dbName)
+	if err := BulkCreateNodesForRecovery(namespacedEngine, snapshot.Nodes); err != nil {
+		return snapshot.Sequence, fmt.Errorf("wal: failed to restore nodes: %w", err)
+	}
+	if err := BulkCreateEdgesForRecovery(namespacedEngine, snapshot.Edges); err != nil {
+		return snapshot.Sequence, fmt.Errorf("wal: failed to restore edges: %w", err)
+	}
+	return snapshot.Sequence, nil
+}
+
+func recoverySnapshotDatabase(snapshot *Snapshot) string {
+	globalConfig := config.LoadFromEnv()
+	dbName := globalConfig.Database.DefaultDatabase
+	if dbName == "" {
+		dbName = "nornic"
+	}
+
+	for _, node := range snapshot.Nodes {
+		if node == nil {
+			continue
+		}
+		if parsedDB, _, ok := ParseDatabasePrefix(string(node.ID)); ok {
+			return parsedDB
+		}
+		break
+	}
+	for _, edge := range snapshot.Edges {
+		if edge == nil {
+			continue
+		}
+		if parsedDB, _, ok := ParseDatabasePrefix(string(edge.ID)); ok {
+			return parsedDB
+		}
+		break
+	}
+	return dbName
+}
+
+func stripSnapshotDatabasePrefixes(snapshot *Snapshot, dbName string) {
+	for _, node := range snapshot.Nodes {
+		if node == nil {
+			continue
+		}
+		node.ID = NodeID(StripDatabasePrefix(dbName, string(node.ID)))
+	}
+	for _, edge := range snapshot.Edges {
+		if edge == nil {
+			continue
+		}
+		edge.ID = EdgeID(StripDatabasePrefix(dbName, string(edge.ID)))
+		edge.StartNode = NodeID(StripDatabasePrefix(dbName, string(edge.StartNode)))
+		edge.EndNode = NodeID(StripDatabasePrefix(dbName, string(edge.EndNode)))
+	}
+}
+
 // snapshotFileInfo holds path and mod time for retention pruning.
 type snapshotFileInfo struct {
 	path    string
@@ -2221,9 +2284,12 @@ func UndoWALEntry(engine Engine, entry WALEntry) error {
 		}
 		ids := make([]NodeID, len(data.Nodes))
 		for i, n := range data.Nodes {
+			if n == nil {
+				return ErrInvalidData
+			}
 			ids[i] = n.ID
 		}
-		return engine.BulkDeleteNodes(ids)
+		return namespacedEngine.BulkDeleteNodes(ids)
 
 	case OpBulkEdges:
 		// Undo bulk create = delete all
@@ -2233,9 +2299,12 @@ func UndoWALEntry(engine Engine, entry WALEntry) error {
 		}
 		ids := make([]EdgeID, len(data.Edges))
 		for i, e := range data.Edges {
+			if e == nil {
+				return ErrInvalidData
+			}
 			ids[i] = e.ID
 		}
-		return engine.BulkDeleteEdges(ids)
+		return namespacedEngine.BulkDeleteEdges(ids)
 
 	case OpBulkDeleteNodes:
 		// Undo bulk delete = recreate all
@@ -2246,7 +2315,7 @@ func UndoWALEntry(engine Engine, entry WALEntry) error {
 		if len(data.OldNodes) == 0 {
 			return ErrNoUndoData
 		}
-		return engine.BulkCreateNodes(data.OldNodes)
+		return namespacedEngine.BulkCreateNodes(data.OldNodes)
 
 	case OpBulkDeleteEdges:
 		// Undo bulk delete = recreate all
@@ -2257,7 +2326,7 @@ func UndoWALEntry(engine Engine, entry WALEntry) error {
 		if len(data.OldEdges) == 0 {
 			return ErrNoUndoData
 		}
-		return engine.BulkCreateEdges(data.OldEdges)
+		return namespacedEngine.BulkCreateEdges(data.OldEdges)
 
 	case OpCheckpoint, OpTxBegin, OpTxPrepare, OpTxCommit, OpTxAbort, OpUpdateEmbedding:
 		// These don't need undo
@@ -2330,7 +2399,7 @@ type TransactionState struct {
 }
 
 // RecoverWithTransactions performs transaction-aware WAL recovery.
-// Incomplete transactions (no commit/abort) are rolled back using undo data.
+// Incomplete transactions (no commit/abort) are skipped before replay.
 // Returns the engine state and recovery statistics.
 func RecoverWithTransactions(walDir, snapshotPath string) (*MemoryEngine, *TransactionRecoveryResult, error) {
 	engine := NewMemoryEngine()
@@ -2345,21 +2414,11 @@ func RecoverWithTransactions(walDir, snapshotPath string) (*MemoryEngine, *Trans
 			return nil, result, fmt.Errorf("wal: failed to load snapshot: %w", err)
 		}
 		if snapshot != nil {
-			result.SnapshotSeq = snapshot.Sequence
-			// Get database name from config (WAL entries have unprefixed IDs)
-			globalConfig := config.LoadFromEnv()
-			dbName := globalConfig.Database.DefaultDatabase
-			if dbName == "" {
-				dbName = "nornic" // Fallback to "nornic" if not configured
+			snapshotSeq, err := restoreSnapshotForRecovery(engine, snapshot)
+			if err != nil {
+				return nil, result, err
 			}
-			// Wrap engine with NamespacedEngine for snapshot restore (snapshot nodes have unprefixed IDs)
-			namespacedEngine := NewNamespacedEngine(engine, dbName)
-			if err := BulkCreateNodesForRecovery(namespacedEngine, snapshot.Nodes); err != nil {
-				return nil, result, fmt.Errorf("wal: failed to restore nodes: %w", err)
-			}
-			if err := BulkCreateEdgesForRecovery(namespacedEngine, snapshot.Edges); err != nil {
-				return nil, result, fmt.Errorf("wal: failed to restore edges: %w", err)
-			}
+			result.SnapshotSeq = snapshotSeq
 		}
 	}
 
@@ -2369,12 +2428,14 @@ func RecoverWithTransactions(walDir, snapshotPath string) (*MemoryEngine, *Trans
 		return nil, result, fmt.Errorf("wal: failed to read WAL: %w", err)
 	}
 
-	// Phase 1: Categorize entries by transaction
-	nonTxEntries := []WALEntry{}
+	// Phase 1: Categorize entries by transaction while preserving the
+	// post-snapshot WAL order for replay.
+	orderedEntries := make([]WALEntry, 0, len(entries))
 	for _, entry := range entries {
 		if entry.Sequence <= result.SnapshotSeq {
 			continue
 		}
+		orderedEntries = append(orderedEntries, entry)
 
 		txID := GetEntryTxID(entry)
 
@@ -2418,75 +2479,86 @@ func RecoverWithTransactions(walDir, snapshotPath string) (*MemoryEngine, *Trans
 				// Entry belongs to a transaction
 				if tx, ok := result.Transactions[txID]; ok {
 					tx.Entries = append(tx.Entries, entry)
-				} else {
-					// Entry references unknown transaction - treat as non-transactional
-					nonTxEntries = append(nonTxEntries, entry)
 				}
-			} else {
-				// Non-transactional entry
-				nonTxEntries = append(nonTxEntries, entry)
 			}
 		}
 	}
 
-	// Phase 2: Apply committed transactions
-	// Each entry will use its own database name (stored in entry.Database)
-
-	// Phase 2: Apply committed transactions
-	for txID, tx := range result.Transactions {
-		if tx.Done && !tx.Aborted {
-			// Transaction committed - apply all its entries
-			for _, entry := range tx.Entries {
-				if err := ReplayWALEntry(engine, entry); err != nil {
-					if !errors.Is(err, ErrAlreadyExists) {
-						result.FailedTransactions = append(result.FailedTransactions, txID)
-					}
-				}
-			}
-			result.CommittedTransactions++
-		}
-	}
-
-	// Phase 3: Rollback incomplete transactions
+	// Phase 2: Classify terminal transaction states before replay. Prepared
+	// transactions without a terminal marker are fail-closed and stop replay of
+	// all post-snapshot WAL entries.
 	for txID, tx := range result.Transactions {
 		if !tx.Done {
 			if tx.Prepared {
 				result.InDoubtTransactions = append(result.InDoubtTransactions, txID)
 				continue
 			}
-			// Transaction incomplete - needs rollback
-			// First apply forward (in case partially applied before crash)
-			for _, entry := range tx.Entries {
-				ReplayWALEntry(engine, entry) // Ignore errors - might already exist
-			}
-			// Then undo in reverse order
-			for i := len(tx.Entries) - 1; i >= 0; i-- {
-				entry := tx.Entries[i]
-				if err := UndoWALEntry(engine, entry); err != nil {
-					if !errors.Is(err, ErrNoUndoData) {
-						result.UndoErrors = append(result.UndoErrors, fmt.Sprintf("tx %s: %v", txID, err))
-					}
-				}
-			}
 			result.RolledBackTransactions++
+			result.SkippedEntries += len(tx.Entries)
 		} else if tx.Aborted {
 			result.AbortedTransactions++
+			result.SkippedEntries += len(tx.Entries)
 		}
 	}
-
-	// Phase 4: Apply non-transactional entries
-	for _, entry := range nonTxEntries {
-		if err := ReplayWALEntry(engine, entry); err != nil {
-			if !errors.Is(err, ErrAlreadyExists) {
-				result.NonTxErrors = append(result.NonTxErrors, err.Error())
-			}
-		}
-		result.NonTxApplied++
-	}
-
 	if len(result.InDoubtTransactions) > 0 {
 		sort.Strings(result.InDoubtTransactions)
 		return engine, result, fmt.Errorf("%w: prepared transactions without terminal marker: %s", ErrRecoveryFailed, strings.Join(result.InDoubtTransactions, ","))
+	}
+
+	// Phase 3: Replay in WAL order. Transactional mutations are applied at the
+	// transaction commit marker so earlier non-transactional entries and prior
+	// committed transactions are visible before dependent transaction entries.
+	replayedTransactions := make(map[string]struct{}, len(result.Transactions))
+	for _, entry := range orderedEntries {
+		switch entry.Operation {
+		case OpTxBegin, OpTxPrepare:
+			continue
+		case OpTxAbort:
+			continue
+		case OpTxCommit:
+			txID := GetEntryTxID(entry)
+			tx, ok := result.Transactions[txID]
+			if !ok || tx.Aborted {
+				continue
+			}
+			if _, replayed := replayedTransactions[txID]; replayed {
+				continue
+			}
+			result.CommittedTransactions++
+			replayedTransactions[txID] = struct{}{}
+			txFailed := false
+			for _, txEntry := range tx.Entries {
+				if err := ReplayWALEntry(engine, txEntry); err != nil {
+					if errors.Is(err, ErrAlreadyExists) {
+						result.SkippedEntries++
+						continue
+					}
+					txFailed = true
+					continue
+				}
+				result.CommittedEntriesApplied++
+			}
+			if txFailed {
+				result.FailedTransactions = append(result.FailedTransactions, txID)
+			}
+			continue
+		}
+
+		txID := GetEntryTxID(entry)
+		if txID != "" {
+			if _, knownTx := result.Transactions[txID]; knownTx {
+				continue
+			}
+		}
+		if err := ReplayWALEntry(engine, entry); err != nil {
+			if errors.Is(err, ErrAlreadyExists) {
+				result.SkippedEntries++
+			} else {
+				result.NonTxErrors = append(result.NonTxErrors, err.Error())
+			}
+			continue
+		}
+		result.NonTxApplied++
 	}
 
 	return engine, result, nil
@@ -2494,16 +2566,18 @@ func RecoverWithTransactions(walDir, snapshotPath string) (*MemoryEngine, *Trans
 
 // TransactionRecoveryResult contains detailed statistics from transaction-aware recovery.
 type TransactionRecoveryResult struct {
-	SnapshotSeq            uint64
-	Transactions           map[string]*TransactionState
-	CommittedTransactions  int
-	RolledBackTransactions int
-	AbortedTransactions    int
-	InDoubtTransactions    []string
-	FailedTransactions     []string
-	UndoErrors             []string
-	NonTxApplied           int
-	NonTxErrors            []string
+	SnapshotSeq             uint64
+	Transactions            map[string]*TransactionState
+	CommittedTransactions   int
+	CommittedEntriesApplied int
+	RolledBackTransactions  int
+	AbortedTransactions     int
+	SkippedEntries          int
+	InDoubtTransactions     []string
+	FailedTransactions      []string
+	UndoErrors              []string
+	NonTxApplied            int
+	NonTxErrors             []string
 }
 
 // Summary returns a human-readable summary of the recovery.
@@ -2569,60 +2643,35 @@ func RecoverFromWALWithResult(walDir, snapshotPath string) (*MemoryEngine, Repla
 	engine := NewMemoryEngine()
 	result := ReplayResult{}
 
-	// Load snapshot if available
+	// Load snapshot metadata up front so WAL scanning can skip entries already
+	// covered by the snapshot. Restore only after choosing the replay path.
 	var snapshotSeq uint64
+	var snapshot *Snapshot
 	if snapshotPath != "" {
-		snapshot, err := LoadSnapshot(snapshotPath)
+		var err error
+		snapshot, err = LoadSnapshot(snapshotPath)
 		if err != nil {
 			if !os.IsNotExist(err) {
 				return nil, result, fmt.Errorf("wal: failed to load snapshot: %w", err)
 			}
 			// No snapshot, start fresh
-		} else {
-			// Apply snapshot
+		} else if snapshot != nil {
 			snapshotSeq = snapshot.Sequence
-
-			// Determine database name from snapshot contents or config.
-			globalConfig := config.LoadFromEnv()
-			dbName := globalConfig.Database.DefaultDatabase
-			if dbName == "" {
-				dbName = "nornic" // Fallback to "nornic" if not configured
-			}
-
-			if len(snapshot.Nodes) > 0 {
-				if parsedDB, _, ok := ParseDatabasePrefix(string(snapshot.Nodes[0].ID)); ok {
-					dbName = parsedDB
-				}
-			} else if len(snapshot.Edges) > 0 {
-				if parsedDB, _, ok := ParseDatabasePrefix(string(snapshot.Edges[0].ID)); ok {
-					dbName = parsedDB
-				}
-			}
-
-			// Unprefix snapshot data for the selected database before restoring via NamespacedEngine.
-			for _, node := range snapshot.Nodes {
-				node.ID = NodeID(StripDatabasePrefix(dbName, string(node.ID)))
-			}
-			for _, edge := range snapshot.Edges {
-				edge.ID = EdgeID(StripDatabasePrefix(dbName, string(edge.ID)))
-				edge.StartNode = NodeID(StripDatabasePrefix(dbName, string(edge.StartNode)))
-				edge.EndNode = NodeID(StripDatabasePrefix(dbName, string(edge.EndNode)))
-			}
-
-			namespacedEngine := NewNamespacedEngine(engine, dbName)
-			if err := BulkCreateNodesForRecovery(namespacedEngine, snapshot.Nodes); err != nil {
-				return nil, result, fmt.Errorf("wal: failed to restore nodes: %w", err)
-			}
-			if err := BulkCreateEdgesForRecovery(namespacedEngine, snapshot.Edges); err != nil {
-				return nil, result, fmt.Errorf("wal: failed to restore edges: %w", err)
-			}
 		}
+	}
+	restoreLoadedSnapshot := func() error {
+		var err error
+		snapshotSeq, err = restoreSnapshotForRecovery(engine, snapshot)
+		return err
 	}
 
 	// Replay WAL entries after snapshot
 	activePath := walActivePath(walDir)
 	manifest, _ := loadWALManifest(walDir)
 	if _, statErr := os.Stat(activePath); os.IsNotExist(statErr) && len(manifest.Segments) == 0 {
+		if err := restoreLoadedSnapshot(); err != nil {
+			return nil, result, err
+		}
 		return engine, result, nil // No WAL to replay, return engine as-is
 	}
 
@@ -2636,11 +2685,62 @@ func RecoverFromWALWithResult(walDir, snapshotPath string) (*MemoryEngine, Repla
 		return nil, result, fmt.Errorf("wal: failed to read WAL: %w", err)
 	}
 
+	if walEntriesRequireTransactionRecovery(entries) {
+		_ = engine.Close()
+		txEngine, txResult, txErr := RecoverWithTransactions(walDir, snapshotPath)
+		return txEngine, replayResultFromTransactionRecovery(txResult), txErr
+	}
+
+	if err := restoreLoadedSnapshot(); err != nil {
+		return nil, result, err
+	}
+
 	// Replay entries with proper error tracking
 	// Each entry will use its own database name (stored in entry.Database)
 	result = ReplayWALEntries(engine, entries)
 
 	return engine, result, nil
+}
+
+func walEntriesRequireTransactionRecovery(entries []WALEntry) bool {
+	for _, entry := range entries {
+		switch entry.Operation {
+		case OpTxBegin, OpTxPrepare, OpTxCommit, OpTxAbort:
+			return true
+		}
+		if GetEntryTxID(entry) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func replayResultFromTransactionRecovery(txResult *TransactionRecoveryResult) ReplayResult {
+	result := ReplayResult{Errors: make([]ReplayError, 0)}
+	if txResult == nil {
+		return result
+	}
+
+	result.Applied = txResult.NonTxApplied + txResult.CommittedEntriesApplied
+	result.Skipped = txResult.SkippedEntries
+
+	addRecoveryError := func(operation OperationType, err error) {
+		result.Failed++
+		result.Errors = append(result.Errors, ReplayError{Operation: operation, Error: err})
+	}
+	for _, txID := range txResult.FailedTransactions {
+		addRecoveryError(OpTxCommit, fmt.Errorf("transaction %s failed during replay", txID))
+	}
+	for _, txID := range txResult.InDoubtTransactions {
+		addRecoveryError(OpTxPrepare, fmt.Errorf("transaction %s prepared without terminal marker", txID))
+	}
+	for _, undoErr := range txResult.UndoErrors {
+		addRecoveryError(OpTxAbort, errors.New(undoErr))
+	}
+	for _, nonTxErr := range txResult.NonTxErrors {
+		addRecoveryError(OperationType("non_transactional"), errors.New(nonTxErr))
+	}
+	return result
 }
 
 // ReplayWALEntries replays multiple entries and tracks results.
