@@ -146,6 +146,7 @@ This automatically enables:
 |---------|-------|--------|
 | WAL Sync Mode | `immediate` | fsync every write |
 | Badger SyncWrites | `true` | Sync underlying storage |
+| TreeDB SyncWrites | `true` | Use TreeDB's synchronous commit path |
 | AsyncEngine Flush | `10ms` | More frequent cache flushes |
 
 ### When to Use Strict Mode
@@ -163,6 +164,25 @@ This automatically enables:
 - Search indexes
 - Analytics
 - Embeddings (regenerable)
+
+## TreeDB Backend Durability
+
+When `storage_backend=treedb`, NornicDB stores graph records, label and
+relationship lookup indexes, pending-embedding markers, and schema definitions
+directly in TreeDB. TreeDB owns the durable write boundary through its native
+redo/WAL profile. `NORNICDB_STRICT_DURABILITY=true` maps to TreeDB
+`SyncWrites`, so graph commits use TreeDB's synchronous commit path; with strict
+durability disabled, operators can still force a checkpoint through the storage
+maintenance `Sync()` path.
+
+TreeDB is not wrapped in NornicDB's legacy `WALEngine`. The `NORNICDB_WAL_*`
+retention and compaction settings below apply to the NornicDB WAL path used by
+Badger-era deployments; they do not create raft replay records for TreeDB.
+TreeDB command-WAL profiles and non-standalone cluster modes currently fail
+closed with explicit `ErrNotImplemented` errors. Until the separate
+WAL/replication integration lane lands, TreeDB should be treated as locally
+durable after close/reopen, not as a raft-replicated or externally replayable
+WAL source.
 
 ## Performance Comparison
 
