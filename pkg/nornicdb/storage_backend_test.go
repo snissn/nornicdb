@@ -2,6 +2,7 @@ package nornicdb
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
@@ -38,6 +39,34 @@ func TestOpen_StorageBackendSelectorTreeDBOpens(t *testing.T) {
 	require.Equal(t, nornicConfig.StorageBackendTreeDB, db.config.Database.StorageBackend)
 	require.False(t, db.config.Database.AsyncWritesEnabled)
 	require.IsType(t, &storage.TreeDBEngine{}, db.GetBaseStorageForManager())
+}
+
+func TestOpen_StorageBackendSelectorTreeDBUsesNativeDurabilityPath(t *testing.T) {
+	cfg := treeDBStorageTestConfig()
+	cfg.Database.StrictDurability = true
+	cfg.Database.AsyncWritesEnabled = true
+
+	db, err := Open(t.TempDir(), cfg)
+	require.NoError(t, err)
+	defer db.Close()
+
+	base := db.GetBaseStorageForManager()
+	treeEngine, ok := base.(*storage.TreeDBEngine)
+	require.True(t, ok)
+	require.Nil(t, db.wal)
+	require.False(t, db.config.Database.AsyncWritesEnabled)
+	_, isWAL := base.(*storage.WALEngine)
+	require.False(t, isWAL)
+	_, isAsync := base.(*storage.AsyncEngine)
+	require.False(t, isAsync)
+
+	info := treeEngine.DurabilityInfo()
+	require.True(t, info.NativeWAL)
+	require.False(t, info.NornicWAL)
+	require.False(t, info.CommandWAL)
+	require.False(t, info.AsyncWrites)
+	require.True(t, info.SyncWrites)
+	require.False(t, info.ReplicationSupported)
 }
 
 func TestOpen_StorageBackendSelectorTreeDBCreateGetReopen(t *testing.T) {
@@ -90,6 +119,16 @@ func TestOpen_StorageBackendSelectorTreeDBMemoryDecayFailsClosed(t *testing.T) {
 
 	_, err := Open(t.TempDir(), cfg)
 	require.ErrorContains(t, err, "treedb storage backend does not support memory decay yet")
+}
+
+func TestOpen_StorageBackendSelectorTreeDBClusterModeFailsClosed(t *testing.T) {
+	t.Setenv("NORNICDB_CLUSTER_MODE", "raft")
+	cfg := treeDBStorageTestConfig()
+
+	_, err := Open(t.TempDir(), cfg)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, storage.ErrNotImplemented), "err=%v", err)
+	require.ErrorContains(t, err, "treedb cluster replication integration")
 }
 
 func treeDBStorageTestConfig() *Config {

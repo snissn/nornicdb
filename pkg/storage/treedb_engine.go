@@ -46,6 +46,21 @@ type TreeDBOptions struct {
 	Logger                  *slog.Logger
 }
 
+// TreeDBDurabilityInfo reports the durable write path selected for TreeDBEngine.
+type TreeDBDurabilityInfo struct {
+	Dir                  string
+	Profile              string
+	DurabilityMode       string
+	WritePathMode        string
+	RedoLog              string
+	NativeWAL            bool
+	CommandWAL           bool
+	NornicWAL            bool
+	AsyncWrites          bool
+	SyncWrites           bool
+	ReplicationSupported bool
+}
+
 // TreeDBEngine stores the NornicDB property graph directly in TreeDB.
 //
 // TreeDBEngine uses TreeDB's native conditional transactions for graph writes.
@@ -54,7 +69,10 @@ type TreeDBOptions struct {
 type TreeDBEngine struct {
 	db         *treedb.DB
 	dir        string
+	profile    string
 	syncWrites bool
+	nativeWAL  bool
+	commandWAL bool
 	log        *slog.Logger
 
 	closed atomic.Bool
@@ -154,7 +172,10 @@ func NewTreeDBEngineWithOptions(opts TreeDBOptions) (*TreeDBEngine, error) {
 	e := &TreeDBEngine{
 		db:                  db,
 		dir:                 opts.Dir,
+		profile:             string(profile),
 		syncWrites:          opts.SyncWrites,
+		nativeWAL:           treeDBProfileUsesNativeWAL(profile),
+		commandWAL:          tdOpts.CommandWAL,
 		log:                 logger.With("component", "storage", "engine", "treedb"),
 		schema:              NewSchemaManager(),
 		schemas:             make(map[string]*SchemaManager),
@@ -179,12 +200,52 @@ func NewTreeDBEngineWithOptions(opts TreeDBOptions) (*TreeDBEngine, error) {
 	return e, nil
 }
 
+func treeDBProfileUsesNativeWAL(profile treedb.Profile) bool {
+	switch profile {
+	case treedb.ProfileDurable, treedb.ProfileLegacyWALDurable, treedb.ProfileWALOnFast, treedb.ProfileLegacyWALRelaxedFast:
+		return true
+	default:
+		return false
+	}
+}
+
 // TreeDB returns the underlying TreeDB handle. Callers must not close it.
 func (e *TreeDBEngine) TreeDB() *treedb.DB {
 	if e == nil {
 		return nil
 	}
 	return e.db
+}
+
+// DurabilityInfo returns the TreeDB durability and wrapper decisions for this engine.
+func (e *TreeDBEngine) DurabilityInfo() TreeDBDurabilityInfo {
+	if e == nil {
+		return TreeDBDurabilityInfo{}
+	}
+	info := TreeDBDurabilityInfo{
+		Dir:                  e.dir,
+		Profile:              e.profile,
+		RedoLog:              "on",
+		NativeWAL:            e.nativeWAL,
+		CommandWAL:           e.commandWAL,
+		NornicWAL:            false,
+		AsyncWrites:          false,
+		SyncWrites:           e.syncWrites,
+		ReplicationSupported: false,
+	}
+	if e.db != nil {
+		info.DurabilityMode = e.db.DurabilityMode()
+		stats := e.db.Stats()
+		if mode := stats["treedb.write_path.mode"]; mode != "" {
+			info.WritePathMode = mode
+		}
+		if redoLog := stats["treedb.write_path.redo_log"]; redoLog != "" {
+			info.RedoLog = redoLog
+		}
+		info.CommandWAL = info.RedoLog == "command_wal" || info.WritePathMode == "command_wal_cached"
+		info.NativeWAL = info.RedoLog != "off"
+	}
+	return info
 }
 
 // Logger returns the engine logger for wrappers.
