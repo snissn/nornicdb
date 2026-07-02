@@ -125,19 +125,64 @@ func (ae *AsyncEngine) HoldFlush() func() {
 	}
 }
 
-// BeginGraphTransaction delegates transaction creation to the wrapped engine.
-//
-// Callers that need read-your-writes across pending async writes should flush or
-// hold the async engine before beginning the transaction; the Cypher executor
-// does that for implicit transaction execution.
+// BeginGraphTransaction flushes pending async writes, then delegates transaction
+// creation to the wrapped engine while holding back later flushes for the
+// transaction lifetime.
 func (ae *AsyncEngine) BeginGraphTransaction() (GraphTransaction, error) {
-	return beginGraphTransactionOrNotImplemented(ae.engine)
+	if ae == nil {
+		return nil, ErrNotImplemented
+	}
+
+	ae.flushMu.Lock()
+	if ae.pendingWriteCount() > 0 {
+		result := ae.FlushWithResult()
+		if err := flushResultError(result); err != nil {
+			ae.flushMu.Unlock()
+			return nil, err
+		}
+		if result.NodesWritten+result.EdgesWritten+result.NodesDeleted+result.EdgesDeleted > 0 {
+			ae.lastFlush = time.Now()
+		}
+	}
+
+	tx, err := beginGraphTransactionOrNotImplemented(ae.engine)
+	if err != nil {
+		ae.flushMu.Unlock()
+		return nil, err
+	}
+	return &asyncGraphTransaction{GraphTransaction: tx, release: ae.flushMu.Unlock}, nil
 }
 
 // EnsureNamespaceMVCC delegates namespace MVCC priming to the wrapped engine
 // when supported.
 func (ae *AsyncEngine) EnsureNamespaceMVCC(namespace string) error {
 	return ensureNamespaceMVCCIfSupported(ae.engine, namespace)
+}
+
+type asyncGraphTransaction struct {
+	GraphTransaction
+	once    sync.Once
+	release func()
+}
+
+func (tx *asyncGraphTransaction) Commit() error {
+	err := tx.GraphTransaction.Commit()
+	tx.releaseOnce()
+	return err
+}
+
+func (tx *asyncGraphTransaction) Rollback() error {
+	err := tx.GraphTransaction.Rollback()
+	tx.releaseOnce()
+	return err
+}
+
+func (tx *asyncGraphTransaction) releaseOnce() {
+	tx.once.Do(func() {
+		if tx.release != nil {
+			tx.release()
+		}
+	})
 }
 
 // AsyncEngineConfig configures the async engine behavior.
@@ -402,6 +447,26 @@ func (r FlushResult) isStorageClosedOnly() bool {
 	return first == closed || strings.Contains(first, closed)
 }
 
+func flushResultError(result FlushResult) error {
+	if !result.HasErrors() {
+		return nil
+	}
+	details := ""
+	if result.FirstNodeError != "" {
+		details = result.FirstNodeError
+	} else if result.FirstEdgeError != "" {
+		details = result.FirstEdgeError
+	} else if result.FirstDeleteError != "" {
+		details = result.FirstDeleteError
+	}
+	if details != "" {
+		return fmt.Errorf("flush incomplete: %d nodes failed, %d edges failed, %d deletes failed (%s)",
+			result.NodesFailed, result.EdgesFailed, result.DeletesFailed, details)
+	}
+	return fmt.Errorf("flush incomplete: %d nodes failed, %d edges failed, %d deletes failed",
+		result.NodesFailed, result.EdgesFailed, result.DeletesFailed)
+}
+
 // Flush writes all pending changes to the underlying engine.
 // Uses batched operations for better performance - all deletes in one transaction.
 //
@@ -434,21 +499,8 @@ func (ae *AsyncEngine) Flush() error {
 	}
 
 	result := ae.FlushWithResult()
-	if result.HasErrors() {
-		details := ""
-		if result.FirstNodeError != "" {
-			details = result.FirstNodeError
-		} else if result.FirstEdgeError != "" {
-			details = result.FirstEdgeError
-		} else if result.FirstDeleteError != "" {
-			details = result.FirstDeleteError
-		}
-		if details != "" {
-			return fmt.Errorf("flush incomplete: %d nodes failed, %d edges failed, %d deletes failed (%s)",
-				result.NodesFailed, result.EdgesFailed, result.DeletesFailed, details)
-		}
-		return fmt.Errorf("flush incomplete: %d nodes failed, %d edges failed, %d deletes failed",
-			result.NodesFailed, result.EdgesFailed, result.DeletesFailed)
+	if err := flushResultError(result); err != nil {
+		return err
 	}
 	if result.NodesWritten+result.EdgesWritten+result.NodesDeleted+result.EdgesDeleted > 0 {
 		ae.lastFlush = time.Now()

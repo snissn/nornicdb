@@ -11,6 +11,7 @@ import (
 
 var (
 	_ GraphTransaction    = (*BadgerTransaction)(nil)
+	_ GraphTransaction    = (*asyncGraphTransaction)(nil)
 	_ GraphTransaction    = (*namespacedGraphTransaction)(nil)
 	_ GraphTransaction    = (*walGraphTransaction)(nil)
 	_ TransactionalEngine = (*BadgerEngine)(nil)
@@ -124,6 +125,44 @@ func TestNamespacedEngineBeginGraphTransactionPrimesNamespaceThroughWrappers(t *
 	require.True(t, existsAfter)
 }
 
+func TestAsyncEngineBeginGraphTransactionFlushesAndHoldsFlush(t *testing.T) {
+	base := NewMemoryEngine()
+	defer base.Close()
+
+	asyncEngine := NewAsyncEngine(base, &AsyncEngineConfig{FlushInterval: time.Hour})
+	defer asyncEngine.Close()
+
+	_, err := asyncEngine.CreateNode(&Node{ID: "nornic:before-tx", Labels: []string{"Doc"}})
+	require.NoError(t, err)
+
+	tx, err := asyncEngine.BeginGraphTransaction()
+	require.NoError(t, err)
+
+	got, err := tx.GetNode("nornic:before-tx")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("nornic:before-tx"), got.ID)
+
+	_, err = asyncEngine.CreateNode(&Node{ID: "nornic:during-tx", Labels: []string{"Doc"}})
+	require.NoError(t, err)
+
+	flushDone := make(chan error, 1)
+	go func() {
+		flushDone <- asyncEngine.Flush()
+	}()
+
+	select {
+	case err := <-flushDone:
+		t.Fatalf("Flush returned while async graph transaction was active: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	require.NoError(t, tx.Rollback())
+	require.NoError(t, <-flushDone)
+
+	_, err = base.GetNode("nornic:during-tx")
+	require.NoError(t, err)
+}
+
 func TestWALEngineBeginGraphTransactionLogsCommittedMutations(t *testing.T) {
 	config.EnableWAL()
 	t.Cleanup(config.DisableWAL)
@@ -159,6 +198,70 @@ func TestWALEngineBeginGraphTransactionLogsCommittedMutations(t *testing.T) {
 	require.NoError(t, json.Unmarshal(entries[1].Data, &nodeData))
 	require.Equal(t, tx.TransactionID(), nodeData.TxID)
 	require.Equal(t, NodeID("n1"), nodeData.Node.ID)
+}
+
+func TestWALEngineBeginGraphTransactionRecordsImmutablePayloads(t *testing.T) {
+	config.EnableWAL()
+	t.Cleanup(config.DisableWAL)
+
+	base := NewMemoryEngine()
+	defer base.Close()
+	_, err := base.CreateNode(&Node{ID: "tenant:start", Labels: []string{"Doc"}})
+	require.NoError(t, err)
+	_, err = base.CreateNode(&Node{ID: "tenant:end", Labels: []string{"Doc"}})
+	require.NoError(t, err)
+
+	wal, err := NewWAL(t.TempDir(), DefaultWALConfig())
+	require.NoError(t, err)
+	walEngine := NewWALEngine(base, wal)
+	defer wal.Close()
+
+	tx, err := walEngine.BeginGraphTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	node := &Node{
+		ID:              "tenant:new",
+		Labels:          []string{"Doc"},
+		Properties:      map[string]interface{}{"name": "before"},
+		NamedEmbeddings: map[string][]float32{"default": {1, 2}},
+	}
+	_, err = tx.CreateNode(node)
+	require.NoError(t, err)
+
+	edge := &Edge{
+		ID:         "tenant:e1",
+		StartNode:  "tenant:start",
+		EndNode:    "tenant:end",
+		Type:       "REL",
+		Properties: map[string]interface{}{"weight": int64(1)},
+	}
+	require.NoError(t, tx.CreateEdge(edge))
+
+	node.Labels[0] = "Changed"
+	node.Properties["name"] = "after"
+	node.NamedEmbeddings["default"][0] = 99
+	edge.Type = "CHANGED"
+	edge.Properties["weight"] = int64(2)
+
+	walTx := tx.(*walGraphTransaction)
+	entries := walTx.snapshotEntries()
+	require.Len(t, entries, 2)
+
+	nodeData, ok := entries[0].data.(WALNodeData)
+	require.True(t, ok)
+	require.Equal(t, NodeID("new"), nodeData.Node.ID)
+	require.Equal(t, []string{"Doc"}, nodeData.Node.Labels)
+	require.Equal(t, "before", nodeData.Node.Properties["name"])
+	require.Equal(t, float32(1), nodeData.Node.NamedEmbeddings["default"][0])
+
+	edgeData, ok := entries[1].data.(WALEdgeData)
+	require.True(t, ok)
+	require.Equal(t, EdgeID("e1"), edgeData.Edge.ID)
+	require.Equal(t, NodeID("start"), edgeData.Edge.StartNode)
+	require.Equal(t, NodeID("end"), edgeData.Edge.EndNode)
+	require.Equal(t, "REL", edgeData.Edge.Type)
+	require.Equal(t, int64(1), edgeData.Edge.Properties["weight"])
 }
 
 func TestWALEngineBeginGraphTransactionSkipsWALWhenDisabled(t *testing.T) {

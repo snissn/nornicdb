@@ -3356,7 +3356,10 @@ func TestCloneNodeForWAL(t *testing.T) {
 		assert.Equal(t, NodeID("node-1"), result.ID)
 		// Original should be unchanged
 		assert.Equal(t, NodeID("mydb:node-1"), node.ID)
-		// Properties should be the same reference (shallow clone)
+
+		node.Labels[0] = "Changed"
+		node.Properties["name"] = "Mutated"
+		assert.Equal(t, []string{"Person"}, result.Labels)
 		assert.Equal(t, "Alice", result.Properties["name"])
 	})
 }
@@ -3383,5 +3386,10 @@ func TestCloneEdgeForWAL(t *testing.T) {
 		assert.Equal(t, "KNOWS", result.Type)
 		// Original should be unchanged
 		assert.Equal(t, EdgeID("mydb:edge-1"), edge.ID)
+
+		edge.Type = "CHANGED"
+		edge.Properties["since"] = 2026
+		assert.Equal(t, "KNOWS", result.Type)
+		assert.Equal(t, 2020, result.Properties["since"])
 	})
 }

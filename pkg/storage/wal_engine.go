@@ -523,20 +523,20 @@ func cloneNodeForWAL(dbName string, node *Node) *Node {
 	if node == nil {
 		return nil
 	}
-	c := *node
+	c := CopyNode(node)
 	c.ID = NodeID(StripDatabasePrefix(dbName, string(node.ID)))
-	return &c
+	return c
 }
 
 func cloneEdgeForWAL(dbName string, edge *Edge) *Edge {
 	if edge == nil {
 		return nil
 	}
-	c := *edge
+	c := CopyEdge(edge)
 	c.ID = EdgeID(StripDatabasePrefix(dbName, string(edge.ID)))
 	c.StartNode = NodeID(StripDatabasePrefix(dbName, string(edge.StartNode)))
 	c.EndNode = NodeID(StripDatabasePrefix(dbName, string(edge.EndNode)))
-	return &c
+	return c
 }
 
 // CreateNode logs then executes node creation.
