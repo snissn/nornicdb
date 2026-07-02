@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	storageBackendBenchReadNodes = 1000
-	storageBackendBenchDegree    = 8
+	storageBackendBenchReadNodes    = 1000
+	storageBackendBenchGetNodeReads = 10000
+	storageBackendBenchDegree       = 8
 )
 
 func newPersistentBadgerBenchEngine(b *testing.B) *BadgerEngine {
@@ -244,12 +245,12 @@ func BenchmarkNamespacedPersistentBadgerEngine_GetNode(b *testing.B) {
 	inner := newPersistentBadgerBenchEngine(b)
 	defer inner.Close()
 	engine := NewNamespacedEngine(inner, "nornic")
-	seedBenchNodes(b, engine, "badger-get-n", storageBackendBenchReadNodes)
+	seedBenchNodes(b, engine, "badger-get-n", storageBackendBenchGetNodeReads)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := engine.GetNode(NodeID("badger-get-n" + itoaBench(i%storageBackendBenchReadNodes))); err != nil {
+		if _, err := engine.GetNode(NodeID("badger-get-n" + itoaBench(i%storageBackendBenchGetNodeReads))); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -479,7 +480,7 @@ func BenchmarkNamespacedTreeDBEngine_GetOutgoingEdges(b *testing.B) {
 func BenchmarkDirectTreeDB_GraphGetNodeEquivalent(b *testing.B) {
 	db := newDirectTreeDBBenchDB(b)
 	defer db.Close()
-	ids := directTreeDBSeedNodes(b, db, "bench:direct-get-n", storageBackendBenchReadNodes)
+	ids := directTreeDBSeedNodes(b, db, "bench:direct-get-n", storageBackendBenchGetNodeReads)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -645,7 +646,7 @@ func directTreeDBPutEdges(db *treedb.DB, edges []*Edge, seq uint64) error {
 	for _, edge := range edges {
 		writeCount += treeDBEdgeCreateWriteCount(edge)
 	}
-	tx, err := newDirectTreeDBBenchTxn(db, len(edges), writeCount)
+	tx, err := newDirectTreeDBBenchTxn(db, len(edges)*3, writeCount)
 	if err != nil {
 		return err
 	}
@@ -661,6 +662,24 @@ func directTreeDBPutEdges(db *treedb.DB, edges []*Edge, seq uint64) error {
 		if exists {
 			tx.close()
 			return ErrAlreadyExists
+		}
+		startExists, err := tx.has(nodeKey(edge.StartNode))
+		if err != nil {
+			tx.close()
+			return err
+		}
+		if !startExists {
+			tx.close()
+			return ErrInvalidEdge
+		}
+		endExists, err := tx.has(nodeKey(edge.EndNode))
+		if err != nil {
+			tx.close()
+			return err
+		}
+		if !endExists {
+			tx.close()
+			return ErrInvalidEdge
 		}
 		data, err := serializeEdge(edge)
 		if err != nil {
