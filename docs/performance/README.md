@@ -11,6 +11,7 @@ This section contains benchmark evidence, profiling guides, and tuning playbooks
 
 ## Benchmark and Analysis Reports
 
+- Storage backend benchmark matrix: [storage-backend-benchmarks.md](storage-backend-benchmarks.md)
 - Hybrid query benchmarks: [hybrid-query-benchmarks.md](hybrid-query-benchmarks.md)
 - HTTP API vs Neo4j measurements: [http-api-vs-neo4j.md](http-api-vs-neo4j.md)
 - Single-request benchmark: [single-request-benchmark.md](single-request-benchmark.md)
