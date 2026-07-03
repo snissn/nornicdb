@@ -130,14 +130,15 @@ func (e *TreeDBEngine) cacheStoreEdgeLocked(id EdgeID, cached *Edge) {
 	if cached == nil {
 		return
 	}
-	if e.edgeCacheMaxItems > 0 && len(e.edgeCache) > e.edgeCacheMaxItems {
+	prev, replacing := e.edgeCache[id]
+	if e.edgeCacheMaxItems > 0 && !replacing && len(e.edgeCache) >= e.edgeCacheMaxItems {
 		e.edgeCache = make(map[EdgeID]*Edge, e.edgeCacheMaxItems)
 		e.edgeCacheByPtr = make(map[*Edge]EdgeID, e.edgeCacheMaxItems)
 	}
 	if e.edgeCacheByPtr == nil {
 		e.edgeCacheByPtr = make(map[*Edge]EdgeID, e.edgeCacheMaxItems)
 	}
-	if prev := e.edgeCache[id]; prev != nil {
+	if replacing && prev != nil {
 		delete(e.edgeCacheByPtr, prev)
 	}
 	e.edgeCache[id] = cached

@@ -476,6 +476,40 @@ func TestTreeDBTransaction_BulkCreateEdgesRejectsDuplicateAndMissingEndpoint(t *
 	require.ErrorIs(t, err, ErrInvalidEdge)
 }
 
+func TestTreeDBTransaction_BulkCreateEdgesDoesNotStagePartialBatch(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:bulk-partial-a", Labels: []string{"Doc"}},
+		{ID: "test:bulk-partial-b", Labels: []string{"Doc"}},
+	}))
+
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+
+	err = tx.BulkCreateEdges([]*Edge{
+		{
+			ID:        "test:bulk-partial-valid",
+			StartNode: "test:bulk-partial-a",
+			EndNode:   "test:bulk-partial-b",
+			Type:      "LINKS",
+		},
+		{
+			ID:        "test:bulk-partial-invalid",
+			StartNode: "test:bulk-partial-a",
+			EndNode:   "test:bulk-partial-missing",
+			Type:      "LINKS",
+		},
+	})
+	require.ErrorIs(t, err, ErrInvalidEdge)
+
+	_, err = tx.GetEdge("test:bulk-partial-valid")
+	require.ErrorIs(t, err, ErrNotFound)
+	require.Empty(t, tx.createdEdges)
+	require.Empty(t, tx.pendingEdges)
+}
+
 func TestTreeDBEngine_BulkCreateEdgesInvalidatesCachedAdjacency(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	require.NoError(t, engine.BulkCreateNodes([]*Node{
@@ -505,6 +539,21 @@ func TestTreeDBEngine_BulkCreateEdgesInvalidatesCachedAdjacency(t *testing.T) {
 	edges, err = engine.GetOutgoingEdges("test:bulk-cache-a")
 	require.NoError(t, err)
 	require.Len(t, edges, 2)
+}
+
+func TestTreeDBEngine_EdgeCacheHonorsMaxItemsOnBulkStore(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	engine.edgeCacheMaxItems = 1
+	engine.edgeCache = make(map[EdgeID]*Edge, engine.edgeCacheMaxItems)
+	engine.edgeCacheByPtr = make(map[*Edge]EdgeID, engine.edgeCacheMaxItems)
+
+	engine.cacheStoreEdges([]*Edge{
+		{ID: "test:bulk-cache-cap-1", StartNode: "test:a", EndNode: "test:b", Type: "LINKS"},
+		{ID: "test:bulk-cache-cap-2", StartNode: "test:a", EndNode: "test:b", Type: "LINKS"},
+	})
+
+	require.LessOrEqual(t, len(engine.edgeCache), engine.edgeCacheMaxItems)
+	require.Len(t, engine.edgeCacheByPtr, len(engine.edgeCache))
 }
 
 func TestNamespacedTreeDBEngine_DirectFastPathStripsNamespaceAndReturnsCopies(t *testing.T) {

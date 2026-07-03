@@ -655,6 +655,8 @@ func (t *TreeDBTransaction) BulkCreateEdges(edges []*Edge) error {
 	}
 	t.reserveEdgeCreateBatch(edges)
 	endpointExists := make(map[NodeID]bool, len(edges)*2)
+	seenEdgeIDs := make(map[EdgeID]struct{}, len(edges))
+	prepared := make([]treeDBPreparedEdgeCreate, 0, len(edges))
 	now := time.Now()
 	for _, edge := range edges {
 		if edge == nil {
@@ -665,6 +667,9 @@ func (t *TreeDBTransaction) BulkCreateEdges(edges []*Edge) error {
 		}
 		if err := t.pinEdgeNamespace(edge); err != nil {
 			return err
+		}
+		if _, seen := seenEdgeIDs[edge.ID]; seen {
+			return ErrAlreadyExists
 		}
 		if existing, ok := t.pendingEdges[edge.ID]; ok && existing != nil {
 			return ErrAlreadyExists
@@ -694,7 +699,16 @@ func (t *TreeDBTransaction) BulkCreateEdges(edges []*Edge) error {
 				return err
 			}
 		}
-		if err := t.stageEdgeCreate(next); err != nil {
+		data, err := serializeEdge(next)
+		if err != nil {
+			return err
+		}
+		seenEdgeIDs[next.ID] = struct{}{}
+		prepared = append(prepared, treeDBPreparedEdgeCreate{edge: next, data: data})
+	}
+	for _, item := range prepared {
+		next := item.edge
+		if err := t.stagePreparedEdgeCreate(next, item.data); err != nil {
 			return err
 		}
 		t.opCount++
@@ -703,6 +717,11 @@ func (t *TreeDBTransaction) BulkCreateEdges(edges []*Edge) error {
 		t.createdEdges = append(t.createdEdges, next)
 	}
 	return nil
+}
+
+type treeDBPreparedEdgeCreate struct {
+	edge *Edge
+	data []byte
 }
 
 func (t *TreeDBTransaction) requireCachedEdgeEndpointExists(id NodeID, endpointExists map[NodeID]bool) error {
@@ -1220,11 +1239,15 @@ func (t *TreeDBTransaction) stageNodeUpdate(oldNode, node *Node) error {
 }
 
 func (t *TreeDBTransaction) stageEdgeCreate(edge *Edge) error {
-	t.reserveHeld(18)
 	data, err := serializeEdge(edge)
 	if err != nil {
 		return err
 	}
+	return t.stagePreparedEdgeCreate(edge, data)
+}
+
+func (t *TreeDBTransaction) stagePreparedEdgeCreate(edge *Edge, data []byte) error {
+	t.reserveHeld(18)
 	if err := t.setKey(edgeKey(edge.ID), data); err != nil {
 		return err
 	}
