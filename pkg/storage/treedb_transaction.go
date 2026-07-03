@@ -647,18 +647,104 @@ func (t *TreeDBTransaction) DeleteEdge(id EdgeID) error {
 }
 
 func (t *TreeDBTransaction) BulkCreateEdges(edges []*Edge) error {
-	if len(edges) > 0 {
-		if err := t.ensureActive(); err != nil {
-			return err
-		}
+	if len(edges) == 0 {
+		return nil
+	}
+	if err := t.ensureActive(); err != nil {
+		return err
 	}
 	t.reserveEdgeCreateBatch(edges)
+	endpointExists := make(map[NodeID]bool, len(edges)*2)
+	seenEdgeIDs := make(map[EdgeID]struct{}, len(edges))
+	prepared := make([]treeDBPreparedEdgeCreate, 0, len(edges))
+	now := time.Now()
 	for _, edge := range edges {
-		if err := t.CreateEdge(edge); err != nil {
+		if edge == nil {
+			return ErrInvalidData
+		}
+		if err := t.validateEdgeIDs(edge); err != nil {
 			return err
 		}
+		if err := t.pinEdgeNamespace(edge); err != nil {
+			return err
+		}
+		if _, seen := seenEdgeIDs[edge.ID]; seen {
+			return ErrAlreadyExists
+		}
+		if existing, ok := t.pendingEdges[edge.ID]; ok && existing != nil {
+			return ErrAlreadyExists
+		}
+		exists, err := t.tx.Has(edgeKey(edge.ID))
+		if err != nil {
+			return mapTreeDBError(err)
+		}
+		if exists {
+			return ErrAlreadyExists
+		}
+		if err := t.requireCachedEdgeEndpointExists(edge.StartNode, endpointExists); err != nil {
+			return err
+		}
+		if err := t.requireCachedEdgeEndpointExists(edge.EndNode, endpointExists); err != nil {
+			return err
+		}
+		next := copyEdge(edge)
+		if next.CreatedAt.IsZero() {
+			next.CreatedAt = now
+		}
+		if next.UpdatedAt.IsZero() {
+			next.UpdatedAt = next.CreatedAt
+		}
+		if !t.deferConstraintValidation {
+			if err := t.validateEdgeConstraints(next); err != nil {
+				return err
+			}
+		}
+		data, err := serializeEdge(next)
+		if err != nil {
+			return err
+		}
+		seenEdgeIDs[next.ID] = struct{}{}
+		prepared = append(prepared, treeDBPreparedEdgeCreate{edge: next, data: data})
+	}
+	for _, item := range prepared {
+		next := item.edge
+		if err := t.stagePreparedEdgeCreate(next, item.data); err != nil {
+			return err
+		}
+		t.opCount++
+		t.edgeDelta++
+		t.addPrefixDelta(&t.edgePrefixDeltas, string(next.ID), 1)
+		t.createdEdges = append(t.createdEdges, next)
 	}
 	return nil
+}
+
+type treeDBPreparedEdgeCreate struct {
+	edge *Edge
+	data []byte
+}
+
+func (t *TreeDBTransaction) requireCachedEdgeEndpointExists(id NodeID, endpointExists map[NodeID]bool) error {
+	exists, err := t.cachedNodeExistsForEdgeEndpoint(id, endpointExists)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrInvalidEdge
+	}
+	return nil
+}
+
+func (t *TreeDBTransaction) cachedNodeExistsForEdgeEndpoint(id NodeID, endpointExists map[NodeID]bool) (bool, error) {
+	if exists, ok := endpointExists[id]; ok {
+		return exists, nil
+	}
+	exists, err := t.nodeExistsForEdgeEndpoint(id)
+	if err != nil {
+		return false, err
+	}
+	endpointExists[id] = exists
+	return exists, nil
 }
 
 func (t *TreeDBTransaction) deleteEdgeLocked(id EdgeID) error {
@@ -1153,11 +1239,15 @@ func (t *TreeDBTransaction) stageNodeUpdate(oldNode, node *Node) error {
 }
 
 func (t *TreeDBTransaction) stageEdgeCreate(edge *Edge) error {
-	t.reserveHeld(18)
 	data, err := serializeEdge(edge)
 	if err != nil {
 		return err
 	}
+	return t.stagePreparedEdgeCreate(edge, data)
+}
+
+func (t *TreeDBTransaction) stagePreparedEdgeCreate(edge *Edge, data []byte) error {
+	t.reserveHeld(18)
 	if err := t.setKey(edgeKey(edge.ID), data); err != nil {
 		return err
 	}
@@ -1356,6 +1446,19 @@ func (t *TreeDBTransaction) reserveHeld(extra int) {
 	t.growHeld(needed)
 }
 
+func (t *TreeDBTransaction) reserveCreatedEdges(extra int) {
+	if extra <= 0 {
+		return
+	}
+	needed := len(t.createdEdges) + extra
+	if cap(t.createdEdges) >= needed {
+		return
+	}
+	next := make([]*Edge, len(t.createdEdges), needed)
+	copy(next, t.createdEdges)
+	t.createdEdges = next
+}
+
 func (t *TreeDBTransaction) growHeld(needed int) {
 	nextCap := cap(t.held)
 	if nextCap == 0 {
@@ -1400,12 +1503,23 @@ func (t *TreeDBTransaction) reserveEdgeCreateBatch(edges []*Edge) {
 	if len(edges) == 0 {
 		return
 	}
+	edgeCount := 0
 	writes := 0
 	for _, edge := range edges {
 		if edge == nil {
 			continue
 		}
+		edgeCount++
 		writes += treeDBEdgeCreateWriteCount(edge)
+	}
+	if edgeCount > 0 {
+		if t.pendingEdges == nil {
+			t.pendingEdges = make(map[EdgeID]*Edge, edgeCount)
+		}
+		if t.edgePrefixDeltas == nil {
+			t.edgePrefixDeltas = make(map[string]int64, 1)
+		}
+		t.reserveCreatedEdges(edgeCount)
 	}
 	if writes > 0 {
 		t.tx.ReserveWrites(writes)

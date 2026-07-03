@@ -385,6 +385,177 @@ func TestTreeDBTransaction_BulkCreateEdgesClosedTransaction(t *testing.T) {
 	require.ErrorIs(t, err, ErrTransactionClosed)
 }
 
+func TestTreeDBTransaction_BulkCreateEdgesFastPathHonorsVisibility(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+
+	_, err = tx.CreateNode(&Node{ID: "test:bulk-pending-a", Labels: []string{"Doc"}})
+	require.NoError(t, err)
+	_, err = tx.CreateNode(&Node{ID: "test:bulk-pending-b", Labels: []string{"Doc"}})
+	require.NoError(t, err)
+	require.NoError(t, tx.BulkCreateEdges([]*Edge{
+		{
+			ID:        "test:bulk-pending-edge-1",
+			StartNode: "test:bulk-pending-a",
+			EndNode:   "test:bulk-pending-b",
+			Type:      "LINKS",
+		},
+		{
+			ID:        "test:bulk-pending-edge-2",
+			StartNode: "test:bulk-pending-a",
+			EndNode:   "test:bulk-pending-b",
+			Type:      "LINKS",
+		},
+	}))
+	require.NoError(t, tx.Commit())
+
+	edges, err := engine.GetOutgoingEdges("test:bulk-pending-a")
+	require.NoError(t, err)
+	require.Len(t, edges, 2)
+
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:bulk-deleted-a", Labels: []string{"Doc"}},
+		{ID: "test:bulk-deleted-b", Labels: []string{"Doc"}},
+	}))
+	rawDelete, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	deleteTx := rawDelete.(*TreeDBTransaction)
+	defer deleteTx.Rollback()
+
+	require.NoError(t, deleteTx.DeleteNode("test:bulk-deleted-a"))
+	err = deleteTx.BulkCreateEdges([]*Edge{{
+		ID:        "test:bulk-deleted-edge",
+		StartNode: "test:bulk-deleted-a",
+		EndNode:   "test:bulk-deleted-b",
+		Type:      "LINKS",
+	}})
+	require.ErrorIs(t, err, ErrInvalidEdge)
+}
+
+func TestTreeDBTransaction_BulkCreateEdgesRejectsDuplicateAndMissingEndpoint(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:bulk-valid-a", Labels: []string{"Doc"}},
+		{ID: "test:bulk-valid-b", Labels: []string{"Doc"}},
+	}))
+
+	rawDuplicate, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	duplicateTx := rawDuplicate.(*TreeDBTransaction)
+	defer duplicateTx.Rollback()
+	err = duplicateTx.BulkCreateEdges([]*Edge{
+		{
+			ID:        "test:bulk-duplicate-edge",
+			StartNode: "test:bulk-valid-a",
+			EndNode:   "test:bulk-valid-b",
+			Type:      "LINKS",
+		},
+		{
+			ID:        "test:bulk-duplicate-edge",
+			StartNode: "test:bulk-valid-a",
+			EndNode:   "test:bulk-valid-b",
+			Type:      "LINKS",
+		},
+	})
+	require.ErrorIs(t, err, ErrAlreadyExists)
+
+	rawMissing, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	missingTx := rawMissing.(*TreeDBTransaction)
+	defer missingTx.Rollback()
+	err = missingTx.BulkCreateEdges([]*Edge{{
+		ID:        "test:bulk-missing-edge",
+		StartNode: "test:bulk-valid-a",
+		EndNode:   "test:bulk-missing-b",
+		Type:      "LINKS",
+	}})
+	require.ErrorIs(t, err, ErrInvalidEdge)
+}
+
+func TestTreeDBTransaction_BulkCreateEdgesDoesNotStagePartialBatch(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:bulk-partial-a", Labels: []string{"Doc"}},
+		{ID: "test:bulk-partial-b", Labels: []string{"Doc"}},
+	}))
+
+	rawTx, err := engine.BeginGraphTransaction()
+	require.NoError(t, err)
+	tx := rawTx.(*TreeDBTransaction)
+	defer tx.Rollback()
+
+	err = tx.BulkCreateEdges([]*Edge{
+		{
+			ID:        "test:bulk-partial-valid",
+			StartNode: "test:bulk-partial-a",
+			EndNode:   "test:bulk-partial-b",
+			Type:      "LINKS",
+		},
+		{
+			ID:        "test:bulk-partial-invalid",
+			StartNode: "test:bulk-partial-a",
+			EndNode:   "test:bulk-partial-missing",
+			Type:      "LINKS",
+		},
+	})
+	require.ErrorIs(t, err, ErrInvalidEdge)
+
+	_, err = tx.GetEdge("test:bulk-partial-valid")
+	require.ErrorIs(t, err, ErrNotFound)
+	require.Empty(t, tx.createdEdges)
+	require.Empty(t, tx.pendingEdges)
+}
+
+func TestTreeDBEngine_BulkCreateEdgesInvalidatesCachedAdjacency(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:bulk-cache-a", Labels: []string{"Doc"}},
+		{ID: "test:bulk-cache-b", Labels: []string{"Doc"}},
+	}))
+
+	edges, err := engine.GetOutgoingEdges("test:bulk-cache-a")
+	require.NoError(t, err)
+	require.Empty(t, edges)
+
+	require.NoError(t, engine.BulkCreateEdges([]*Edge{
+		{
+			ID:        "test:bulk-cache-edge-1",
+			StartNode: "test:bulk-cache-a",
+			EndNode:   "test:bulk-cache-b",
+			Type:      "LINKS",
+		},
+		{
+			ID:        "test:bulk-cache-edge-2",
+			StartNode: "test:bulk-cache-a",
+			EndNode:   "test:bulk-cache-b",
+			Type:      "LINKS",
+		},
+	}))
+
+	edges, err = engine.GetOutgoingEdges("test:bulk-cache-a")
+	require.NoError(t, err)
+	require.Len(t, edges, 2)
+}
+
+func TestTreeDBEngine_EdgeCacheHonorsMaxItemsOnBulkStore(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	engine.edgeCacheMaxItems = 1
+	engine.edgeCache = make(map[EdgeID]*Edge, engine.edgeCacheMaxItems)
+	engine.edgeCacheByPtr = make(map[*Edge]EdgeID, engine.edgeCacheMaxItems)
+
+	engine.cacheStoreEdges([]*Edge{
+		{ID: "test:bulk-cache-cap-1", StartNode: "test:a", EndNode: "test:b", Type: "LINKS"},
+		{ID: "test:bulk-cache-cap-2", StartNode: "test:a", EndNode: "test:b", Type: "LINKS"},
+	})
+
+	require.LessOrEqual(t, len(engine.edgeCache), engine.edgeCacheMaxItems)
+	require.Len(t, engine.edgeCacheByPtr, len(engine.edgeCache))
+}
+
 func TestNamespacedTreeDBEngine_DirectFastPathStripsNamespaceAndReturnsCopies(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	namespaced := NewNamespacedEngine(engine, "tenant")
