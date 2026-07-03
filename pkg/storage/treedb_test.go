@@ -652,6 +652,34 @@ func TestTreeDBEngine_GetAdjacentEdgesUsesSharedCache(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidID)
 }
 
+func TestTreeDBEngine_AdjacentEdgeCacheHonorsClosedEngine(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:center", Labels: []string{"Node"}},
+		{ID: "test:out", Labels: []string{"Node"}},
+		{ID: "test:in", Labels: []string{"Node"}},
+	}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:out-edge", StartNode: "test:center", EndNode: "test:out", Type: "LINK"}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:in-edge", StartNode: "test:in", EndNode: "test:center", Type: "LINK"}))
+
+	_, err := engine.GetOutgoingEdges("test:center")
+	require.NoError(t, err)
+	_, err = engine.GetIncomingEdges("test:center")
+	require.NoError(t, err)
+	_, _, err = engine.GetAdjacentEdges("test:center")
+	require.NoError(t, err)
+	require.True(t, treeDBAdjCacheHasOutgoing(engine, "test:center"))
+	require.True(t, treeDBAdjCacheHasIncoming(engine, "test:center"))
+
+	require.NoError(t, engine.Close())
+	_, err = engine.GetOutgoingEdges("test:center")
+	require.ErrorIs(t, err, ErrStorageClosed)
+	_, err = engine.GetIncomingEdges("test:center")
+	require.ErrorIs(t, err, ErrStorageClosed)
+	_, _, err = engine.GetAdjacentEdges("test:center")
+	require.ErrorIs(t, err, ErrStorageClosed)
+}
+
 func TestTreeDBTransaction_ReadYourWritesAndConflict(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	_, err := engine.CreateNode(&Node{

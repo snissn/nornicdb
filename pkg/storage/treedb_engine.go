@@ -1423,6 +1423,9 @@ func (e *TreeDBEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 	if nodeID == "" {
 		return nil, ErrInvalidID
 	}
+	if err := e.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if ids, ok := e.adjCacheLoadOutgoing(nodeID); ok {
 		return e.materializeAdjEdges(ids)
 	}
@@ -1440,6 +1443,9 @@ func (e *TreeDBEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 	if nodeID == "" {
 		return nil, ErrInvalidID
 	}
+	if err := e.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if ids, ok := e.adjCacheLoadIncoming(nodeID); ok {
 		return e.materializeAdjEdges(ids)
 	}
@@ -1456,6 +1462,9 @@ func (e *TreeDBEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error) {
 	if nodeID == "" {
 		return nil, nil, ErrInvalidID
+	}
+	if err := e.ensureOpen(); err != nil {
+		return nil, nil, err
 	}
 	cachedOutIDs, outHit := e.adjCacheLoadOutgoing(nodeID)
 	cachedInIDs, inHit := e.adjCacheLoadIncoming(nodeID)
