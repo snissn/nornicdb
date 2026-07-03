@@ -599,15 +599,15 @@ func (t *TreeDBTransaction) UpdateEdge(edge *Edge) error {
 	if edge == nil {
 		return ErrInvalidData
 	}
+	// Traversal cache hits expose read-only shared edges; evict before validation
+	// so caller-mutated IDs or endpoints cannot keep dirty cached bodies visible.
+	t.engine.cacheDeleteEdgeCandidate(edge)
 	if err := t.validateEdgeIDs(edge); err != nil {
 		return err
 	}
 	if err := t.pinEdgeNamespace(edge); err != nil {
 		return err
 	}
-	// Traversal cache hits expose read-only shared edges; evict before validation
-	// so a caller-mutated edge cannot remain visible after an update failure.
-	t.engine.cacheDeleteEdge(edge.ID)
 	oldEdge, err := t.GetEdge(edge.ID)
 	if err != nil {
 		return err

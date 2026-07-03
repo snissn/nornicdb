@@ -96,8 +96,16 @@ func (e *TreeDBEngine) cacheStoreEdge(edge *Edge) {
 	e.edgeCacheMu.Lock()
 	if e.edgeCacheMaxItems > 0 && len(e.edgeCache) > e.edgeCacheMaxItems {
 		e.edgeCache = make(map[EdgeID]*Edge, e.edgeCacheMaxItems)
+		e.edgeCacheByPtr = make(map[*Edge]EdgeID, e.edgeCacheMaxItems)
+	}
+	if e.edgeCacheByPtr == nil {
+		e.edgeCacheByPtr = make(map[*Edge]EdgeID, e.edgeCacheMaxItems)
+	}
+	if prev := e.edgeCache[edge.ID]; prev != nil {
+		delete(e.edgeCacheByPtr, prev)
 	}
 	e.edgeCache[edge.ID] = cached
+	e.edgeCacheByPtr[cached] = edge.ID
 	e.edgeCacheMu.Unlock()
 }
 
@@ -106,7 +114,28 @@ func (e *TreeDBEngine) cacheDeleteEdge(id EdgeID) {
 		return
 	}
 	e.edgeCacheMu.Lock()
+	if cached := e.edgeCache[id]; cached != nil {
+		delete(e.edgeCacheByPtr, cached)
+	}
 	delete(e.edgeCache, id)
+	e.edgeCacheMu.Unlock()
+}
+
+func (e *TreeDBEngine) cacheDeleteEdgeCandidate(edge *Edge) {
+	if e == nil || edge == nil {
+		return
+	}
+	e.edgeCacheMu.Lock()
+	if id, ok := e.edgeCacheByPtr[edge]; ok {
+		delete(e.edgeCache, id)
+		delete(e.edgeCacheByPtr, edge)
+	}
+	if edge.ID != "" {
+		if cached := e.edgeCache[edge.ID]; cached != nil {
+			delete(e.edgeCacheByPtr, cached)
+		}
+		delete(e.edgeCache, edge.ID)
+	}
 	e.edgeCacheMu.Unlock()
 }
 

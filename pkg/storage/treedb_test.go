@@ -762,29 +762,55 @@ func TestTreeDBEngine_UpdateEdgeEvictsMutatedTraversalCacheOnFailure(t *testing.
 		Properties: map[string]any{"kind": "stored"},
 	}))
 
-	outgoing, err := engine.GetOutgoingEdges("test:a")
-	require.NoError(t, err)
-	require.Len(t, outgoing, 1)
-	require.True(t, treeDBAdjCacheHasOutgoing(engine, "test:a"))
+	warmSharedTraversalEdge := func() *Edge {
+		t.Helper()
+		outgoing, err := engine.GetOutgoingEdges("test:a")
+		require.NoError(t, err)
+		require.Len(t, outgoing, 1)
+		require.True(t, treeDBAdjCacheHasOutgoing(engine, "test:a"))
+		outgoing, err = engine.GetOutgoingEdges("test:a")
+		require.NoError(t, err)
+		require.Len(t, outgoing, 1)
+		return outgoing[0]
+	}
+	requireCleanPersistedEdge := func() {
+		t.Helper()
+		persisted, err := engine.GetEdge("test:e1")
+		require.NoError(t, err)
+		require.Equal(t, EdgeID("test:e1"), persisted.ID)
+		require.Equal(t, "stored", persisted.Properties["kind"])
+		require.NotContains(t, persisted.Properties, "leaked")
+		require.Equal(t, NodeID("test:b"), persisted.EndNode)
 
-	outgoing[0].Properties["kind"] = "mutated"
-	outgoing[0].Properties["leaked"] = true
-	outgoing[0].EndNode = "test:missing"
-	err = engine.UpdateEdge(outgoing[0])
-	require.Error(t, err)
+		outgoing, err := engine.GetOutgoingEdges("test:a")
+		require.NoError(t, err)
+		require.Len(t, outgoing, 1)
+		require.Equal(t, EdgeID("test:e1"), outgoing[0].ID)
+		require.Equal(t, "stored", outgoing[0].Properties["kind"])
+		require.NotContains(t, outgoing[0].Properties, "leaked")
+		require.Equal(t, NodeID("test:b"), outgoing[0].EndNode)
+	}
 
-	persisted, err := engine.GetEdge("test:e1")
-	require.NoError(t, err)
-	require.Equal(t, "stored", persisted.Properties["kind"])
-	require.NotContains(t, persisted.Properties, "leaked")
-	require.Equal(t, NodeID("test:b"), persisted.EndNode)
+	shared := warmSharedTraversalEdge()
+	shared.Properties["kind"] = "mutated"
+	shared.Properties["leaked"] = "missing endpoint"
+	shared.EndNode = "test:missing"
+	require.Error(t, engine.UpdateEdge(shared))
+	requireCleanPersistedEdge()
 
-	outgoing, err = engine.GetOutgoingEdges("test:a")
-	require.NoError(t, err)
-	require.Len(t, outgoing, 1)
-	require.Equal(t, "stored", outgoing[0].Properties["kind"])
-	require.NotContains(t, outgoing[0].Properties, "leaked")
-	require.Equal(t, NodeID("test:b"), outgoing[0].EndNode)
+	shared = warmSharedTraversalEdge()
+	shared.Properties["kind"] = "mutated"
+	shared.Properties["leaked"] = "invalid endpoint"
+	shared.EndNode = ""
+	require.ErrorIs(t, engine.UpdateEdge(shared), ErrInvalidEdge)
+	requireCleanPersistedEdge()
+
+	shared = warmSharedTraversalEdge()
+	shared.Properties["kind"] = "mutated"
+	shared.Properties["leaked"] = "changed id"
+	shared.ID = "test:missing-edge"
+	require.ErrorIs(t, engine.UpdateEdge(shared), ErrNotFound)
+	requireCleanPersistedEdge()
 }
 
 func TestTreeDBTransaction_ReadYourWritesAndConflict(t *testing.T) {

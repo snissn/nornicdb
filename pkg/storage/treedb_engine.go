@@ -100,6 +100,7 @@ type TreeDBEngine struct {
 	nodeCache           map[NodeID]*Node
 	nodeCacheMu         sync.RWMutex
 	edgeCache           map[EdgeID]*Edge
+	edgeCacheByPtr      map[*Edge]EdgeID
 	edgeCacheMu         sync.RWMutex
 	outgoingAdjCache    map[NodeID][]EdgeID
 	incomingAdjCache    map[NodeID][]EdgeID
@@ -209,6 +210,7 @@ func NewTreeDBEngineWithOptions(opts TreeDBOptions) (*TreeDBEngine, error) {
 	e.adjCacheMaxNodes = e.nodeCacheMaxEntries
 	e.nodeCache = make(map[NodeID]*Node, e.nodeCacheMaxEntries)
 	e.edgeCache = make(map[EdgeID]*Edge, e.edgeCacheMaxItems)
+	e.edgeCacheByPtr = make(map[*Edge]EdgeID, e.edgeCacheMaxItems)
 	e.outgoingAdjCache = make(map[NodeID][]EdgeID, e.adjCacheMaxNodes)
 	e.incomingAdjCache = make(map[NodeID][]EdgeID, e.adjCacheMaxNodes)
 	if err := e.loadPersistedSchemas(); err != nil {
