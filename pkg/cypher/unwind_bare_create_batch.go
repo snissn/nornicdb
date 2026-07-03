@@ -12,11 +12,14 @@ import (
 func (e *StorageExecutor) tryUnwindBareCreateDirectBatch(
 	ctx context.Context, cypher string,
 ) (*ExecuteResult, error, bool) {
-	if wal, _ := e.resolveWALAndDatabase(); wal != nil {
-		return nil, nil, false
-	}
 	trimmed := strings.TrimSpace(cypher)
 	if !startsWithKeywordFold(trimmed, "UNWIND") || findKeywordIndex(trimmed, "UNWIND") != 0 {
+		return nil, nil, false
+	}
+	if strings.TrimSpace(GetUseDatabaseFromContext(ctx)) != "" {
+		return nil, nil, false
+	}
+	if wal, _ := e.resolveWALAndDatabase(); wal != nil {
 		return nil, nil, false
 	}
 	variable, items, restQuery, ok := e.parseParameterizedUnwindBatch(ctx, trimmed)

@@ -91,6 +91,26 @@ func TestTryUnwindBareCreateDirectBatch_SkipsWhenWALPresent(t *testing.T) {
 	require.Zero(t, store.bulkCreateNodeCalls)
 }
 
+func TestTryUnwindBareCreateDirectBatch_SkipsWhenUseDatabaseContextPresent(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := &directBulkProbeEngine{
+		NamespacedEngine: storage.NewNamespacedEngine(base, "bare_create_use_skip"),
+	}
+	exec := NewStorageExecutor(store)
+	ctx := withParams(context.Background(), map[string]interface{}{
+		"rows": []map[string]interface{}{{"productID": "p1"}},
+	})
+	ctx = context.WithValue(ctx, ctxKeyUseDatabase, "tenant_ctx")
+
+	result, err, handled := exec.tryUnwindBareCreateDirectBatch(ctx, `
+		UNWIND $rows AS row
+		CREATE (:BenchProduct {productID: row.productID})`)
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.False(t, handled)
+	require.Zero(t, store.bulkCreateNodeCalls)
+}
+
 func TestExecuteUnwindBareCreateBatch_UsesBulkCreatePath(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "bare_create_batch")

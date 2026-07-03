@@ -392,40 +392,9 @@ func (t *TreeDBTransaction) CreateNode(node *Node) (NodeID, error) {
 	if err := t.ensureActive(); err != nil {
 		return "", err
 	}
-	if node == nil {
-		return "", ErrInvalidData
-	}
-	if err := treeDBValidPrefixedID("node", string(node.ID)); err != nil {
+	next, err := t.prepareNodeCreate(node, nil, time.Now())
+	if err != nil {
 		return "", err
-	}
-	if err := t.pinNamespaceFromID(string(node.ID)); err != nil {
-		return "", err
-	}
-	if existing, ok := t.pendingNodes[node.ID]; ok && existing != nil {
-		return "", ErrAlreadyExists
-	}
-	skipExistenceCheck := t.skipCreateExistenceCheck && shouldSkipCreateExistenceCheck(node.ID)
-	if !skipExistenceCheck {
-		exists, err := t.tx.Has(nodeKey(node.ID))
-		if err != nil {
-			return "", mapTreeDBError(err)
-		}
-		if exists {
-			return "", ErrAlreadyExists
-		}
-	}
-	next := copyNode(node)
-	now := time.Now()
-	if next.CreatedAt.IsZero() {
-		next.CreatedAt = now
-	}
-	if next.UpdatedAt.IsZero() {
-		next.UpdatedAt = next.CreatedAt
-	}
-	if !t.deferConstraintValidation {
-		if err := t.validateNodeConstraints(next); err != nil {
-			return "", err
-		}
 	}
 	if err := t.stageNodeCreate(next); err != nil {
 		return "", err
@@ -436,6 +405,49 @@ func (t *TreeDBTransaction) CreateNode(node *Node) (NodeID, error) {
 	t.addPrefixDelta(&t.nodePrefixDeltas, string(next.ID), 1)
 	t.createdNodes = append(t.createdNodes, next)
 	return next.ID, nil
+}
+
+func (t *TreeDBTransaction) prepareNodeCreate(node *Node, seenNodeIDs map[NodeID]struct{}, now time.Time) (*Node, error) {
+	if node == nil {
+		return nil, ErrInvalidData
+	}
+	if err := treeDBValidPrefixedID("node", string(node.ID)); err != nil {
+		return nil, err
+	}
+	if err := t.pinNamespaceFromID(string(node.ID)); err != nil {
+		return nil, err
+	}
+	if seenNodeIDs != nil {
+		if _, seen := seenNodeIDs[node.ID]; seen {
+			return nil, ErrAlreadyExists
+		}
+	}
+	if existing, ok := t.pendingNodes[node.ID]; ok && existing != nil {
+		return nil, ErrAlreadyExists
+	}
+	skipExistenceCheck := t.skipCreateExistenceCheck && shouldSkipCreateExistenceCheck(node.ID)
+	if !skipExistenceCheck {
+		exists, err := t.tx.Has(nodeKey(node.ID))
+		if err != nil {
+			return nil, mapTreeDBError(err)
+		}
+		if exists {
+			return nil, ErrAlreadyExists
+		}
+	}
+	next := copyNode(node)
+	if next.CreatedAt.IsZero() {
+		next.CreatedAt = now
+	}
+	if next.UpdatedAt.IsZero() {
+		next.UpdatedAt = next.CreatedAt
+	}
+	if !t.deferConstraintValidation {
+		if err := t.validateNodeConstraints(next); err != nil {
+			return nil, err
+		}
+	}
+	return next, nil
 }
 
 // BulkCreateNodes stages multiple node creates in the existing TreeDB
@@ -454,40 +466,12 @@ func (t *TreeDBTransaction) BulkCreateNodes(nodes []*Node) error {
 	prepared := make([]treeDBPreparedNodeCreate, 0, len(nodes))
 	now := time.Now()
 	for _, node := range nodes {
-		if node == nil {
-			return ErrInvalidData
-		}
-		if err := treeDBValidPrefixedID("node", string(node.ID)); err != nil {
+		next, err := t.prepareNodeCreate(node, seenNodeIDs, now)
+		if err != nil {
 			return err
-		}
-		if err := t.pinNamespaceFromID(string(node.ID)); err != nil {
-			return err
-		}
-		if _, seen := seenNodeIDs[node.ID]; seen {
-			return ErrAlreadyExists
-		}
-		if existing, ok := t.pendingNodes[node.ID]; ok && existing != nil {
-			return ErrAlreadyExists
-		}
-		skipExistenceCheck := t.skipCreateExistenceCheck && shouldSkipCreateExistenceCheck(node.ID)
-		if !skipExistenceCheck {
-			exists, err := t.tx.Has(nodeKey(node.ID))
-			if err != nil {
-				return mapTreeDBError(err)
-			}
-			if exists {
-				return ErrAlreadyExists
-			}
-		}
-		next := copyNode(node)
-		if next.CreatedAt.IsZero() {
-			next.CreatedAt = now
-		}
-		if next.UpdatedAt.IsZero() {
-			next.UpdatedAt = next.CreatedAt
 		}
 		if !t.deferConstraintValidation {
-			if err := t.validateNodeConstraints(next); err != nil {
+			if err := t.validatePreparedNodeUniqueConstraints(next, prepared); err != nil {
 				return err
 			}
 		}
@@ -508,6 +492,48 @@ func (t *TreeDBTransaction) BulkCreateNodes(nodes []*Node) error {
 		t.nodeDelta++
 		t.addPrefixDelta(&t.nodePrefixDeltas, string(next.ID), 1)
 		t.createdNodes = append(t.createdNodes, next)
+	}
+	return nil
+}
+
+func (t *TreeDBTransaction) validatePreparedNodeUniqueConstraints(node *Node, prepared []treeDBPreparedNodeCreate) error {
+	if node == nil || len(prepared) == 0 {
+		return nil
+	}
+	ns, err := treeDBNamespaceFromID(string(node.ID))
+	if err != nil {
+		return err
+	}
+	schema := t.engine.lookupSchemaForNamespace(ns)
+	if schema == nil || !treeDBSchemaHasValidationState(schema) {
+		return nil
+	}
+	for _, constraint := range schema.GetConstraintsForLabels(node.Labels) {
+		if constraint.Type != ConstraintUnique ||
+			constraint.EffectiveEntityType() != ConstraintEntityNode ||
+			len(constraint.Properties) != 1 {
+			continue
+		}
+		prop := constraint.Properties[0]
+		value, ok := node.Properties[prop]
+		if !ok || value == nil {
+			continue
+		}
+		for _, item := range prepared {
+			pending := item.node
+			if pending == nil || pending.ID == node.ID || !treeDBLabelContains(pending.Labels, constraint.Label) {
+				continue
+			}
+			pendingValue, ok := pending.Properties[prop]
+			if ok && pendingValue != nil && compareValues(pendingValue, value) {
+				return &ConstraintViolationError{
+					Type:       ConstraintUnique,
+					Label:      constraint.Label,
+					Properties: []string{prop},
+					Message:    fmt.Sprintf("Node with %s=%v already exists in bulk batch", prop, value),
+				}
+			}
+		}
 	}
 	return nil
 }
