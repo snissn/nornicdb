@@ -102,16 +102,28 @@ func (e *TreeDBEngine) cacheStoreEdges(edges []*Edge) {
 	if e == nil || len(edges) == 0 {
 		return
 	}
-	e.edgeCacheMu.Lock()
+	entries := make([]treeDBEdgeCacheEntry, 0, len(edges))
 	for _, edge := range edges {
 		if edge == nil || edge.ID == "" {
 			continue
 		}
 		cached := copyEdge(edge)
 		normalizePropertyMapShapes(cached.Properties)
-		e.cacheStoreEdgeLocked(edge.ID, cached)
+		entries = append(entries, treeDBEdgeCacheEntry{id: edge.ID, edge: cached})
+	}
+	if len(entries) == 0 {
+		return
+	}
+	e.edgeCacheMu.Lock()
+	for _, entry := range entries {
+		e.cacheStoreEdgeLocked(entry.id, entry.edge)
 	}
 	e.edgeCacheMu.Unlock()
+}
+
+type treeDBEdgeCacheEntry struct {
+	id   EdgeID
+	edge *Edge
 }
 
 func (e *TreeDBEngine) cacheStoreEdgeLocked(id EdgeID, cached *Edge) {
