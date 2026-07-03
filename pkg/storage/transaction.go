@@ -201,7 +201,7 @@ func copyNode(node *Node) *Node {
 	if node.Properties != nil {
 		nodeCopy.Properties = make(map[string]interface{}, len(node.Properties))
 		for k, v := range node.Properties {
-			nodeCopy.Properties[k] = v
+			nodeCopy.Properties[k] = copyPropertyValue(v)
 		}
 	}
 
@@ -251,13 +251,46 @@ func copyEdge(edge *Edge) *Edge {
 	}
 
 	if edge.Properties != nil {
-		edgeCopy.Properties = make(map[string]interface{})
+		edgeCopy.Properties = make(map[string]interface{}, len(edge.Properties))
 		for k, v := range edge.Properties {
-			edgeCopy.Properties[k] = v
+			edgeCopy.Properties[k] = copyPropertyValue(v)
 		}
 	}
 
 	return edgeCopy
+}
+
+func copyPropertyValue(value interface{}) interface{} {
+	switch v := value.(type) {
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i, item := range v {
+			out[i] = copyPropertyValue(item)
+		}
+		return out
+	case []string:
+		return append([]string(nil), v...)
+	case []int:
+		return append([]int(nil), v...)
+	case []int32:
+		return append([]int32(nil), v...)
+	case []int64:
+		return append([]int64(nil), v...)
+	case []float32:
+		return append([]float32(nil), v...)
+	case []float64:
+		return append([]float64(nil), v...)
+	case []bool:
+		return append([]bool(nil), v...)
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(v))
+		for key, item := range v {
+			out[key] = copyPropertyValue(item)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 // CopyNode is the exported version of copyNode for use by other packages.

@@ -91,44 +91,73 @@ func TestTreeDBEngine_HotBodyCacheLifecycle(t *testing.T) {
 }
 
 func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
-	engine := newTestTreeDBEngine(t)
+	newBatchCacheEngine := func(t *testing.T) *TreeDBEngine {
+		t.Helper()
+		engine := newTestTreeDBEngine(t)
+		require.NoError(t, engine.BulkCreateNodes([]*Node{
+			{
+				ID:     "test:batch-cache-a",
+				Labels: []string{"Cached"},
+				Properties: map[string]any{
+					"name": "a",
+					"meta": map[string]interface{}{"rank": int64(1)},
+					"tags": []interface{}{"hot", map[string]interface{}{"nested": "ok"}},
+				},
+			},
+			{ID: "test:batch-cache-b", Labels: []string{"Cached"}, Properties: map[string]any{"name": "b"}},
+		}))
+		engine.nodeCacheMu.Lock()
+		engine.nodeCache = make(map[NodeID]*Node, engine.nodeCacheMaxEntries)
+		engine.nodeCacheMu.Unlock()
+		return engine
+	}
 
-	require.NoError(t, engine.BulkCreateNodes([]*Node{
-		{ID: "test:batch-cache-a", Labels: []string{"Cached"}, Properties: map[string]any{"name": "a"}},
-		{ID: "test:batch-cache-b", Labels: []string{"Cached"}, Properties: map[string]any{"name": "b"}},
-	}))
+	t.Run("populates cache for loaded nodes only", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
 
-	engine.nodeCacheMu.Lock()
-	engine.nodeCache = make(map[NodeID]*Node, engine.nodeCacheMaxEntries)
-	engine.nodeCacheMu.Unlock()
+		first, err := engine.BatchGetNodes([]NodeID{
+			"test:batch-cache-a",
+			"test:batch-cache-b",
+			"test:batch-cache-missing",
+		})
+		require.NoError(t, err)
+		require.Len(t, first, 2)
+		require.Equal(t, "a", first["test:batch-cache-a"].Properties["name"])
 
-	first, err := engine.BatchGetNodes([]NodeID{
-		"test:batch-cache-a",
-		"test:batch-cache-b",
-		"test:batch-cache-missing",
+		engine.nodeCacheMu.RLock()
+		_, cachedA := engine.nodeCache["test:batch-cache-a"]
+		_, cachedB := engine.nodeCache["test:batch-cache-b"]
+		_, cachedMissing := engine.nodeCache["test:batch-cache-missing"]
+		engine.nodeCacheMu.RUnlock()
+		require.True(t, cachedA)
+		require.True(t, cachedB)
+		require.False(t, cachedMissing)
 	})
-	require.NoError(t, err)
-	require.Len(t, first, 2)
-	require.Equal(t, "a", first["test:batch-cache-a"].Properties["name"])
 
-	engine.nodeCacheMu.RLock()
-	_, cachedA := engine.nodeCache["test:batch-cache-a"]
-	_, cachedB := engine.nodeCache["test:batch-cache-b"]
-	_, cachedMissing := engine.nodeCache["test:batch-cache-missing"]
-	engine.nodeCacheMu.RUnlock()
-	require.True(t, cachedA)
-	require.True(t, cachedB)
-	require.False(t, cachedMissing)
+	t.Run("returns isolated copies for cache hits", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
 
-	first["test:batch-cache-a"].Labels[0] = "Mutated"
-	first["test:batch-cache-a"].Properties["name"] = "mutated"
-	again, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a", "test:batch-cache-b"})
-	require.NoError(t, err)
-	require.Equal(t, []string{"Cached"}, again["test:batch-cache-a"].Labels)
-	require.Equal(t, "a", again["test:batch-cache-a"].Properties["name"])
+		first, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a", "test:batch-cache-b"})
+		require.NoError(t, err)
+		first["test:batch-cache-a"].Labels[0] = "Mutated"
+		first["test:batch-cache-a"].Properties["name"] = "mutated"
+		first["test:batch-cache-a"].Properties["meta"].(map[string]interface{})["rank"] = int64(99)
+		first["test:batch-cache-a"].Properties["tags"].([]interface{})[1].(map[string]interface{})["nested"] = "mutated"
 
-	_, err = engine.BatchGetNodes([]NodeID{"test:batch-cache-a", ""})
-	require.ErrorIs(t, err, ErrInvalidID)
+		again, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a", "test:batch-cache-b"})
+		require.NoError(t, err)
+		require.Equal(t, []string{"Cached"}, again["test:batch-cache-a"].Labels)
+		require.Equal(t, "a", again["test:batch-cache-a"].Properties["name"])
+		require.Equal(t, int64(1), again["test:batch-cache-a"].Properties["meta"].(map[string]interface{})["rank"])
+		require.Equal(t, "ok", again["test:batch-cache-a"].Properties["tags"].([]interface{})[1].(map[string]interface{})["nested"])
+	})
+
+	t.Run("rejects invalid ids", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		_, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a", ""})
+		require.ErrorIs(t, err, ErrInvalidID)
+	})
 }
 
 func TestTreeDBTransaction_CommitDeletedBodiesDoNotRemainCached(t *testing.T) {
