@@ -40,12 +40,14 @@ type TreeDBTransaction struct {
 	createdNodeIDs map[NodeID]struct{}
 	originalNodes  map[NodeID]*Node
 
-	createdNodes   []*Node
-	updatedNodes   []*Node
-	deletedNodeIDs []NodeID
-	createdEdges   []*Edge
-	updatedEdges   []*Edge
-	deletedEdgeIDs []EdgeID
+	createdNodes      []*Node
+	updatedNodes      []*Node
+	deletedNodeIDs    []NodeID
+	createdEdges      []*Edge
+	updatedEdges      []*Edge
+	oldUpdatedEdges   []*Edge
+	deletedEdgeIDs    []EdgeID
+	deletedEdgeBodies []*Edge
 
 	nodeDelta        int64
 	edgeDelta        int64
@@ -313,6 +315,10 @@ func (t *TreeDBTransaction) Commit() error {
 		return fmt.Errorf("constraint violation: %w", err)
 	}
 	bodyMutation := t.hasBodyMutation()
+	edgeMutation := t.hasEdgeBodyMutation()
+	if edgeMutation {
+		t.engine.adjSeq.Add(1)
+	}
 	if bodyMutation {
 		t.engine.guardSeq.Add(1)
 	}
@@ -323,24 +329,39 @@ func (t *TreeDBTransaction) Commit() error {
 		err = t.tx.Commit()
 	}
 	if err != nil {
+		if edgeMutation {
+			t.engine.adjSeq.Add(1)
+		}
 		_ = t.closeTransactionHandles()
 		t.active = false
 		return mapTreeDBError(err)
 	}
+	t.engine.applyCountDeltas(t.nodeDelta, t.edgeDelta, t.nodePrefixDeltas, t.edgePrefixDeltas)
+	t.engine.applyBodyCache(
+		t.createdNodes,
+		t.updatedNodes,
+		t.deletedNodeIDs,
+		t.createdEdges,
+		t.updatedEdges,
+		t.oldUpdatedEdges,
+		t.deletedEdgeIDs,
+		t.deletedEdgeBodies,
+	)
+	if bodyMutation {
+		t.engine.guardSeq.Add(1)
+	}
+	if edgeMutation {
+		t.engine.adjSeq.Add(1)
+	}
+	t.applySchemaState()
+	t.emitEvents()
 	if err := t.closeScanSnapshot(); err != nil {
 		t.tx = nil
 		t.active = false
 		return err
 	}
-	if bodyMutation {
-		t.engine.guardSeq.Add(1)
-	}
 	t.tx = nil
 	t.active = false
-	t.engine.applyCountDeltas(t.nodeDelta, t.edgeDelta, t.nodePrefixDeltas, t.edgePrefixDeltas)
-	t.engine.applyBodyCache(t.createdNodes, t.updatedNodes, t.deletedNodeIDs, t.createdEdges, t.updatedEdges, t.deletedEdgeIDs)
-	t.applySchemaState()
-	t.emitEvents()
 	return nil
 }
 
@@ -349,6 +370,12 @@ func (t *TreeDBTransaction) hasBodyMutation() bool {
 		len(t.updatedNodes) > 0 ||
 		len(t.deletedNodeIDs) > 0 ||
 		len(t.createdEdges) > 0 ||
+		len(t.updatedEdges) > 0 ||
+		len(t.deletedEdgeIDs) > 0
+}
+
+func (t *TreeDBTransaction) hasEdgeBodyMutation() bool {
+	return len(t.createdEdges) > 0 ||
 		len(t.updatedEdges) > 0 ||
 		len(t.deletedEdgeIDs) > 0
 }
@@ -572,6 +599,9 @@ func (t *TreeDBTransaction) UpdateEdge(edge *Edge) error {
 	if edge == nil {
 		return ErrInvalidData
 	}
+	// Traversal cache hits expose read-only shared edges; evict before validation
+	// so caller-mutated IDs or endpoints cannot keep dirty cached bodies visible.
+	t.engine.cacheDeleteEdgeCandidate(edge)
 	if err := t.validateEdgeIDs(edge); err != nil {
 		return err
 	}
@@ -604,6 +634,7 @@ func (t *TreeDBTransaction) UpdateEdge(edge *Edge) error {
 		return err
 	}
 	t.opCount++
+	t.oldUpdatedEdges = append(t.oldUpdatedEdges, copyEdge(oldEdge))
 	t.updatedEdges = append(t.updatedEdges, next)
 	return nil
 }
@@ -655,6 +686,7 @@ func (t *TreeDBTransaction) deleteEdgeLocked(id EdgeID) error {
 	t.opCount++
 	t.edgeDelta--
 	t.addPrefixDelta(&t.edgePrefixDeltas, string(id), -1)
+	t.deletedEdgeBodies = append(t.deletedEdgeBodies, copyEdge(edge))
 	t.deletedEdgeIDs = append(t.deletedEdgeIDs, id)
 	return nil
 }

@@ -541,6 +541,278 @@ func TestTreeDBEngine_CRUDIndexesRevisionsAndReopen(t *testing.T) {
 	require.Equal(t, int64(2), reopenedCount)
 }
 
+func TestTreeDBEngine_AdjacentEdgeCacheInvalidatesOnMutation(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:a", Labels: []string{"Node"}},
+		{ID: "test:b", Labels: []string{"Node"}},
+		{ID: "test:c", Labels: []string{"Node"}},
+		{ID: "test:d", Labels: []string{"Node"}},
+	}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e1", StartNode: "test:a", EndNode: "test:b", Type: "LINK"}))
+
+	outgoing, err := engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(outgoing))
+	incoming, err := engine.GetIncomingEdges("test:b")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(incoming))
+	require.True(t, treeDBAdjCacheHasOutgoing(engine, "test:a"))
+	require.True(t, treeDBAdjCacheHasIncoming(engine, "test:b"))
+
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e2", StartNode: "test:a", EndNode: "test:c", Type: "LINK"}))
+	require.False(t, treeDBAdjCacheHasOutgoing(engine, "test:a"))
+	require.False(t, treeDBAdjCacheHasIncoming(engine, "test:c"))
+	outgoing, err = engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1", "test:e2"}, treeDBEdgeIDs(outgoing))
+	incoming, err = engine.GetIncomingEdges("test:c")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e2"}, treeDBEdgeIDs(incoming))
+
+	e2, err := engine.GetEdge("test:e2")
+	require.NoError(t, err)
+	e2.StartNode = "test:d"
+	require.NoError(t, engine.UpdateEdge(e2))
+	require.False(t, treeDBAdjCacheHasOutgoing(engine, "test:a"))
+	require.False(t, treeDBAdjCacheHasOutgoing(engine, "test:d"))
+	require.False(t, treeDBAdjCacheHasIncoming(engine, "test:c"))
+	outgoing, err = engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(outgoing))
+	outgoing, err = engine.GetOutgoingEdges("test:d")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e2"}, treeDBEdgeIDs(outgoing))
+	incoming, err = engine.GetIncomingEdges("test:c")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e2"}, treeDBEdgeIDs(incoming))
+
+	require.NoError(t, engine.DeleteEdge("test:e1"))
+	require.False(t, treeDBAdjCacheHasOutgoing(engine, "test:a"))
+	require.False(t, treeDBAdjCacheHasIncoming(engine, "test:b"))
+	outgoing, err = engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.Empty(t, outgoing)
+	incoming, err = engine.GetIncomingEdges("test:b")
+	require.NoError(t, err)
+	require.Empty(t, incoming)
+}
+
+func TestTreeDBEngine_AdjacentEdgeCacheFiltersEndpointRaces(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:a", Labels: []string{"Node"}},
+		{ID: "test:b", Labels: []string{"Node"}},
+		{ID: "test:c", Labels: []string{"Node"}},
+		{ID: "test:d", Labels: []string{"Node"}},
+	}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e1", StartNode: "test:a", EndNode: "test:b", Type: "LINK"}))
+
+	outgoing, err := engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(outgoing))
+	incoming, err := engine.GetIncomingEdges("test:b")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(incoming))
+
+	updated, err := engine.GetEdge("test:e1")
+	require.NoError(t, err)
+	updated.StartNode = "test:d"
+	updated.EndNode = "test:c"
+	require.NoError(t, engine.UpdateEdge(updated))
+
+	engine.adjCacheMu.Lock()
+	engine.outgoingAdjCache["test:a"] = []EdgeID{"test:e1"}
+	engine.incomingAdjCache["test:b"] = []EdgeID{"test:e1"}
+	engine.incomingAdjCache["test:a"] = []EdgeID{"test:e1"}
+	engine.adjCacheMu.Unlock()
+
+	outgoing, err = engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.Empty(t, outgoing)
+	incoming, err = engine.GetIncomingEdges("test:b")
+	require.NoError(t, err)
+	require.Empty(t, incoming)
+
+	outgoing, incoming, err = engine.GetAdjacentEdges("test:a")
+	require.NoError(t, err)
+	require.Empty(t, outgoing)
+	require.Empty(t, incoming)
+
+	outgoing, err = engine.GetOutgoingEdges("test:d")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(outgoing))
+	incoming, err = engine.GetIncomingEdges("test:c")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(incoming))
+}
+
+func TestTreeDBEngine_AdjacentEdgeCacheSkipsStaleFillAfterMutationGuard(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+
+	guard := engine.guardSeq.Load()
+	engine.adjCacheStoreOutgoing("test:a", []EdgeID{"test:fresh-out"})
+	engine.adjCacheStoreIncoming("test:a", []EdgeID{"test:fresh-in"})
+	engine.guardSeq.Add(1)
+
+	require.False(t, engine.adjCacheStoreOutgoingIfGuard("test:a", []EdgeID{"test:stale-out"}, guard))
+	require.False(t, engine.adjCacheStoreIncomingIfGuard("test:a", []EdgeID{"test:stale-in"}, guard))
+
+	outIDs, ok := engine.adjCacheLoadOutgoing("test:a")
+	require.True(t, ok)
+	require.Equal(t, []EdgeID{"test:fresh-out"}, outIDs)
+	inIDs, ok := engine.adjCacheLoadIncoming("test:a")
+	require.True(t, ok)
+	require.Equal(t, []EdgeID{"test:fresh-in"}, inIDs)
+}
+
+func TestTreeDBEngine_AdjacentEdgeCacheInvalidatesOnDeleteNodeCascade(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:a", Labels: []string{"Node"}},
+		{ID: "test:b", Labels: []string{"Node"}},
+	}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e1", StartNode: "test:a", EndNode: "test:b", Type: "LINK"}))
+
+	outgoing, err := engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(outgoing))
+	incoming, err := engine.GetIncomingEdges("test:b")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(incoming))
+	require.True(t, treeDBAdjCacheHasOutgoing(engine, "test:a"))
+	require.True(t, treeDBAdjCacheHasIncoming(engine, "test:b"))
+
+	require.NoError(t, engine.DeleteNode("test:a"))
+	require.False(t, treeDBAdjCacheHasOutgoing(engine, "test:a"))
+	require.False(t, treeDBAdjCacheHasIncoming(engine, "test:b"))
+	outgoing, err = engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.Empty(t, outgoing)
+	incoming, err = engine.GetIncomingEdges("test:b")
+	require.NoError(t, err)
+	require.Empty(t, incoming)
+}
+
+func TestTreeDBEngine_GetAdjacentEdgesUsesSharedCache(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:center", Labels: []string{"Node"}},
+		{ID: "test:out", Labels: []string{"Node"}},
+		{ID: "test:in", Labels: []string{"Node"}},
+	}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:out-edge", StartNode: "test:center", EndNode: "test:out", Type: "LINK"}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:in-edge", StartNode: "test:in", EndNode: "test:center", Type: "LINK"}))
+
+	outgoing, incoming, err := engine.GetAdjacentEdges("test:center")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:out-edge"}, treeDBEdgeIDs(outgoing))
+	require.ElementsMatch(t, []EdgeID{"test:in-edge"}, treeDBEdgeIDs(incoming))
+	require.True(t, treeDBAdjCacheHasOutgoing(engine, "test:center"))
+	require.True(t, treeDBAdjCacheHasIncoming(engine, "test:center"))
+
+	outgoing, incoming, err = engine.GetAdjacentEdges("test:center")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:out-edge"}, treeDBEdgeIDs(outgoing))
+	require.ElementsMatch(t, []EdgeID{"test:in-edge"}, treeDBEdgeIDs(incoming))
+
+	_, _, err = engine.GetAdjacentEdges("")
+	require.ErrorIs(t, err, ErrInvalidID)
+}
+
+func TestTreeDBEngine_AdjacentEdgeCacheHonorsClosedEngine(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:center", Labels: []string{"Node"}},
+		{ID: "test:out", Labels: []string{"Node"}},
+		{ID: "test:in", Labels: []string{"Node"}},
+	}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:out-edge", StartNode: "test:center", EndNode: "test:out", Type: "LINK"}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:in-edge", StartNode: "test:in", EndNode: "test:center", Type: "LINK"}))
+
+	_, err := engine.GetOutgoingEdges("test:center")
+	require.NoError(t, err)
+	_, err = engine.GetIncomingEdges("test:center")
+	require.NoError(t, err)
+	_, _, err = engine.GetAdjacentEdges("test:center")
+	require.NoError(t, err)
+	require.True(t, treeDBAdjCacheHasOutgoing(engine, "test:center"))
+	require.True(t, treeDBAdjCacheHasIncoming(engine, "test:center"))
+
+	require.NoError(t, engine.Close())
+	_, err = engine.GetOutgoingEdges("test:center")
+	require.ErrorIs(t, err, ErrStorageClosed)
+	_, err = engine.GetIncomingEdges("test:center")
+	require.ErrorIs(t, err, ErrStorageClosed)
+	_, _, err = engine.GetAdjacentEdges("test:center")
+	require.ErrorIs(t, err, ErrStorageClosed)
+}
+
+func TestTreeDBEngine_UpdateEdgeEvictsMutatedTraversalCacheOnFailure(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:a", Labels: []string{"Node"}},
+		{ID: "test:b", Labels: []string{"Node"}},
+	}))
+	require.NoError(t, engine.CreateEdge(&Edge{
+		ID:         "test:e1",
+		StartNode:  "test:a",
+		EndNode:    "test:b",
+		Type:       "LINK",
+		Properties: map[string]any{"kind": "stored"},
+	}))
+
+	warmSharedTraversalEdge := func() *Edge {
+		t.Helper()
+		outgoing, err := engine.GetOutgoingEdges("test:a")
+		require.NoError(t, err)
+		require.Len(t, outgoing, 1)
+		require.True(t, treeDBAdjCacheHasOutgoing(engine, "test:a"))
+		outgoing, err = engine.GetOutgoingEdges("test:a")
+		require.NoError(t, err)
+		require.Len(t, outgoing, 1)
+		return outgoing[0]
+	}
+	requireCleanPersistedEdge := func() {
+		t.Helper()
+		persisted, err := engine.GetEdge("test:e1")
+		require.NoError(t, err)
+		require.Equal(t, EdgeID("test:e1"), persisted.ID)
+		require.Equal(t, "stored", persisted.Properties["kind"])
+		require.NotContains(t, persisted.Properties, "leaked")
+		require.Equal(t, NodeID("test:b"), persisted.EndNode)
+
+		outgoing, err := engine.GetOutgoingEdges("test:a")
+		require.NoError(t, err)
+		require.Len(t, outgoing, 1)
+		require.Equal(t, EdgeID("test:e1"), outgoing[0].ID)
+		require.Equal(t, "stored", outgoing[0].Properties["kind"])
+		require.NotContains(t, outgoing[0].Properties, "leaked")
+		require.Equal(t, NodeID("test:b"), outgoing[0].EndNode)
+	}
+
+	shared := warmSharedTraversalEdge()
+	shared.Properties["kind"] = "mutated"
+	shared.Properties["leaked"] = "missing endpoint"
+	shared.EndNode = "test:missing"
+	require.Error(t, engine.UpdateEdge(shared))
+	requireCleanPersistedEdge()
+
+	shared = warmSharedTraversalEdge()
+	shared.Properties["kind"] = "mutated"
+	shared.Properties["leaked"] = "invalid endpoint"
+	shared.EndNode = ""
+	require.ErrorIs(t, engine.UpdateEdge(shared), ErrInvalidEdge)
+	requireCleanPersistedEdge()
+
+	shared = warmSharedTraversalEdge()
+	shared.Properties["kind"] = "mutated"
+	shared.Properties["leaked"] = "changed id"
+	shared.ID = "test:missing-edge"
+	require.ErrorIs(t, engine.UpdateEdge(shared), ErrNotFound)
+	requireCleanPersistedEdge()
+}
+
 func TestTreeDBTransaction_ReadYourWritesAndConflict(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	_, err := engine.CreateNode(&Node{
@@ -1693,4 +1965,18 @@ func treeDBEdgeIDs(edges []*Edge) []EdgeID {
 		ids = append(ids, edge.ID)
 	}
 	return ids
+}
+
+func treeDBAdjCacheHasOutgoing(engine *TreeDBEngine, nodeID NodeID) bool {
+	engine.adjCacheMu.RLock()
+	_, ok := engine.outgoingAdjCache[nodeID]
+	engine.adjCacheMu.RUnlock()
+	return ok
+}
+
+func treeDBAdjCacheHasIncoming(engine *TreeDBEngine, nodeID NodeID) bool {
+	engine.adjCacheMu.RLock()
+	_, ok := engine.incomingAdjCache[nodeID]
+	engine.adjCacheMu.RUnlock()
+	return ok
 }

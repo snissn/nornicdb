@@ -63,6 +63,41 @@ func seedBenchFanout(b *testing.B, engine Engine, nodePrefix, edgePrefix string,
 	return start
 }
 
+func seedBenchAdjacent(b *testing.B, engine Engine, nodePrefix, edgePrefix string, degree int) NodeID {
+	b.Helper()
+	center := NodeID(nodePrefix + "center")
+	if _, err := engine.CreateNode(&Node{ID: center, Labels: []string{"Benchmark"}}); err != nil {
+		b.Fatal(err)
+	}
+	for i := 0; i < degree; i++ {
+		out := NodeID(nodePrefix + "out-" + itoaBench(i))
+		in := NodeID(nodePrefix + "in-" + itoaBench(i))
+		if _, err := engine.CreateNode(&Node{ID: out, Labels: []string{"Benchmark"}}); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := engine.CreateNode(&Node{ID: in, Labels: []string{"Benchmark"}}); err != nil {
+			b.Fatal(err)
+		}
+		if err := engine.CreateEdge(&Edge{
+			ID:        EdgeID(edgePrefix + "out-" + itoaBench(i)),
+			StartNode: center,
+			EndNode:   out,
+			Type:      "BENCH",
+		}); err != nil {
+			b.Fatal(err)
+		}
+		if err := engine.CreateEdge(&Edge{
+			ID:        EdgeID(edgePrefix + "in-" + itoaBench(i)),
+			StartNode: in,
+			EndNode:   center,
+			Type:      "BENCH",
+		}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	return center
+}
+
 func BenchmarkPersistentBadgerEngine_BulkCreateNodes(b *testing.B) {
 	engine := newPersistentBadgerBenchEngine(b)
 	defer engine.Close()
@@ -202,6 +237,24 @@ func BenchmarkPersistentBadgerEngine_GetOutgoingEdges(b *testing.B) {
 		}
 		if len(edges) != storageBackendBenchDegree {
 			b.Fatalf("expected %d edges, got %d", storageBackendBenchDegree, len(edges))
+		}
+	}
+}
+
+func BenchmarkPersistentBadgerEngine_GetAdjacentEdges(b *testing.B) {
+	engine := newPersistentBadgerBenchEngine(b)
+	defer engine.Close()
+	center := seedBenchAdjacent(b, engine, "bench:badger-adjacent-", "bench:badger-adjacent-e", storageBackendBenchDegree)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		outgoing, incoming, err := engine.GetAdjacentEdges(center)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(outgoing) != storageBackendBenchDegree || len(incoming) != storageBackendBenchDegree {
+			b.Fatalf("expected %d outgoing and incoming edges, got %d/%d", storageBackendBenchDegree, len(outgoing), len(incoming))
 		}
 	}
 }
@@ -370,6 +423,25 @@ func BenchmarkNamespacedPersistentBadgerEngine_GetOutgoingEdges(b *testing.B) {
 	}
 }
 
+func BenchmarkNamespacedPersistentBadgerEngine_GetAdjacentEdges(b *testing.B) {
+	inner := newPersistentBadgerBenchEngine(b)
+	defer inner.Close()
+	engine := NewNamespacedEngine(inner, "nornic")
+	center := seedBenchAdjacent(b, engine, "badger-adjacent-", "badger-adjacent-e", storageBackendBenchDegree)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		outgoing, incoming, err := engine.GetAdjacentEdges(center)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(outgoing) != storageBackendBenchDegree || len(incoming) != storageBackendBenchDegree {
+			b.Fatalf("expected %d outgoing and incoming edges, got %d/%d", storageBackendBenchDegree, len(outgoing), len(incoming))
+		}
+	}
+}
+
 func BenchmarkTreeDBEngine_GetNodesByLabel(b *testing.B) {
 	engine, err := NewTreeDBEngineWithOptions(TreeDBOptions{Dir: b.TempDir()})
 	if err != nil {
@@ -433,6 +505,27 @@ func BenchmarkTreeDBEngine_GetOutgoingEdges(b *testing.B) {
 	}
 }
 
+func BenchmarkTreeDBEngine_GetAdjacentEdges(b *testing.B) {
+	engine, err := NewTreeDBEngineWithOptions(TreeDBOptions{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer engine.Close()
+	center := seedBenchAdjacent(b, engine, "bench:tree-adjacent-", "bench:tree-adjacent-e", storageBackendBenchDegree)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		outgoing, incoming, err := engine.GetAdjacentEdges(center)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(outgoing) != storageBackendBenchDegree || len(incoming) != storageBackendBenchDegree {
+			b.Fatalf("expected %d outgoing and incoming edges, got %d/%d", storageBackendBenchDegree, len(outgoing), len(incoming))
+		}
+	}
+}
+
 func BenchmarkNamespacedTreeDBEngine_GetNodesByLabel(b *testing.B) {
 	inner, err := NewTreeDBEngineWithOptions(TreeDBOptions{Dir: b.TempDir()})
 	if err != nil {
@@ -473,6 +566,28 @@ func BenchmarkNamespacedTreeDBEngine_GetOutgoingEdges(b *testing.B) {
 		}
 		if len(edges) != storageBackendBenchDegree {
 			b.Fatalf("expected %d edges, got %d", storageBackendBenchDegree, len(edges))
+		}
+	}
+}
+
+func BenchmarkNamespacedTreeDBEngine_GetAdjacentEdges(b *testing.B) {
+	inner, err := NewTreeDBEngineWithOptions(TreeDBOptions{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer inner.Close()
+	engine := NewNamespacedEngine(inner, "nornic")
+	center := seedBenchAdjacent(b, engine, "tree-adjacent-", "tree-adjacent-e", storageBackendBenchDegree)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		outgoing, incoming, err := engine.GetAdjacentEdges(center)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(outgoing) != storageBackendBenchDegree || len(incoming) != storageBackendBenchDegree {
+			b.Fatalf("expected %d outgoing and incoming edges, got %d/%d", storageBackendBenchDegree, len(outgoing), len(incoming))
 		}
 	}
 }
