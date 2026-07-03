@@ -209,7 +209,7 @@ func copyNode(node *Node) *Node {
 	if node.EmbedMeta != nil {
 		nodeCopy.EmbedMeta = make(map[string]any, len(node.EmbedMeta))
 		for k, v := range node.EmbedMeta {
-			nodeCopy.EmbedMeta[k] = v
+			nodeCopy.EmbedMeta[k] = copyPropertyValue(v)
 		}
 	}
 

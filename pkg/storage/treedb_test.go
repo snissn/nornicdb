@@ -98,6 +98,11 @@ func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
 			{
 				ID:     "test:batch-cache-a",
 				Labels: []string{"Cached"},
+				EmbedMeta: map[string]any{
+					"model": "mini",
+					"stats": map[string]interface{}{"chunks": int64(2)},
+					"tags":  []interface{}{"embed", map[string]interface{}{"kind": "doc"}},
+				},
 				Properties: map[string]any{
 					"name":  "a",
 					"meta":  map[string]interface{}{"rank": int64(1)},
@@ -141,6 +146,20 @@ func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
 		require.False(t, cachedMissing)
 	})
 
+	t.Run("keeps batch miss embed metadata isolated from cache", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		first, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a"})
+		require.NoError(t, err)
+		first["test:batch-cache-a"].EmbedMeta["stats"].(map[string]interface{})["chunks"] = int64(99)
+		first["test:batch-cache-a"].EmbedMeta["tags"].([]interface{})[1].(map[string]interface{})["kind"] = "mutated"
+
+		again, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a"})
+		require.NoError(t, err)
+		require.Equal(t, int64(2), again["test:batch-cache-a"].EmbedMeta["stats"].(map[string]interface{})["chunks"])
+		require.Equal(t, "doc", again["test:batch-cache-a"].EmbedMeta["tags"].([]interface{})[1].(map[string]interface{})["kind"])
+	})
+
 	t.Run("returns isolated copies for cache hits", func(t *testing.T) {
 		engine := newBatchCacheEngine(t)
 
@@ -157,6 +176,8 @@ func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
 		hit["test:batch-cache-a"].Properties["meta"].(map[string]interface{})["rank"] = int64(99)
 		hit["test:batch-cache-a"].Properties["tags"].([]interface{})[1].(map[string]interface{})["nested"] = "mutated"
 		hit["test:batch-cache-a"].Properties["uints"].([]uint64)[0] = 99
+		hit["test:batch-cache-a"].EmbedMeta["stats"].(map[string]interface{})["chunks"] = int64(99)
+		hit["test:batch-cache-a"].EmbedMeta["tags"].([]interface{})[1].(map[string]interface{})["kind"] = "mutated"
 
 		again, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a", "test:batch-cache-b"})
 		require.NoError(t, err)
@@ -165,6 +186,8 @@ func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
 		require.Equal(t, int64(1), again["test:batch-cache-a"].Properties["meta"].(map[string]interface{})["rank"])
 		require.Equal(t, "ok", again["test:batch-cache-a"].Properties["tags"].([]interface{})[1].(map[string]interface{})["nested"])
 		require.Equal(t, uint64(1), again["test:batch-cache-a"].Properties["uints"].([]uint64)[0])
+		require.Equal(t, int64(2), again["test:batch-cache-a"].EmbedMeta["stats"].(map[string]interface{})["chunks"])
+		require.Equal(t, "doc", again["test:batch-cache-a"].EmbedMeta["tags"].([]interface{})[1].(map[string]interface{})["kind"])
 		require.True(t, again["test:batch-cache-b"].VisibilitySuppressed)
 	})
 
