@@ -69,6 +69,7 @@ func (b *BadgerEngine) evaluateNodeSuppressionInTxn(txn *badger.Txn, nodeID Node
 		if err := enqueueWorkItemInTxn(txn, string(nodeID), "NODE"); err != nil {
 			return false, err
 		}
+		b.cacheDeleteNode(nodeID)
 		return true, nil
 	}
 
@@ -80,7 +81,11 @@ func (b *BadgerEngine) evaluateNodeSuppressionInTxn(txn *badger.Txn, nodeID Node
 		if err := txn.Set(nodeKey(nodeID), data); err != nil {
 			return false, err
 		}
-		return false, clearTombstonesForEntityInTxn(txn, string(nodeID))
+		if err := clearTombstonesForEntityInTxn(txn, string(nodeID)); err != nil {
+			return false, err
+		}
+		b.cacheDeleteNode(nodeID)
+		return false, nil
 	}
 
 	return false, nil
@@ -126,10 +131,18 @@ func (b *BadgerEngine) rescoreSuppressionAfterLabelChangeInTxn(txn *badger.Txn, 
 
 	if suppressNow {
 		// Newly suppressed — enqueue deindex work.
-		return enqueueWorkItemInTxn(txn, string(node.ID), "NODE")
+		if err := enqueueWorkItemInTxn(txn, string(node.ID), "NODE"); err != nil {
+			return err
+		}
+		b.cacheDeleteNode(node.ID)
+		return nil
 	}
 	// Newly visible — drop any tombstones from a prior suppression cycle.
-	return clearTombstonesForEntityInTxn(txn, string(node.ID))
+	if err := clearTombstonesForEntityInTxn(txn, string(node.ID)); err != nil {
+		return err
+	}
+	b.cacheDeleteNode(node.ID)
+	return nil
 }
 
 func (b *BadgerEngine) evaluateEdgeSuppressionInTxn(txn *badger.Txn, edgeID EdgeID) (bool, error) {
@@ -164,6 +177,7 @@ func (b *BadgerEngine) evaluateEdgeSuppressionInTxn(txn *badger.Txn, edgeID Edge
 		if err := enqueueWorkItemInTxn(txn, string(edgeID), "EDGE"); err != nil {
 			return false, err
 		}
+		b.cacheDeleteEdge(edgeID)
 		return true, nil
 	}
 
@@ -175,7 +189,11 @@ func (b *BadgerEngine) evaluateEdgeSuppressionInTxn(txn *badger.Txn, edgeID Edge
 		if err := txn.Set(edgeKey(edgeID), data); err != nil {
 			return false, err
 		}
-		return false, clearTombstonesForEntityInTxn(txn, string(edgeID))
+		if err := clearTombstonesForEntityInTxn(txn, string(edgeID)); err != nil {
+			return false, err
+		}
+		b.cacheDeleteEdge(edgeID)
+		return false, nil
 	}
 
 	return false, nil

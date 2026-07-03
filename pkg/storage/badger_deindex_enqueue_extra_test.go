@@ -17,6 +17,41 @@ func TestBadgerEngine_EnqueueDeindexIfSuppressed_DecayDisabledNoop(t *testing.T)
 	require.False(t, changed)
 }
 
+func TestBadgerEngine_EdgeUnsuppressionInvalidatesCachedBody(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+	engine.SetDecayEnabled(true)
+
+	_, err := engine.CreateNode(&Node{ID: "test:cache-a"})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:cache-b"})
+	require.NoError(t, err)
+	edge := &Edge{
+		ID:                   "test:cache-edge",
+		StartNode:            "test:cache-a",
+		EndNode:              "test:cache-b",
+		Type:                 "REL",
+		VisibilitySuppressed: true,
+	}
+	require.NoError(t, engine.CreateEdge(edge))
+
+	hidden, err := engine.GetOutgoingEdges("test:cache-a")
+	require.NoError(t, err)
+	require.Empty(t, hidden)
+
+	require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+		changed, err := engine.evaluateEdgeSuppressionInTxn(txn, edge.ID)
+		require.NoError(t, err)
+		require.False(t, changed)
+		return nil
+	}))
+
+	visible, err := engine.GetOutgoingEdges("test:cache-a")
+	require.NoError(t, err)
+	require.Len(t, visible, 1)
+	require.Equal(t, edge.ID, visible[0].ID)
+	require.False(t, visible[0].VisibilitySuppressed)
+}
+
 func TestClearTombstonesForEntityInTxn_Branches(t *testing.T) {
 	engine := createTestBadgerEngine(t)
 
