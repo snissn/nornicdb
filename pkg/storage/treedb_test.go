@@ -105,7 +105,12 @@ func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
 					"uints": []interface{}{uint64(1), uint64(2)},
 				},
 			},
-			{ID: "test:batch-cache-b", Labels: []string{"Cached"}, Properties: map[string]any{"name": "b"}},
+			{
+				ID:                   "test:batch-cache-b",
+				Labels:               []string{"Cached"},
+				VisibilitySuppressed: true,
+				Properties:           map[string]any{"name": "b"},
+			},
 		}))
 		engine.nodeCacheMu.Lock()
 		engine.nodeCache = make(map[NodeID]*Node, engine.nodeCacheMaxEntries)
@@ -124,6 +129,7 @@ func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, first, 2)
 		require.Equal(t, "a", first["test:batch-cache-a"].Properties["name"])
+		require.True(t, first["test:batch-cache-b"].VisibilitySuppressed)
 
 		engine.nodeCacheMu.RLock()
 		_, cachedA := engine.nodeCache["test:batch-cache-a"]
@@ -159,6 +165,65 @@ func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
 		require.Equal(t, int64(1), again["test:batch-cache-a"].Properties["meta"].(map[string]interface{})["rank"])
 		require.Equal(t, "ok", again["test:batch-cache-a"].Properties["tags"].([]interface{})[1].(map[string]interface{})["nested"])
 		require.Equal(t, uint64(1), again["test:batch-cache-a"].Properties["uints"].([]uint64)[0])
+		require.True(t, again["test:batch-cache-b"].VisibilitySuppressed)
+	})
+
+	t.Run("preserves empty typed property slices on cache copies", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		engine.cacheStoreNode(&Node{
+			ID:                   "test:batch-cache-empty-node",
+			VisibilitySuppressed: true,
+			Properties: map[string]any{
+				"empty": []string{},
+				"nil":   []string(nil),
+			},
+		})
+		node, ok := engine.cacheLoadNode("test:batch-cache-empty-node")
+		require.True(t, ok)
+		require.True(t, node.VisibilitySuppressed)
+		emptyNodeSlice := node.Properties["empty"].([]string)
+		nilNodeSlice := node.Properties["nil"].([]string)
+		require.NotNil(t, emptyNodeSlice)
+		require.Len(t, emptyNodeSlice, 0)
+		require.Nil(t, nilNodeSlice)
+
+		engine.cacheStoreEdge(&Edge{
+			ID:                   "test:batch-cache-empty-edge",
+			StartNode:            "test:batch-cache-a",
+			EndNode:              "test:batch-cache-b",
+			Type:                 "LINKS",
+			VisibilitySuppressed: true,
+			Properties:           map[string]any{"empty": []string{}},
+		})
+		edge, ok := engine.cacheLoadEdge("test:batch-cache-empty-edge")
+		require.True(t, ok)
+		require.True(t, edge.VisibilitySuppressed)
+		emptyEdgeSlice := edge.Properties["empty"].([]string)
+		require.NotNil(t, emptyEdgeSlice)
+		require.Len(t, emptyEdgeSlice, 0)
+	})
+
+	t.Run("skips stale miss cache population after mutation guard changes", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		guard := engine.guardSeq.Load()
+		engine.cacheStoreNode(&Node{
+			ID:         "test:batch-cache-a",
+			Labels:     []string{"Cached"},
+			Properties: map[string]any{"name": "fresh"},
+		})
+		engine.guardSeq.Add(1)
+		stored := engine.cacheStoreNodeIfGuard(&Node{
+			ID:         "test:batch-cache-a",
+			Labels:     []string{"Cached"},
+			Properties: map[string]any{"name": "stale"},
+		}, guard)
+		require.False(t, stored)
+
+		got, ok := engine.cacheLoadNode("test:batch-cache-a")
+		require.True(t, ok)
+		require.Equal(t, "fresh", got.Properties["name"])
 	})
 
 	t.Run("rejects invalid ids", func(t *testing.T) {

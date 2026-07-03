@@ -312,6 +312,10 @@ func (t *TreeDBTransaction) Commit() error {
 		t.active = false
 		return fmt.Errorf("constraint violation: %w", err)
 	}
+	bodyMutation := t.hasBodyMutation()
+	if bodyMutation {
+		t.engine.guardSeq.Add(1)
+	}
 	var err error
 	if t.engine.syncWrites {
 		err = t.tx.CommitSync()
@@ -328,6 +332,9 @@ func (t *TreeDBTransaction) Commit() error {
 		t.active = false
 		return err
 	}
+	if bodyMutation {
+		t.engine.guardSeq.Add(1)
+	}
 	t.tx = nil
 	t.active = false
 	t.engine.applyCountDeltas(t.nodeDelta, t.edgeDelta, t.nodePrefixDeltas, t.edgePrefixDeltas)
@@ -335,6 +342,15 @@ func (t *TreeDBTransaction) Commit() error {
 	t.applySchemaState()
 	t.emitEvents()
 	return nil
+}
+
+func (t *TreeDBTransaction) hasBodyMutation() bool {
+	return len(t.createdNodes) > 0 ||
+		len(t.updatedNodes) > 0 ||
+		len(t.deletedNodeIDs) > 0 ||
+		len(t.createdEdges) > 0 ||
+		len(t.updatedEdges) > 0 ||
+		len(t.deletedEdgeIDs) > 0
 }
 
 func (t *TreeDBTransaction) Rollback() error {

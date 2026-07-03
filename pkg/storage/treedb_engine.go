@@ -1277,6 +1277,7 @@ func (e *TreeDBEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
 	for i, id := range missing {
 		keys[i] = nodeKey(id)
 	}
+	cacheGuard := e.guardSeq.Load()
 	values, err := e.db.GetMany(keys)
 	if err != nil {
 		return nil, mapTreeDBError(err)
@@ -1294,7 +1295,7 @@ func (e *TreeDBEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
 		loaded = append(loaded, node)
 	}
 	for _, node := range loaded {
-		e.cacheStoreNode(node)
+		e.cacheStoreNodeIfGuard(node, cacheGuard)
 	}
 	return out, nil
 }
