@@ -748,6 +748,45 @@ func TestTreeDBEngine_AdjacentEdgeCacheHonorsClosedEngine(t *testing.T) {
 	require.ErrorIs(t, err, ErrStorageClosed)
 }
 
+func TestTreeDBEngine_UpdateEdgeEvictsMutatedTraversalCacheOnFailure(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:a", Labels: []string{"Node"}},
+		{ID: "test:b", Labels: []string{"Node"}},
+	}))
+	require.NoError(t, engine.CreateEdge(&Edge{
+		ID:         "test:e1",
+		StartNode:  "test:a",
+		EndNode:    "test:b",
+		Type:       "LINK",
+		Properties: map[string]any{"kind": "stored"},
+	}))
+
+	outgoing, err := engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.Len(t, outgoing, 1)
+	require.True(t, treeDBAdjCacheHasOutgoing(engine, "test:a"))
+
+	outgoing[0].Properties["kind"] = "mutated"
+	outgoing[0].Properties["leaked"] = true
+	outgoing[0].EndNode = "test:missing"
+	err = engine.UpdateEdge(outgoing[0])
+	require.Error(t, err)
+
+	persisted, err := engine.GetEdge("test:e1")
+	require.NoError(t, err)
+	require.Equal(t, "stored", persisted.Properties["kind"])
+	require.NotContains(t, persisted.Properties, "leaked")
+	require.Equal(t, NodeID("test:b"), persisted.EndNode)
+
+	outgoing, err = engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.Len(t, outgoing, 1)
+	require.Equal(t, "stored", outgoing[0].Properties["kind"])
+	require.NotContains(t, outgoing[0].Properties, "leaked")
+	require.Equal(t, NodeID("test:b"), outgoing[0].EndNode)
+}
+
 func TestTreeDBTransaction_ReadYourWritesAndConflict(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	_, err := engine.CreateNode(&Node{
