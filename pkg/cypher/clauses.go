@@ -639,45 +639,7 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		list = e.evaluateExpressionWithContext(ctx, listExprEval, make(map[string]*storage.Node), make(map[string]*storage.Edge))
 	}
 
-	var items []interface{}
-	switch v := list.(type) {
-	case nil:
-		// UNWIND null produces no rows (Neo4j compatible)
-		items = []interface{}{}
-	case []interface{}:
-		items = v
-	case []string:
-		items = make([]interface{}, len(v))
-		for i, s := range v {
-			items[i] = s
-		}
-	case []int64:
-		items = make([]interface{}, len(v))
-		for i, n := range v {
-			items[i] = n
-		}
-	case []float64:
-		items = make([]interface{}, len(v))
-		for i, n := range v {
-			items[i] = n
-		}
-	case []map[string]interface{}:
-		items = make([]interface{}, len(v))
-		for i := range v {
-			items[i] = v[i]
-		}
-	default:
-		rv := reflect.ValueOf(list)
-		if rv.IsValid() && (rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array) {
-			items = make([]interface{}, rv.Len())
-			for i := 0; i < rv.Len(); i++ {
-				items[i] = rv.Index(i).Interface()
-			}
-		} else {
-			// Single value gets wrapped in a list
-			items = []interface{}{list}
-		}
-	}
+	items := unwindItemsFromList(list)
 
 	// Handle UNWIND ... CREATE/MERGE/MATCH ... mutation patterns.
 	if restQuery != "" {
@@ -795,6 +757,11 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		if strings.HasPrefix(upperRest, "CREATE") ||
 			strings.HasPrefix(upperRest, "MERGE") ||
 			(strings.HasPrefix(upperRest, "OPTIONAL MATCH") && matchStartedMutation) {
+			if strings.HasPrefix(upperRest, "CREATE") {
+				if fast, ok, err := e.executeUnwindBareCreateBatch(ctx, variable, items, restQuery); ok {
+					return fast, err
+				}
+			}
 			if fast, ok, err := e.executeUnwindCompoundMutationBatch(ctx, variable, unwindParamName, items, restQuery); ok {
 				return fast, err
 			}
