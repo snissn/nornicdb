@@ -598,6 +598,55 @@ func TestTreeDBEngine_AdjacentEdgeCacheInvalidatesOnMutation(t *testing.T) {
 	require.Empty(t, incoming)
 }
 
+func TestTreeDBEngine_AdjacentEdgeCacheFiltersEndpointRaces(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+	require.NoError(t, engine.BulkCreateNodes([]*Node{
+		{ID: "test:a", Labels: []string{"Node"}},
+		{ID: "test:b", Labels: []string{"Node"}},
+		{ID: "test:c", Labels: []string{"Node"}},
+		{ID: "test:d", Labels: []string{"Node"}},
+	}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e1", StartNode: "test:a", EndNode: "test:b", Type: "LINK"}))
+
+	outgoing, err := engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(outgoing))
+	incoming, err := engine.GetIncomingEdges("test:b")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(incoming))
+
+	updated, err := engine.GetEdge("test:e1")
+	require.NoError(t, err)
+	updated.StartNode = "test:d"
+	updated.EndNode = "test:c"
+	require.NoError(t, engine.UpdateEdge(updated))
+
+	engine.adjCacheMu.Lock()
+	engine.outgoingAdjCache["test:a"] = []EdgeID{"test:e1"}
+	engine.incomingAdjCache["test:b"] = []EdgeID{"test:e1"}
+	engine.incomingAdjCache["test:a"] = []EdgeID{"test:e1"}
+	engine.adjCacheMu.Unlock()
+
+	outgoing, err = engine.GetOutgoingEdges("test:a")
+	require.NoError(t, err)
+	require.Empty(t, outgoing)
+	incoming, err = engine.GetIncomingEdges("test:b")
+	require.NoError(t, err)
+	require.Empty(t, incoming)
+
+	outgoing, incoming, err = engine.GetAdjacentEdges("test:a")
+	require.NoError(t, err)
+	require.Empty(t, outgoing)
+	require.Empty(t, incoming)
+
+	outgoing, err = engine.GetOutgoingEdges("test:d")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(outgoing))
+	incoming, err = engine.GetIncomingEdges("test:c")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(incoming))
+}
+
 func TestTreeDBEngine_AdjacentEdgeCacheInvalidatesOnDeleteNodeCascade(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	require.NoError(t, engine.BulkCreateNodes([]*Node{

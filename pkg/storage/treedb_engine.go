@@ -1427,9 +1427,9 @@ func (e *TreeDBEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 		return nil, err
 	}
 	if ids, ok := e.adjCacheLoadOutgoing(nodeID); ok {
-		return e.materializeAdjEdges(ids)
+		return e.materializeAdjEdges(ids, treeDBAdjOutgoing, nodeID)
 	}
-	edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID))
+	edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID), treeDBAdjOutgoing, nodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -1447,9 +1447,9 @@ func (e *TreeDBEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 		return nil, err
 	}
 	if ids, ok := e.adjCacheLoadIncoming(nodeID); ok {
-		return e.materializeAdjEdges(ids)
+		return e.materializeAdjEdges(ids, treeDBAdjIncoming, nodeID)
 	}
-	edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID))
+	edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID), treeDBAdjIncoming, nodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -1469,11 +1469,11 @@ func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error)
 	cachedOutIDs, outHit := e.adjCacheLoadOutgoing(nodeID)
 	cachedInIDs, inHit := e.adjCacheLoadIncoming(nodeID)
 	if outHit && inHit {
-		outgoing, err := e.materializeAdjEdges(cachedOutIDs)
+		outgoing, err := e.materializeAdjEdges(cachedOutIDs, treeDBAdjOutgoing, nodeID)
 		if err != nil {
 			return nil, nil, err
 		}
-		incoming, err := e.materializeAdjEdges(cachedInIDs)
+		incoming, err := e.materializeAdjEdges(cachedInIDs, treeDBAdjIncoming, nodeID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1484,14 +1484,14 @@ func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error)
 	if !outHit {
 		var outIDs []EdgeID
 		var err error
-		outgoing, outIDs, err = e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID))
+		outgoing, outIDs, err = e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID), treeDBAdjOutgoing, nodeID)
 		if err != nil {
 			return nil, nil, err
 		}
 		e.adjCacheStoreOutgoing(nodeID, outIDs)
 	} else {
 		var err error
-		outgoing, err = e.materializeAdjEdges(cachedOutIDs)
+		outgoing, err = e.materializeAdjEdges(cachedOutIDs, treeDBAdjOutgoing, nodeID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1500,14 +1500,14 @@ func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error)
 	if !inHit {
 		var inIDs []EdgeID
 		var err error
-		incoming, inIDs, err = e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID))
+		incoming, inIDs, err = e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID), treeDBAdjIncoming, nodeID)
 		if err != nil {
 			return nil, nil, err
 		}
 		e.adjCacheStoreIncoming(nodeID, inIDs)
 	} else {
 		var err error
-		incoming, err = e.materializeAdjEdges(cachedInIDs)
+		incoming, err = e.materializeAdjEdges(cachedInIDs, treeDBAdjIncoming, nodeID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1529,14 +1529,20 @@ func (e *TreeDBEngine) collectEdgesByIndexPrefix(prefix []byte) ([]*Edge, error)
 	return e.materializeEdges(ids)
 }
 
-func (e *TreeDBEngine) collectEdgesAndIDsByIndexPrefix(prefix []byte) ([]*Edge, []EdgeID, error) {
+func (e *TreeDBEngine) collectEdgesAndIDsByIndexPrefix(prefix []byte, direction treeDBAdjDirection, nodeID NodeID) ([]*Edge, []EdgeID, error) {
 	ids, err := e.collectEdgeIDsByIndexPrefix(prefix)
 	if err != nil {
 		return nil, nil, err
 	}
-	edges, err := e.materializeAdjEdges(ids)
+	edges, err := e.materializeAdjEdges(ids, direction, nodeID)
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(edges) != len(ids) {
+		ids = make([]EdgeID, 0, len(edges))
+		for _, edge := range edges {
+			ids = append(ids, edge.ID)
+		}
 	}
 	return edges, ids, nil
 }
@@ -1557,14 +1563,37 @@ func (e *TreeDBEngine) collectEdgeIDsByIndexPrefix(prefix []byte) ([]EdgeID, err
 	return ids, mapTreeDBError(it.Error())
 }
 
-func (e *TreeDBEngine) materializeAdjEdges(ids []EdgeID) ([]*Edge, error) {
+type treeDBAdjDirection uint8
+
+const (
+	treeDBAdjOutgoing treeDBAdjDirection = iota + 1
+	treeDBAdjIncoming
+)
+
+func treeDBEdgeMatchesAdj(edge *Edge, direction treeDBAdjDirection, nodeID NodeID) bool {
+	if edge == nil {
+		return false
+	}
+	switch direction {
+	case treeDBAdjOutgoing:
+		return edge.StartNode == nodeID
+	case treeDBAdjIncoming:
+		return edge.EndNode == nodeID
+	default:
+		return true
+	}
+}
+
+func (e *TreeDBEngine) materializeAdjEdges(ids []EdgeID, direction treeDBAdjDirection, nodeID NodeID) ([]*Edge, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	edges := make([]*Edge, 0, len(ids))
 	for _, id := range ids {
 		if cached, ok := e.cacheLoadEdgeReadOnly(id); ok {
-			edges = append(edges, cached)
+			if treeDBEdgeMatchesAdj(cached, direction, nodeID) {
+				edges = append(edges, cached)
+			}
 			continue
 		}
 		edge, err := e.GetEdge(id)
@@ -1574,7 +1603,9 @@ func (e *TreeDBEngine) materializeAdjEdges(ids []EdgeID) ([]*Edge, error) {
 		if err != nil {
 			return nil, err
 		}
-		edges = append(edges, edge)
+		if treeDBEdgeMatchesAdj(edge, direction, nodeID) {
+			edges = append(edges, edge)
+		}
 	}
 	return edges, nil
 }
