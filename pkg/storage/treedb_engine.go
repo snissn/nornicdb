@@ -1418,6 +1418,7 @@ func (e *TreeDBEngine) allEdgesWithPrefix(idPrefix string) ([]*Edge, error) {
 }
 
 // GetOutgoingEdges returns all outgoing edges for nodeID.
+// Returned edges may share cached storage and must not be mutated.
 func (e *TreeDBEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 	if nodeID == "" {
 		return nil, ErrInvalidID
@@ -1434,6 +1435,7 @@ func (e *TreeDBEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 }
 
 // GetIncomingEdges returns all incoming edges for nodeID.
+// Returned edges may share cached storage and must not be mutated.
 func (e *TreeDBEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 	if nodeID == "" {
 		return nil, ErrInvalidID
@@ -1450,6 +1452,7 @@ func (e *TreeDBEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 }
 
 // GetAdjacentEdges returns both outgoing and incoming edges for nodeID.
+// Returned edges may share cached storage and must not be mutated.
 func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error) {
 	if nodeID == "" {
 		return nil, nil, ErrInvalidID

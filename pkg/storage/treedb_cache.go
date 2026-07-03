@@ -202,12 +202,15 @@ func (e *TreeDBEngine) applyBodyCache(
 		e.cacheStoreEdge(edge)
 		e.adjCacheInvalidateForEdge(edge)
 	}
-	for _, edge := range updatedEdges {
+	for i, edge := range updatedEdges {
 		e.cacheStoreEdge(edge)
 		e.adjCacheInvalidateForEdge(edge)
+		if i < len(oldUpdatedEdges) && !sameTreeDBEdgeEndpoints(edge, oldUpdatedEdges[i]) {
+			e.adjCacheInvalidateForEdge(oldUpdatedEdges[i])
+		}
 	}
-	for _, edge := range oldUpdatedEdges {
-		e.adjCacheInvalidateForEdge(edge)
+	for i := len(updatedEdges); i < len(oldUpdatedEdges); i++ {
+		e.adjCacheInvalidateForEdge(oldUpdatedEdges[i])
 	}
 	for _, id := range deletedNodeIDs {
 		e.cacheDeleteNode(id)
@@ -220,6 +223,15 @@ func (e *TreeDBEngine) applyBodyCache(
 			e.adjCacheInvalidateForEdge(edge)
 		}
 	} else if len(deletedEdgeIDs) > 0 {
+		// Future delete paths may only know edge IDs. Fall back to a full clear
+		// rather than risk stale endpoint adjacency entries.
 		e.adjCacheInvalidateAll()
 	}
+}
+
+func sameTreeDBEdgeEndpoints(a, b *Edge) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.StartNode == b.StartNode && a.EndNode == b.EndNode
 }
