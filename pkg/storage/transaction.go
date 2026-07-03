@@ -260,8 +260,20 @@ func copyEdge(edge *Edge) *Edge {
 	return edgeCopy
 }
 
+func copySlice[T any](values []T) []T {
+	return append([]T(nil), values...)
+}
+
 func copyPropertyValue(value interface{}) interface{} {
 	switch v := value.(type) {
+	case nil,
+		string,
+		bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64,
+		time.Time:
+		return value
 	case []interface{}:
 		out := make([]interface{}, len(v))
 		for i, item := range v {
@@ -269,19 +281,33 @@ func copyPropertyValue(value interface{}) interface{} {
 		}
 		return out
 	case []string:
-		return append([]string(nil), v...)
+		return copySlice(v)
+	case []int8:
+		return copySlice(v)
+	case []int16:
+		return copySlice(v)
 	case []int:
-		return append([]int(nil), v...)
+		return copySlice(v)
 	case []int32:
-		return append([]int32(nil), v...)
+		return copySlice(v)
 	case []int64:
-		return append([]int64(nil), v...)
+		return copySlice(v)
+	case []uint8:
+		return copySlice(v)
+	case []uint16:
+		return copySlice(v)
+	case []uint:
+		return copySlice(v)
+	case []uint32:
+		return copySlice(v)
+	case []uint64:
+		return copySlice(v)
 	case []float32:
-		return append([]float32(nil), v...)
+		return copySlice(v)
 	case []float64:
-		return append([]float64(nil), v...)
+		return copySlice(v)
 	case []bool:
-		return append([]bool(nil), v...)
+		return copySlice(v)
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(v))
 		for key, item := range v {
