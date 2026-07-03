@@ -93,6 +93,7 @@ type TreeDBEngine struct {
 	nodeCount atomic.Int64
 	edgeCount atomic.Int64
 	guardSeq  atomic.Uint64
+	adjSeq    atomic.Uint64
 
 	embeddingsEnabled atomic.Bool
 

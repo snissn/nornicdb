@@ -315,6 +315,10 @@ func (t *TreeDBTransaction) Commit() error {
 		return fmt.Errorf("constraint violation: %w", err)
 	}
 	bodyMutation := t.hasBodyMutation()
+	edgeMutation := t.hasEdgeBodyMutation()
+	if edgeMutation {
+		t.engine.adjSeq.Add(1)
+	}
 	if bodyMutation {
 		t.engine.guardSeq.Add(1)
 	}
@@ -325,20 +329,13 @@ func (t *TreeDBTransaction) Commit() error {
 		err = t.tx.Commit()
 	}
 	if err != nil {
+		if edgeMutation {
+			t.engine.adjSeq.Add(1)
+		}
 		_ = t.closeTransactionHandles()
 		t.active = false
 		return mapTreeDBError(err)
 	}
-	if err := t.closeScanSnapshot(); err != nil {
-		t.tx = nil
-		t.active = false
-		return err
-	}
-	if bodyMutation {
-		t.engine.guardSeq.Add(1)
-	}
-	t.tx = nil
-	t.active = false
 	t.engine.applyCountDeltas(t.nodeDelta, t.edgeDelta, t.nodePrefixDeltas, t.edgePrefixDeltas)
 	t.engine.applyBodyCache(
 		t.createdNodes,
@@ -350,8 +347,21 @@ func (t *TreeDBTransaction) Commit() error {
 		t.deletedEdgeIDs,
 		t.deletedEdgeBodies,
 	)
+	if bodyMutation {
+		t.engine.guardSeq.Add(1)
+	}
+	if edgeMutation {
+		t.engine.adjSeq.Add(1)
+	}
 	t.applySchemaState()
 	t.emitEvents()
+	if err := t.closeScanSnapshot(); err != nil {
+		t.tx = nil
+		t.active = false
+		return err
+	}
+	t.tx = nil
+	t.active = false
 	return nil
 }
 
@@ -360,6 +370,12 @@ func (t *TreeDBTransaction) hasBodyMutation() bool {
 		len(t.updatedNodes) > 0 ||
 		len(t.deletedNodeIDs) > 0 ||
 		len(t.createdEdges) > 0 ||
+		len(t.updatedEdges) > 0 ||
+		len(t.deletedEdgeIDs) > 0
+}
+
+func (t *TreeDBTransaction) hasEdgeBodyMutation() bool {
+	return len(t.createdEdges) > 0 ||
 		len(t.updatedEdges) > 0 ||
 		len(t.deletedEdgeIDs) > 0
 }

@@ -1,6 +1,9 @@
 package storage
 
-import "errors"
+import (
+	"errors"
+	"runtime"
+)
 
 // GetOutgoingEdges returns all outgoing edges for nodeID.
 // Returned edges may share cached storage and must not be mutated.
@@ -11,16 +14,28 @@ func (e *TreeDBEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 	if err := e.ensureOpen(); err != nil {
 		return nil, err
 	}
-	if ids, ok := e.adjCacheLoadOutgoing(nodeID); ok {
-		return e.materializeAdjEdges(ids, treeDBAdjOutgoing, nodeID)
+	for {
+		readSeq := e.beginAdjacencyRead()
+		if ids, ok := e.adjCacheLoadOutgoing(nodeID); ok {
+			edges, err := e.materializeAdjEdges(ids, treeDBAdjOutgoing, nodeID)
+			if err != nil {
+				return nil, err
+			}
+			if e.adjacencyReadStable(readSeq) {
+				return edges, nil
+			}
+			continue
+		}
+		cacheGuard := e.guardSeq.Load()
+		edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID), treeDBAdjOutgoing, nodeID)
+		if err != nil {
+			return nil, err
+		}
+		e.adjCacheStoreOutgoingIfGuard(nodeID, ids, cacheGuard)
+		if e.adjacencyReadStable(readSeq) {
+			return edges, nil
+		}
 	}
-	cacheGuard := e.guardSeq.Load()
-	edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID), treeDBAdjOutgoing, nodeID)
-	if err != nil {
-		return nil, err
-	}
-	e.adjCacheStoreOutgoingIfGuard(nodeID, ids, cacheGuard)
-	return edges, nil
 }
 
 // GetIncomingEdges returns all incoming edges for nodeID.
@@ -32,20 +47,45 @@ func (e *TreeDBEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 	if err := e.ensureOpen(); err != nil {
 		return nil, err
 	}
-	if ids, ok := e.adjCacheLoadIncoming(nodeID); ok {
-		return e.materializeAdjEdges(ids, treeDBAdjIncoming, nodeID)
+	for {
+		readSeq := e.beginAdjacencyRead()
+		if ids, ok := e.adjCacheLoadIncoming(nodeID); ok {
+			edges, err := e.materializeAdjEdges(ids, treeDBAdjIncoming, nodeID)
+			if err != nil {
+				return nil, err
+			}
+			if e.adjacencyReadStable(readSeq) {
+				return edges, nil
+			}
+			continue
+		}
+		cacheGuard := e.guardSeq.Load()
+		edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID), treeDBAdjIncoming, nodeID)
+		if err != nil {
+			return nil, err
+		}
+		e.adjCacheStoreIncomingIfGuard(nodeID, ids, cacheGuard)
+		if e.adjacencyReadStable(readSeq) {
+			return edges, nil
+		}
 	}
-	cacheGuard := e.guardSeq.Load()
-	edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID), treeDBAdjIncoming, nodeID)
-	if err != nil {
-		return nil, err
-	}
-	e.adjCacheStoreIncomingIfGuard(nodeID, ids, cacheGuard)
-	return edges, nil
 }
 
 // GetAdjacentEdges returns both outgoing and incoming edges for nodeID.
 // Returned edges may share cached storage and must not be mutated.
+//
+// Example:
+//
+//	outgoing, incoming, err := engine.GetAdjacentEdges("tenant:node-1")
+//	if err != nil {
+//		return err
+//	}
+//	for _, edge := range outgoing {
+//		_ = edge.ID
+//	}
+//	for _, edge := range incoming {
+//		_ = edge.ID
+//	}
 func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error) {
 	if nodeID == "" {
 		return nil, nil, ErrInvalidID
@@ -53,55 +93,77 @@ func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error)
 	if err := e.ensureOpen(); err != nil {
 		return nil, nil, err
 	}
-	cachedOutIDs, outHit := e.adjCacheLoadOutgoing(nodeID)
-	cachedInIDs, inHit := e.adjCacheLoadIncoming(nodeID)
-	if outHit && inHit {
-		outgoing, err := e.materializeAdjEdges(cachedOutIDs, treeDBAdjOutgoing, nodeID)
-		if err != nil {
-			return nil, nil, err
+	for {
+		readSeq := e.beginAdjacencyRead()
+		cachedOutIDs, outHit := e.adjCacheLoadOutgoing(nodeID)
+		cachedInIDs, inHit := e.adjCacheLoadIncoming(nodeID)
+		if outHit && inHit {
+			outgoing, err := e.materializeAdjEdges(cachedOutIDs, treeDBAdjOutgoing, nodeID)
+			if err != nil {
+				return nil, nil, err
+			}
+			incoming, err := e.materializeAdjEdges(cachedInIDs, treeDBAdjIncoming, nodeID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if e.adjacencyReadStable(readSeq) {
+				return outgoing, incoming, nil
+			}
+			continue
 		}
-		incoming, err := e.materializeAdjEdges(cachedInIDs, treeDBAdjIncoming, nodeID)
-		if err != nil {
-			return nil, nil, err
-		}
-		return outgoing, incoming, nil
-	}
 
-	cacheGuard := e.guardSeq.Load()
-	var outgoing, incoming []*Edge
-	if !outHit {
-		var outIDs []EdgeID
-		var err error
-		outgoing, outIDs, err = e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID), treeDBAdjOutgoing, nodeID)
-		if err != nil {
-			return nil, nil, err
+		cacheGuard := e.guardSeq.Load()
+		var outgoing, incoming []*Edge
+		if !outHit {
+			var outIDs []EdgeID
+			var err error
+			outgoing, outIDs, err = e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID), treeDBAdjOutgoing, nodeID)
+			if err != nil {
+				return nil, nil, err
+			}
+			e.adjCacheStoreOutgoingIfGuard(nodeID, outIDs, cacheGuard)
+		} else {
+			var err error
+			outgoing, err = e.materializeAdjEdges(cachedOutIDs, treeDBAdjOutgoing, nodeID)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
-		e.adjCacheStoreOutgoingIfGuard(nodeID, outIDs, cacheGuard)
-	} else {
-		var err error
-		outgoing, err = e.materializeAdjEdges(cachedOutIDs, treeDBAdjOutgoing, nodeID)
-		if err != nil {
-			return nil, nil, err
+
+		if !inHit {
+			var inIDs []EdgeID
+			var err error
+			incoming, inIDs, err = e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID), treeDBAdjIncoming, nodeID)
+			if err != nil {
+				return nil, nil, err
+			}
+			e.adjCacheStoreIncomingIfGuard(nodeID, inIDs, cacheGuard)
+		} else {
+			var err error
+			incoming, err = e.materializeAdjEdges(cachedInIDs, treeDBAdjIncoming, nodeID)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+
+		if e.adjacencyReadStable(readSeq) {
+			return outgoing, incoming, nil
 		}
 	}
+}
 
-	if !inHit {
-		var inIDs []EdgeID
-		var err error
-		incoming, inIDs, err = e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID), treeDBAdjIncoming, nodeID)
-		if err != nil {
-			return nil, nil, err
+func (e *TreeDBEngine) beginAdjacencyRead() uint64 {
+	for {
+		seq := e.adjSeq.Load()
+		if seq%2 == 0 {
+			return seq
 		}
-		e.adjCacheStoreIncomingIfGuard(nodeID, inIDs, cacheGuard)
-	} else {
-		var err error
-		incoming, err = e.materializeAdjEdges(cachedInIDs, treeDBAdjIncoming, nodeID)
-		if err != nil {
-			return nil, nil, err
-		}
+		runtime.Gosched()
 	}
+}
 
-	return outgoing, incoming, nil
+func (e *TreeDBEngine) adjacencyReadStable(seq uint64) bool {
+	return e.adjSeq.Load() == seq
 }
 
 // GetEdgesByType returns all edges with edgeType.
