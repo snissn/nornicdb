@@ -1244,6 +1244,10 @@ func (e *TreeDBEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
 		return out, nil
 	}
 
+	// Collect raw pointers under read lock; copy outside lock to avoid
+	// blocking writers (cacheStoreNode/cacheDeleteNode) during expensive
+	// deep-copies, mirroring the cacheLoadNode pattern.
+	cacheHits := make(map[NodeID]*Node, len(ids))
 	missing := make([]NodeID, 0, len(ids))
 	e.nodeCacheMu.RLock()
 	for _, id := range ids {
@@ -1252,12 +1256,15 @@ func (e *TreeDBEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
 			return nil, ErrInvalidID
 		}
 		if cached, ok := e.nodeCache[id]; ok && cached != nil {
-			out[id] = copyNode(cached)
-			continue
+			cacheHits[id] = cached
+		} else {
+			missing = append(missing, id)
 		}
-		missing = append(missing, id)
 	}
 	e.nodeCacheMu.RUnlock()
+	for id, n := range cacheHits {
+		out[id] = copyNode(n)
+	}
 	if len(missing) == 0 {
 		return out, nil
 	}
