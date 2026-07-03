@@ -70,6 +70,23 @@ func (e *TreeDBEngine) cacheLoadEdge(id EdgeID) (*Edge, bool) {
 	return copyEdge(cached), true
 }
 
+// cacheLoadEdgeReadOnly returns the cached edge body without copying.
+// Callers must treat the returned edge as immutable. This is intentionally
+// private to traversal materialization; GetEdge keeps returning a defensive
+// copy through cacheLoadEdge.
+func (e *TreeDBEngine) cacheLoadEdgeReadOnly(id EdgeID) (*Edge, bool) {
+	if e == nil || id == "" {
+		return nil, false
+	}
+	e.edgeCacheMu.RLock()
+	cached, ok := e.edgeCache[id]
+	e.edgeCacheMu.RUnlock()
+	if !ok || cached == nil {
+		return nil, false
+	}
+	return cached, true
+}
+
 func (e *TreeDBEngine) cacheStoreEdge(edge *Edge) {
 	if e == nil || edge == nil || edge.ID == "" {
 		return
@@ -93,13 +110,83 @@ func (e *TreeDBEngine) cacheDeleteEdge(id EdgeID) {
 	e.edgeCacheMu.Unlock()
 }
 
+func (e *TreeDBEngine) adjCacheLoadOutgoing(nodeID NodeID) ([]EdgeID, bool) {
+	if e == nil || nodeID == "" {
+		return nil, false
+	}
+	e.adjCacheMu.RLock()
+	ids, ok := e.outgoingAdjCache[nodeID]
+	e.adjCacheMu.RUnlock()
+	return ids, ok
+}
+
+func (e *TreeDBEngine) adjCacheLoadIncoming(nodeID NodeID) ([]EdgeID, bool) {
+	if e == nil || nodeID == "" {
+		return nil, false
+	}
+	e.adjCacheMu.RLock()
+	ids, ok := e.incomingAdjCache[nodeID]
+	e.adjCacheMu.RUnlock()
+	return ids, ok
+}
+
+func (e *TreeDBEngine) adjCacheStoreOutgoing(nodeID NodeID, ids []EdgeID) {
+	if e == nil || nodeID == "" {
+		return
+	}
+	cached := make([]EdgeID, len(ids))
+	copy(cached, ids)
+	e.adjCacheMu.Lock()
+	if e.adjCacheMaxNodes > 0 && len(e.outgoingAdjCache) > e.adjCacheMaxNodes {
+		e.outgoingAdjCache = make(map[NodeID][]EdgeID, e.adjCacheMaxNodes)
+	}
+	e.outgoingAdjCache[nodeID] = cached
+	e.adjCacheMu.Unlock()
+}
+
+func (e *TreeDBEngine) adjCacheStoreIncoming(nodeID NodeID, ids []EdgeID) {
+	if e == nil || nodeID == "" {
+		return
+	}
+	cached := make([]EdgeID, len(ids))
+	copy(cached, ids)
+	e.adjCacheMu.Lock()
+	if e.adjCacheMaxNodes > 0 && len(e.incomingAdjCache) > e.adjCacheMaxNodes {
+		e.incomingAdjCache = make(map[NodeID][]EdgeID, e.adjCacheMaxNodes)
+	}
+	e.incomingAdjCache[nodeID] = cached
+	e.adjCacheMu.Unlock()
+}
+
+func (e *TreeDBEngine) adjCacheInvalidateForEdge(edge *Edge) {
+	if e == nil || edge == nil {
+		return
+	}
+	e.adjCacheMu.Lock()
+	delete(e.outgoingAdjCache, edge.StartNode)
+	delete(e.incomingAdjCache, edge.EndNode)
+	e.adjCacheMu.Unlock()
+}
+
+func (e *TreeDBEngine) adjCacheInvalidateAll() {
+	if e == nil {
+		return
+	}
+	e.adjCacheMu.Lock()
+	e.outgoingAdjCache = make(map[NodeID][]EdgeID, e.adjCacheMaxNodes)
+	e.incomingAdjCache = make(map[NodeID][]EdgeID, e.adjCacheMaxNodes)
+	e.adjCacheMu.Unlock()
+}
+
 func (e *TreeDBEngine) applyBodyCache(
 	createdNodes []*Node,
 	updatedNodes []*Node,
 	deletedNodeIDs []NodeID,
 	createdEdges []*Edge,
 	updatedEdges []*Edge,
+	oldUpdatedEdges []*Edge,
 	deletedEdgeIDs []EdgeID,
+	deletedEdges []*Edge,
 ) {
 	for _, node := range createdNodes {
 		e.cacheStoreNode(node)
@@ -109,14 +196,26 @@ func (e *TreeDBEngine) applyBodyCache(
 	}
 	for _, edge := range createdEdges {
 		e.cacheStoreEdge(edge)
+		e.adjCacheInvalidateForEdge(edge)
 	}
 	for _, edge := range updatedEdges {
 		e.cacheStoreEdge(edge)
+		e.adjCacheInvalidateForEdge(edge)
+	}
+	for _, edge := range oldUpdatedEdges {
+		e.adjCacheInvalidateForEdge(edge)
 	}
 	for _, id := range deletedNodeIDs {
 		e.cacheDeleteNode(id)
 	}
 	for _, id := range deletedEdgeIDs {
 		e.cacheDeleteEdge(id)
+	}
+	if len(deletedEdges) == len(deletedEdgeIDs) {
+		for _, edge := range deletedEdges {
+			e.adjCacheInvalidateForEdge(edge)
+		}
+	} else if len(deletedEdgeIDs) > 0 {
+		e.adjCacheInvalidateAll()
 	}
 }

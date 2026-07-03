@@ -100,8 +100,12 @@ type TreeDBEngine struct {
 	nodeCacheMu         sync.RWMutex
 	edgeCache           map[EdgeID]*Edge
 	edgeCacheMu         sync.RWMutex
+	outgoingAdjCache    map[NodeID][]EdgeID
+	incomingAdjCache    map[NodeID][]EdgeID
+	adjCacheMu          sync.RWMutex
 	nodeCacheMaxEntries int
 	edgeCacheMaxItems   int
+	adjCacheMaxNodes    int
 	cacheHits           int64
 	cacheMisses         int64
 
@@ -130,6 +134,7 @@ var (
 	_ NamespaceLabelStatsProvider = (*TreeDBEngine)(nil)
 	_ NamespaceSchemaProvider     = (*TreeDBEngine)(nil)
 	_ NamespaceLister             = (*TreeDBEngine)(nil)
+	_ AdjacentEdgesEngine         = (*TreeDBEngine)(nil)
 	_ StreamingEngine             = (*TreeDBEngine)(nil)
 	_ PrefixStreamingEngine       = (*TreeDBEngine)(nil)
 	_ StorageEventNotifier        = (*TreeDBEngine)(nil)
@@ -200,8 +205,11 @@ func NewTreeDBEngineWithOptions(opts TreeDBOptions) (*TreeDBEngine, error) {
 		e.nodeCacheMaxEntries = defaultBadgerNodeCacheMaxEntries
 	}
 	e.edgeCacheMaxItems = e.nodeCacheMaxEntries
+	e.adjCacheMaxNodes = e.nodeCacheMaxEntries
 	e.nodeCache = make(map[NodeID]*Node, e.nodeCacheMaxEntries)
 	e.edgeCache = make(map[EdgeID]*Edge, e.edgeCacheMaxItems)
+	e.outgoingAdjCache = make(map[NodeID][]EdgeID, e.adjCacheMaxNodes)
+	e.incomingAdjCache = make(map[NodeID][]EdgeID, e.adjCacheMaxNodes)
 	if err := e.loadPersistedSchemas(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -1414,7 +1422,15 @@ func (e *TreeDBEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 	if nodeID == "" {
 		return nil, ErrInvalidID
 	}
-	return e.collectEdgesByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID))
+	if ids, ok := e.adjCacheLoadOutgoing(nodeID); ok {
+		return e.materializeAdjEdges(ids)
+	}
+	edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID))
+	if err != nil {
+		return nil, err
+	}
+	e.adjCacheStoreOutgoing(nodeID, ids)
+	return edges, nil
 }
 
 // GetIncomingEdges returns all incoming edges for nodeID.
@@ -1422,7 +1438,70 @@ func (e *TreeDBEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 	if nodeID == "" {
 		return nil, ErrInvalidID
 	}
-	return e.collectEdgesByIndexPrefix(treeDBIncomingIndexPrefix(nodeID))
+	if ids, ok := e.adjCacheLoadIncoming(nodeID); ok {
+		return e.materializeAdjEdges(ids)
+	}
+	edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID))
+	if err != nil {
+		return nil, err
+	}
+	e.adjCacheStoreIncoming(nodeID, ids)
+	return edges, nil
+}
+
+// GetAdjacentEdges returns both outgoing and incoming edges for nodeID.
+func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error) {
+	if nodeID == "" {
+		return nil, nil, ErrInvalidID
+	}
+	cachedOutIDs, outHit := e.adjCacheLoadOutgoing(nodeID)
+	cachedInIDs, inHit := e.adjCacheLoadIncoming(nodeID)
+	if outHit && inHit {
+		outgoing, err := e.materializeAdjEdges(cachedOutIDs)
+		if err != nil {
+			return nil, nil, err
+		}
+		incoming, err := e.materializeAdjEdges(cachedInIDs)
+		if err != nil {
+			return nil, nil, err
+		}
+		return outgoing, incoming, nil
+	}
+
+	var outgoing, incoming []*Edge
+	if !outHit {
+		var outIDs []EdgeID
+		var err error
+		outgoing, outIDs, err = e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID))
+		if err != nil {
+			return nil, nil, err
+		}
+		e.adjCacheStoreOutgoing(nodeID, outIDs)
+	} else {
+		var err error
+		outgoing, err = e.materializeAdjEdges(cachedOutIDs)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if !inHit {
+		var inIDs []EdgeID
+		var err error
+		incoming, inIDs, err = e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID))
+		if err != nil {
+			return nil, nil, err
+		}
+		e.adjCacheStoreIncoming(nodeID, inIDs)
+	} else {
+		var err error
+		incoming, err = e.materializeAdjEdges(cachedInIDs)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return outgoing, incoming, nil
 }
 
 // GetEdgesByType returns all edges with edgeType.
@@ -1431,6 +1510,26 @@ func (e *TreeDBEngine) GetEdgesByType(edgeType string) ([]*Edge, error) {
 }
 
 func (e *TreeDBEngine) collectEdgesByIndexPrefix(prefix []byte) ([]*Edge, error) {
+	ids, err := e.collectEdgeIDsByIndexPrefix(prefix)
+	if err != nil {
+		return nil, err
+	}
+	return e.materializeEdges(ids)
+}
+
+func (e *TreeDBEngine) collectEdgesAndIDsByIndexPrefix(prefix []byte) ([]*Edge, []EdgeID, error) {
+	ids, err := e.collectEdgeIDsByIndexPrefix(prefix)
+	if err != nil {
+		return nil, nil, err
+	}
+	edges, err := e.materializeAdjEdges(ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	return edges, ids, nil
+}
+
+func (e *TreeDBEngine) collectEdgeIDsByIndexPrefix(prefix []byte) ([]EdgeID, error) {
 	if err := e.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -1439,10 +1538,24 @@ func (e *TreeDBEngine) collectEdgesByIndexPrefix(prefix []byte) ([]*Edge, error)
 		return nil, mapTreeDBError(err)
 	}
 	defer it.Close()
-	var edges []*Edge
+	var ids []EdgeID
 	for ; it.Valid(); it.Next() {
-		edgeID := EdgeID(string(it.Key()[len(prefix):]))
-		edge, err := e.GetEdge(edgeID)
+		ids = append(ids, EdgeID(string(it.Key()[len(prefix):])))
+	}
+	return ids, mapTreeDBError(it.Error())
+}
+
+func (e *TreeDBEngine) materializeAdjEdges(ids []EdgeID) ([]*Edge, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	edges := make([]*Edge, 0, len(ids))
+	for _, id := range ids {
+		if cached, ok := e.cacheLoadEdgeReadOnly(id); ok {
+			edges = append(edges, cached)
+			continue
+		}
+		edge, err := e.GetEdge(id)
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}
@@ -1451,7 +1564,25 @@ func (e *TreeDBEngine) collectEdgesByIndexPrefix(prefix []byte) ([]*Edge, error)
 		}
 		edges = append(edges, edge)
 	}
-	return edges, mapTreeDBError(it.Error())
+	return edges, nil
+}
+
+func (e *TreeDBEngine) materializeEdges(ids []EdgeID) ([]*Edge, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	edges := make([]*Edge, 0, len(ids))
+	for _, id := range ids {
+		edge, err := e.GetEdge(id)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		edges = append(edges, edge)
+	}
+	return edges, nil
 }
 
 // GetEdgesBetween returns all edges from startID to endID.

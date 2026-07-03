@@ -40,12 +40,14 @@ type TreeDBTransaction struct {
 	createdNodeIDs map[NodeID]struct{}
 	originalNodes  map[NodeID]*Node
 
-	createdNodes   []*Node
-	updatedNodes   []*Node
-	deletedNodeIDs []NodeID
-	createdEdges   []*Edge
-	updatedEdges   []*Edge
-	deletedEdgeIDs []EdgeID
+	createdNodes      []*Node
+	updatedNodes      []*Node
+	deletedNodeIDs    []NodeID
+	createdEdges      []*Edge
+	updatedEdges      []*Edge
+	oldUpdatedEdges   []*Edge
+	deletedEdgeIDs    []EdgeID
+	deletedEdgeBodies []*Edge
 
 	nodeDelta        int64
 	edgeDelta        int64
@@ -338,7 +340,16 @@ func (t *TreeDBTransaction) Commit() error {
 	t.tx = nil
 	t.active = false
 	t.engine.applyCountDeltas(t.nodeDelta, t.edgeDelta, t.nodePrefixDeltas, t.edgePrefixDeltas)
-	t.engine.applyBodyCache(t.createdNodes, t.updatedNodes, t.deletedNodeIDs, t.createdEdges, t.updatedEdges, t.deletedEdgeIDs)
+	t.engine.applyBodyCache(
+		t.createdNodes,
+		t.updatedNodes,
+		t.deletedNodeIDs,
+		t.createdEdges,
+		t.updatedEdges,
+		t.oldUpdatedEdges,
+		t.deletedEdgeIDs,
+		t.deletedEdgeBodies,
+	)
 	t.applySchemaState()
 	t.emitEvents()
 	return nil
@@ -604,6 +615,7 @@ func (t *TreeDBTransaction) UpdateEdge(edge *Edge) error {
 		return err
 	}
 	t.opCount++
+	t.oldUpdatedEdges = append(t.oldUpdatedEdges, copyEdge(oldEdge))
 	t.updatedEdges = append(t.updatedEdges, next)
 	return nil
 }
@@ -655,6 +667,7 @@ func (t *TreeDBTransaction) deleteEdgeLocked(id EdgeID) error {
 	t.opCount++
 	t.edgeDelta--
 	t.addPrefixDelta(&t.edgePrefixDeltas, string(id), -1)
+	t.deletedEdgeBodies = append(t.deletedEdgeBodies, copyEdge(edge))
 	t.deletedEdgeIDs = append(t.deletedEdgeIDs, id)
 	return nil
 }
