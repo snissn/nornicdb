@@ -94,6 +94,30 @@ func (e *TreeDBEngine) cacheStoreEdge(edge *Edge) {
 	cached := copyEdge(edge)
 	normalizePropertyMapShapes(cached.Properties)
 	e.edgeCacheMu.Lock()
+	e.cacheStoreEdgeLocked(edge.ID, cached)
+	e.edgeCacheMu.Unlock()
+}
+
+func (e *TreeDBEngine) cacheStoreEdges(edges []*Edge) {
+	if e == nil || len(edges) == 0 {
+		return
+	}
+	e.edgeCacheMu.Lock()
+	for _, edge := range edges {
+		if edge == nil || edge.ID == "" {
+			continue
+		}
+		cached := copyEdge(edge)
+		normalizePropertyMapShapes(cached.Properties)
+		e.cacheStoreEdgeLocked(edge.ID, cached)
+	}
+	e.edgeCacheMu.Unlock()
+}
+
+func (e *TreeDBEngine) cacheStoreEdgeLocked(id EdgeID, cached *Edge) {
+	if cached == nil {
+		return
+	}
 	if e.edgeCacheMaxItems > 0 && len(e.edgeCache) > e.edgeCacheMaxItems {
 		e.edgeCache = make(map[EdgeID]*Edge, e.edgeCacheMaxItems)
 		e.edgeCacheByPtr = make(map[*Edge]EdgeID, e.edgeCacheMaxItems)
@@ -101,12 +125,11 @@ func (e *TreeDBEngine) cacheStoreEdge(edge *Edge) {
 	if e.edgeCacheByPtr == nil {
 		e.edgeCacheByPtr = make(map[*Edge]EdgeID, e.edgeCacheMaxItems)
 	}
-	if prev := e.edgeCache[edge.ID]; prev != nil {
+	if prev := e.edgeCache[id]; prev != nil {
 		delete(e.edgeCacheByPtr, prev)
 	}
-	e.edgeCache[edge.ID] = cached
-	e.edgeCacheByPtr[cached] = edge.ID
-	e.edgeCacheMu.Unlock()
+	e.edgeCache[id] = cached
+	e.edgeCacheByPtr[cached] = id
 }
 
 func (e *TreeDBEngine) cacheDeleteEdge(id EdgeID) {
@@ -243,6 +266,21 @@ func (e *TreeDBEngine) adjCacheInvalidateForEdge(edge *Edge) {
 	e.adjCacheMu.Unlock()
 }
 
+func (e *TreeDBEngine) adjCacheInvalidateForEdges(edges []*Edge) {
+	if e == nil || len(edges) == 0 {
+		return
+	}
+	e.adjCacheMu.Lock()
+	for _, edge := range edges {
+		if edge == nil {
+			continue
+		}
+		delete(e.outgoingAdjCache, edge.StartNode)
+		delete(e.incomingAdjCache, edge.EndNode)
+	}
+	e.adjCacheMu.Unlock()
+}
+
 func (e *TreeDBEngine) adjCacheInvalidateAll() {
 	if e == nil {
 		return
@@ -269,10 +307,8 @@ func (e *TreeDBEngine) applyBodyCache(
 	for _, node := range updatedNodes {
 		e.cacheStoreNode(node)
 	}
-	for _, edge := range createdEdges {
-		e.cacheStoreEdge(edge)
-		e.adjCacheInvalidateForEdge(edge)
-	}
+	e.cacheStoreEdges(createdEdges)
+	e.adjCacheInvalidateForEdges(createdEdges)
 	for i, edge := range updatedEdges {
 		e.cacheStoreEdge(edge)
 		e.adjCacheInvalidateForEdge(edge)
