@@ -563,7 +563,7 @@ func parseSimpleCreateNode(body, unwindVar string) (createNodeSpec, bool) {
 	}
 	varName := strings.TrimSpace(parts[0])
 	label := strings.TrimSpace(parts[1])
-	if !isSimpleIdentifier(varName) || !isSimpleIdentifier(label) {
+	if (varName != "" && !isSimpleIdentifier(varName)) || !isSimpleIdentifier(label) {
 		return createNodeSpec{}, false
 	}
 	rowRefs, literals, ok := parsePropsBodyForUnwindFastPath(propsBody, unwindVar)
