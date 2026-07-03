@@ -647,6 +647,25 @@ func TestTreeDBEngine_AdjacentEdgeCacheFiltersEndpointRaces(t *testing.T) {
 	require.ElementsMatch(t, []EdgeID{"test:e1"}, treeDBEdgeIDs(incoming))
 }
 
+func TestTreeDBEngine_AdjacentEdgeCacheSkipsStaleFillAfterMutationGuard(t *testing.T) {
+	engine := newTestTreeDBEngine(t)
+
+	guard := engine.guardSeq.Load()
+	engine.adjCacheStoreOutgoing("test:a", []EdgeID{"test:fresh-out"})
+	engine.adjCacheStoreIncoming("test:a", []EdgeID{"test:fresh-in"})
+	engine.guardSeq.Add(1)
+
+	require.False(t, engine.adjCacheStoreOutgoingIfGuard("test:a", []EdgeID{"test:stale-out"}, guard))
+	require.False(t, engine.adjCacheStoreIncomingIfGuard("test:a", []EdgeID{"test:stale-in"}, guard))
+
+	outIDs, ok := engine.adjCacheLoadOutgoing("test:a")
+	require.True(t, ok)
+	require.Equal(t, []EdgeID{"test:fresh-out"}, outIDs)
+	inIDs, ok := engine.adjCacheLoadIncoming("test:a")
+	require.True(t, ok)
+	require.Equal(t, []EdgeID{"test:fresh-in"}, inIDs)
+}
+
 func TestTreeDBEngine_AdjacentEdgeCacheInvalidatesOnDeleteNodeCascade(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 	require.NoError(t, engine.BulkCreateNodes([]*Node{

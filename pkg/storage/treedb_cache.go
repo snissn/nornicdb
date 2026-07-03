@@ -148,6 +148,27 @@ func (e *TreeDBEngine) adjCacheStoreOutgoing(nodeID NodeID, ids []EdgeID) {
 	e.adjCacheMu.Unlock()
 }
 
+func (e *TreeDBEngine) adjCacheStoreOutgoingIfGuard(nodeID NodeID, ids []EdgeID, guard uint64) bool {
+	if e == nil || nodeID == "" {
+		return false
+	}
+	if e.guardSeq.Load() != guard {
+		return false
+	}
+	cached := make([]EdgeID, len(ids))
+	copy(cached, ids)
+	e.adjCacheMu.Lock()
+	defer e.adjCacheMu.Unlock()
+	if e.guardSeq.Load() != guard {
+		return false
+	}
+	if e.adjCacheMaxNodes > 0 && len(e.outgoingAdjCache) > e.adjCacheMaxNodes {
+		e.outgoingAdjCache = make(map[NodeID][]EdgeID, e.adjCacheMaxNodes)
+	}
+	e.outgoingAdjCache[nodeID] = cached
+	return true
+}
+
 func (e *TreeDBEngine) adjCacheStoreIncoming(nodeID NodeID, ids []EdgeID) {
 	if e == nil || nodeID == "" {
 		return
@@ -160,6 +181,27 @@ func (e *TreeDBEngine) adjCacheStoreIncoming(nodeID NodeID, ids []EdgeID) {
 	}
 	e.incomingAdjCache[nodeID] = cached
 	e.adjCacheMu.Unlock()
+}
+
+func (e *TreeDBEngine) adjCacheStoreIncomingIfGuard(nodeID NodeID, ids []EdgeID, guard uint64) bool {
+	if e == nil || nodeID == "" {
+		return false
+	}
+	if e.guardSeq.Load() != guard {
+		return false
+	}
+	cached := make([]EdgeID, len(ids))
+	copy(cached, ids)
+	e.adjCacheMu.Lock()
+	defer e.adjCacheMu.Unlock()
+	if e.guardSeq.Load() != guard {
+		return false
+	}
+	if e.adjCacheMaxNodes > 0 && len(e.incomingAdjCache) > e.adjCacheMaxNodes {
+		e.incomingAdjCache = make(map[NodeID][]EdgeID, e.adjCacheMaxNodes)
+	}
+	e.incomingAdjCache[nodeID] = cached
+	return true
 }
 
 func (e *TreeDBEngine) adjCacheInvalidateForEdge(edge *Edge) {

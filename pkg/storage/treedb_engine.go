@@ -1429,11 +1429,12 @@ func (e *TreeDBEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 	if ids, ok := e.adjCacheLoadOutgoing(nodeID); ok {
 		return e.materializeAdjEdges(ids, treeDBAdjOutgoing, nodeID)
 	}
+	cacheGuard := e.guardSeq.Load()
 	edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBOutgoingIndexPrefix(nodeID), treeDBAdjOutgoing, nodeID)
 	if err != nil {
 		return nil, err
 	}
-	e.adjCacheStoreOutgoing(nodeID, ids)
+	e.adjCacheStoreOutgoingIfGuard(nodeID, ids, cacheGuard)
 	return edges, nil
 }
 
@@ -1449,11 +1450,12 @@ func (e *TreeDBEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 	if ids, ok := e.adjCacheLoadIncoming(nodeID); ok {
 		return e.materializeAdjEdges(ids, treeDBAdjIncoming, nodeID)
 	}
+	cacheGuard := e.guardSeq.Load()
 	edges, ids, err := e.collectEdgesAndIDsByIndexPrefix(treeDBIncomingIndexPrefix(nodeID), treeDBAdjIncoming, nodeID)
 	if err != nil {
 		return nil, err
 	}
-	e.adjCacheStoreIncoming(nodeID, ids)
+	e.adjCacheStoreIncomingIfGuard(nodeID, ids, cacheGuard)
 	return edges, nil
 }
 
@@ -1480,6 +1482,7 @@ func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error)
 		return outgoing, incoming, nil
 	}
 
+	cacheGuard := e.guardSeq.Load()
 	var outgoing, incoming []*Edge
 	if !outHit {
 		var outIDs []EdgeID
@@ -1488,7 +1491,7 @@ func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error)
 		if err != nil {
 			return nil, nil, err
 		}
-		e.adjCacheStoreOutgoing(nodeID, outIDs)
+		e.adjCacheStoreOutgoingIfGuard(nodeID, outIDs, cacheGuard)
 	} else {
 		var err error
 		outgoing, err = e.materializeAdjEdges(cachedOutIDs, treeDBAdjOutgoing, nodeID)
@@ -1504,7 +1507,7 @@ func (e *TreeDBEngine) GetAdjacentEdges(nodeID NodeID) ([]*Edge, []*Edge, error)
 		if err != nil {
 			return nil, nil, err
 		}
-		e.adjCacheStoreIncoming(nodeID, inIDs)
+		e.adjCacheStoreIncomingIfGuard(nodeID, inIDs, cacheGuard)
 	} else {
 		var err error
 		incoming, err = e.materializeAdjEdges(cachedInIDs, treeDBAdjIncoming, nodeID)
