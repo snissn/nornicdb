@@ -1239,18 +1239,38 @@ func (e *TreeDBEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
 	if err := e.ensureOpen(); err != nil {
 		return nil, err
 	}
-	keys := make([][]byte, len(ids))
-	for i, id := range ids {
+	out := make(map[NodeID]*Node, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	missing := make([]NodeID, 0, len(ids))
+	e.nodeCacheMu.RLock()
+	for _, id := range ids {
 		if id == "" {
+			e.nodeCacheMu.RUnlock()
 			return nil, ErrInvalidID
 		}
+		if cached, ok := e.nodeCache[id]; ok && cached != nil {
+			out[id] = copyNode(cached)
+			continue
+		}
+		missing = append(missing, id)
+	}
+	e.nodeCacheMu.RUnlock()
+	if len(missing) == 0 {
+		return out, nil
+	}
+
+	keys := make([][]byte, len(missing))
+	for i, id := range missing {
 		keys[i] = nodeKey(id)
 	}
 	values, err := e.db.GetMany(keys)
 	if err != nil {
 		return nil, mapTreeDBError(err)
 	}
-	out := make(map[NodeID]*Node, len(ids))
+	loaded := make([]*Node, 0, len(values))
 	for i, data := range values {
 		if len(data) == 0 {
 			continue
@@ -1259,7 +1279,11 @@ func (e *TreeDBEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		out[ids[i]] = node
+		out[missing[i]] = node
+		loaded = append(loaded, node)
+	}
+	for _, node := range loaded {
+		e.cacheStoreNode(node)
 	}
 	return out, nil
 }
