@@ -1985,6 +1985,9 @@ func (e *StorageExecutor) executeImplicitAsync(ctx context.Context, cypher strin
 				return e.executeWithoutTransaction(ctx, cypher, upperQuery)
 			}
 		}
+		if result, err, handled := e.tryUnwindBareCreateDirectBatch(ctx, cypher); handled {
+			return result, err
+		}
 		return e.executeWithImplicitTransaction(ctx, cypher, upperQuery)
 	}
 
@@ -2696,12 +2699,45 @@ func (w *transactionStorageWrapper) GetSchema() *storage.SchemaManager {
 }
 
 func (w *transactionStorageWrapper) BulkCreateNodes(nodes []*storage.Node) error {
-	// For bulk operations within transaction, create one by one
+	if len(nodes) == 0 {
+		return nil
+	}
+	for _, node := range nodes {
+		if node == nil {
+			return storage.ErrInvalidData
+		}
+	}
+	if bulk, ok := w.tx.(interface{ BulkCreateNodes([]*storage.Node) error }); ok {
+		if w.namespace == "" {
+			if err := bulk.BulkCreateNodes(nodes); err != nil {
+				return err
+			}
+			for _, node := range nodes {
+				w.markMutatedNodeID(node.ID)
+			}
+			return nil
+		}
+		namespaced := make([]*storage.Node, len(nodes))
+		for i, node := range nodes {
+			cp := *node
+			cp.ID = w.prefixNodeID(node.ID)
+			namespaced[i] = &cp
+		}
+		if err := bulk.BulkCreateNodes(namespaced); err != nil {
+			return err
+		}
+		for _, node := range nodes {
+			w.markMutatedNodeID(node.ID)
+		}
+		return nil
+	}
+	// Fallback for transaction implementations without native bulk staging.
 	for _, node := range nodes {
 		if w.namespace == "" {
 			if _, err := w.tx.CreateNode(node); err != nil {
 				return err
 			}
+			w.markMutatedNodeID(node.ID)
 			continue
 		}
 		namespaced := storage.CopyNode(node)
@@ -2709,6 +2745,7 @@ func (w *transactionStorageWrapper) BulkCreateNodes(nodes []*storage.Node) error
 		if _, err := w.tx.CreateNode(namespaced); err != nil {
 			return err
 		}
+		w.markMutatedNodeID(node.ID)
 	}
 	return nil
 }
