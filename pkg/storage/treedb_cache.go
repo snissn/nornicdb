@@ -110,6 +110,8 @@ func (e *TreeDBEngine) cacheDeleteEdge(id EdgeID) {
 	e.edgeCacheMu.Unlock()
 }
 
+// adjCacheLoadOutgoing returns the cached outgoing EdgeIDs for nodeID.
+// The returned slice is shared with the cache and must be treated as read-only.
 func (e *TreeDBEngine) adjCacheLoadOutgoing(nodeID NodeID) ([]EdgeID, bool) {
 	if e == nil || nodeID == "" {
 		return nil, false
@@ -120,6 +122,8 @@ func (e *TreeDBEngine) adjCacheLoadOutgoing(nodeID NodeID) ([]EdgeID, bool) {
 	return ids, ok
 }
 
+// adjCacheLoadIncoming returns the cached incoming EdgeIDs for nodeID.
+// The returned slice is shared with the cache and must be treated as read-only.
 func (e *TreeDBEngine) adjCacheLoadIncoming(nodeID NodeID) ([]EdgeID, bool) {
 	if e == nil || nodeID == "" {
 		return nil, false
