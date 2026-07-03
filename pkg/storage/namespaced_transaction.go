@@ -60,6 +60,27 @@ func (t *namespacedGraphTransaction) CreateNode(node *Node) (NodeID, error) {
 	return t.namespace.unprefixNodeID(actualID), nil
 }
 
+func (t *namespacedGraphTransaction) BulkCreateNodes(nodes []*Node) error {
+	namespaced := make([]*Node, len(nodes))
+	for i, node := range nodes {
+		if node == nil {
+			return ErrInvalidData
+		}
+		next := *node
+		next.ID = t.namespace.prefixNodeID(node.ID)
+		namespaced[i] = &next
+	}
+	if bulk, ok := t.tx.(interface{ BulkCreateNodes([]*Node) error }); ok {
+		return bulk.BulkCreateNodes(namespaced)
+	}
+	for _, node := range namespaced {
+		if _, err := t.tx.CreateNode(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (t *namespacedGraphTransaction) UpdateNode(node *Node) error {
 	if node == nil {
 		return ErrInvalidData

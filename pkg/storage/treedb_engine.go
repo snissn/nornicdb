@@ -1006,12 +1006,9 @@ func (e *TreeDBEngine) BulkCreateNodes(nodes []*Node) error {
 	if err != nil {
 		return err
 	}
-	tx.reserveNodeCreateBatch(nodes)
-	for _, node := range nodes {
-		if _, err := tx.CreateNode(node); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
+	if err := tx.BulkCreateNodes(nodes); err != nil {
+		_ = tx.Rollback()
+		return err
 	}
 	return tx.Commit()
 }
