@@ -90,6 +90,196 @@ func TestTreeDBEngine_HotBodyCacheLifecycle(t *testing.T) {
 	require.False(t, cachedEdge)
 }
 
+func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
+	newBatchCacheEngine := func(t *testing.T) *TreeDBEngine {
+		t.Helper()
+		engine := newTestTreeDBEngine(t)
+		require.NoError(t, engine.BulkCreateNodes([]*Node{
+			{
+				ID:     "test:batch-cache-a",
+				Labels: []string{"Cached"},
+				EmbedMeta: map[string]any{
+					"model": "mini",
+					"stats": map[string]interface{}{"chunks": int64(2)},
+					"tags":  []interface{}{"embed", map[string]interface{}{"kind": "doc"}},
+				},
+				Properties: map[string]any{
+					"name":  "a",
+					"meta":  map[string]interface{}{"rank": int64(1)},
+					"tags":  []interface{}{"hot", map[string]interface{}{"nested": "ok"}},
+					"uints": []interface{}{uint64(1), uint64(2)},
+				},
+			},
+			{
+				ID:                   "test:batch-cache-b",
+				Labels:               []string{"Cached"},
+				VisibilitySuppressed: true,
+				Properties:           map[string]any{"name": "b"},
+			},
+		}))
+		engine.nodeCacheMu.Lock()
+		engine.nodeCache = make(map[NodeID]*Node, engine.nodeCacheMaxEntries)
+		engine.nodeCacheMu.Unlock()
+		return engine
+	}
+
+	t.Run("populates cache for loaded nodes only", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		first, err := engine.BatchGetNodes([]NodeID{
+			"test:batch-cache-a",
+			"test:batch-cache-b",
+			"test:batch-cache-missing",
+		})
+		require.NoError(t, err)
+		require.Len(t, first, 2)
+		require.Equal(t, "a", first["test:batch-cache-a"].Properties["name"])
+		require.True(t, first["test:batch-cache-b"].VisibilitySuppressed)
+
+		engine.nodeCacheMu.RLock()
+		_, cachedA := engine.nodeCache["test:batch-cache-a"]
+		_, cachedB := engine.nodeCache["test:batch-cache-b"]
+		_, cachedMissing := engine.nodeCache["test:batch-cache-missing"]
+		engine.nodeCacheMu.RUnlock()
+		require.True(t, cachedA)
+		require.True(t, cachedB)
+		require.False(t, cachedMissing)
+	})
+
+	t.Run("keeps batch miss embed metadata isolated from cache", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		first, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a"})
+		require.NoError(t, err)
+		first["test:batch-cache-a"].EmbedMeta["stats"].(map[string]interface{})["chunks"] = int64(99)
+		first["test:batch-cache-a"].EmbedMeta["tags"].([]interface{})[1].(map[string]interface{})["kind"] = "mutated"
+
+		again, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a"})
+		require.NoError(t, err)
+		require.Equal(t, int64(2), again["test:batch-cache-a"].EmbedMeta["stats"].(map[string]interface{})["chunks"])
+		require.Equal(t, "doc", again["test:batch-cache-a"].EmbedMeta["tags"].([]interface{})[1].(map[string]interface{})["kind"])
+	})
+
+	t.Run("returns isolated copies for cache hits", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		_, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a", "test:batch-cache-b"})
+		require.NoError(t, err)
+		engine.nodeCacheMu.Lock()
+		engine.nodeCache["test:batch-cache-a"].Properties["uints"] = []uint64{1, 2}
+		engine.nodeCacheMu.Unlock()
+
+		hit, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a", "test:batch-cache-b"})
+		require.NoError(t, err)
+		hit["test:batch-cache-a"].Labels[0] = "Mutated"
+		hit["test:batch-cache-a"].Properties["name"] = "mutated"
+		hit["test:batch-cache-a"].Properties["meta"].(map[string]interface{})["rank"] = int64(99)
+		hit["test:batch-cache-a"].Properties["tags"].([]interface{})[1].(map[string]interface{})["nested"] = "mutated"
+		hit["test:batch-cache-a"].Properties["uints"].([]uint64)[0] = 99
+		hit["test:batch-cache-a"].EmbedMeta["stats"].(map[string]interface{})["chunks"] = int64(99)
+		hit["test:batch-cache-a"].EmbedMeta["tags"].([]interface{})[1].(map[string]interface{})["kind"] = "mutated"
+
+		again, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a", "test:batch-cache-b"})
+		require.NoError(t, err)
+		require.Equal(t, []string{"Cached"}, again["test:batch-cache-a"].Labels)
+		require.Equal(t, "a", again["test:batch-cache-a"].Properties["name"])
+		require.Equal(t, int64(1), again["test:batch-cache-a"].Properties["meta"].(map[string]interface{})["rank"])
+		require.Equal(t, "ok", again["test:batch-cache-a"].Properties["tags"].([]interface{})[1].(map[string]interface{})["nested"])
+		require.Equal(t, uint64(1), again["test:batch-cache-a"].Properties["uints"].([]uint64)[0])
+		require.Equal(t, int64(2), again["test:batch-cache-a"].EmbedMeta["stats"].(map[string]interface{})["chunks"])
+		require.Equal(t, "doc", again["test:batch-cache-a"].EmbedMeta["tags"].([]interface{})[1].(map[string]interface{})["kind"])
+		require.True(t, again["test:batch-cache-b"].VisibilitySuppressed)
+	})
+
+	t.Run("preserves empty typed property slices on cache copies", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		engine.cacheStoreNode(&Node{
+			ID:                   "test:batch-cache-empty-node",
+			VisibilitySuppressed: true,
+			Properties: map[string]any{
+				"empty":   []string{},
+				"nil":     []string(nil),
+				"nilList": []interface{}(nil),
+				"nilMap":  map[string]interface{}(nil),
+			},
+		})
+		node, ok := engine.cacheLoadNode("test:batch-cache-empty-node")
+		require.True(t, ok)
+		require.True(t, node.VisibilitySuppressed)
+		emptyNodeSlice := node.Properties["empty"].([]string)
+		nilNodeSlice := node.Properties["nil"].([]string)
+		nilInterfaceSlice := node.Properties["nilList"].([]interface{})
+		nilMap := node.Properties["nilMap"].(map[string]interface{})
+		require.NotNil(t, emptyNodeSlice)
+		require.Len(t, emptyNodeSlice, 0)
+		require.Nil(t, nilNodeSlice)
+		require.Nil(t, nilInterfaceSlice)
+		require.Nil(t, nilMap)
+
+		engine.cacheStoreEdge(&Edge{
+			ID:                   "test:batch-cache-empty-edge",
+			StartNode:            "test:batch-cache-a",
+			EndNode:              "test:batch-cache-b",
+			Type:                 "LINKS",
+			VisibilitySuppressed: true,
+			Properties:           map[string]any{"empty": []string{}},
+		})
+		edge, ok := engine.cacheLoadEdge("test:batch-cache-empty-edge")
+		require.True(t, ok)
+		require.True(t, edge.VisibilitySuppressed)
+		emptyEdgeSlice := edge.Properties["empty"].([]string)
+		require.NotNil(t, emptyEdgeSlice)
+		require.Len(t, emptyEdgeSlice, 0)
+	})
+
+	t.Run("skips stale miss cache population after mutation guard changes", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		guard := engine.guardSeq.Load()
+		engine.cacheStoreNode(&Node{
+			ID:         "test:batch-cache-a",
+			Labels:     []string{"Cached"},
+			Properties: map[string]any{"name": "fresh"},
+		})
+		engine.guardSeq.Add(1)
+		stored := engine.cacheStoreNodeIfGuard(&Node{
+			ID:         "test:batch-cache-a",
+			Labels:     []string{"Cached"},
+			Properties: map[string]any{"name": "stale"},
+		}, guard)
+		require.False(t, stored)
+
+		got, ok := engine.cacheLoadNode("test:batch-cache-a")
+		require.True(t, ok)
+		require.Equal(t, "fresh", got.Properties["name"])
+	})
+
+	t.Run("rejects invalid ids", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		_, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a", ""})
+		require.ErrorIs(t, err, ErrInvalidID)
+	})
+
+	t.Run("returns decode errors for malformed node bodies", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		require.NoError(t, engine.db.Set(nodeKey("test:batch-cache-bad"), []byte("not-a-node")))
+		_, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-bad"})
+		require.Error(t, err)
+	})
+
+	t.Run("returns backend errors from GetMany", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		require.NoError(t, engine.db.Close())
+		_, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a"})
+		engine.closed.Store(true)
+		require.ErrorIs(t, err, ErrStorageClosed)
+	})
+}
+
 func TestTreeDBTransaction_CommitDeletedBodiesDoNotRemainCached(t *testing.T) {
 	engine := newTestTreeDBEngine(t)
 

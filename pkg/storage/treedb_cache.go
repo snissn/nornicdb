@@ -27,6 +27,27 @@ func (e *TreeDBEngine) cacheStoreNode(node *Node) {
 	e.nodeCacheMu.Unlock()
 }
 
+func (e *TreeDBEngine) cacheStoreNodeIfGuard(node *Node, guard uint64) bool {
+	if e == nil || node == nil || node.ID == "" {
+		return false
+	}
+	if e.guardSeq.Load() != guard {
+		return false
+	}
+	cached := copyNode(node)
+	normalizePropertyMapShapes(cached.Properties)
+	e.nodeCacheMu.Lock()
+	defer e.nodeCacheMu.Unlock()
+	if e.guardSeq.Load() != guard {
+		return false
+	}
+	if e.nodeCacheMaxEntries > 0 && len(e.nodeCache) > e.nodeCacheMaxEntries {
+		e.nodeCache = make(map[NodeID]*Node, e.nodeCacheMaxEntries)
+	}
+	e.nodeCache[node.ID] = cached
+	return true
+}
+
 func (e *TreeDBEngine) cacheDeleteNode(id NodeID) {
 	if e == nil || id == "" {
 		return
