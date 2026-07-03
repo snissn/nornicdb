@@ -62,6 +62,9 @@ func normalizePropertyValueShape(value interface{}) interface{} {
 	case []interface{}:
 		return normalizeInterfaceSliceShape(v)
 	case map[string]interface{}:
+		if v == nil {
+			return v
+		}
 		out := make(map[string]interface{}, len(v))
 		for key, item := range v {
 			out[key] = normalizePropertyValueShape(item)

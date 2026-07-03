@@ -175,8 +175,10 @@ func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
 			ID:                   "test:batch-cache-empty-node",
 			VisibilitySuppressed: true,
 			Properties: map[string]any{
-				"empty": []string{},
-				"nil":   []string(nil),
+				"empty":   []string{},
+				"nil":     []string(nil),
+				"nilList": []interface{}(nil),
+				"nilMap":  map[string]interface{}(nil),
 			},
 		})
 		node, ok := engine.cacheLoadNode("test:batch-cache-empty-node")
@@ -184,9 +186,13 @@ func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
 		require.True(t, node.VisibilitySuppressed)
 		emptyNodeSlice := node.Properties["empty"].([]string)
 		nilNodeSlice := node.Properties["nil"].([]string)
+		nilInterfaceSlice := node.Properties["nilList"].([]interface{})
+		nilMap := node.Properties["nilMap"].(map[string]interface{})
 		require.NotNil(t, emptyNodeSlice)
 		require.Len(t, emptyNodeSlice, 0)
 		require.Nil(t, nilNodeSlice)
+		require.Nil(t, nilInterfaceSlice)
+		require.Nil(t, nilMap)
 
 		engine.cacheStoreEdge(&Edge{
 			ID:                   "test:batch-cache-empty-edge",
@@ -239,6 +245,15 @@ func TestTreeDBEngine_BatchGetNodesUsesAndPopulatesBodyCache(t *testing.T) {
 		require.NoError(t, engine.db.Set(nodeKey("test:batch-cache-bad"), []byte("not-a-node")))
 		_, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-bad"})
 		require.Error(t, err)
+	})
+
+	t.Run("returns backend errors from GetMany", func(t *testing.T) {
+		engine := newBatchCacheEngine(t)
+
+		require.NoError(t, engine.db.Close())
+		_, err := engine.BatchGetNodes([]NodeID{"test:batch-cache-a"})
+		engine.closed.Store(true)
+		require.ErrorIs(t, err, ErrStorageClosed)
 	})
 }
 

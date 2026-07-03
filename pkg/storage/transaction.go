@@ -282,6 +282,9 @@ func copyPropertyValue(value interface{}) interface{} {
 		time.Time:
 		return value
 	case []interface{}:
+		if v == nil {
+			return v
+		}
 		out := make([]interface{}, len(v))
 		for i, item := range v {
 			out[i] = copyPropertyValue(item)
@@ -316,6 +319,9 @@ func copyPropertyValue(value interface{}) interface{} {
 	case []bool:
 		return copySlice(v)
 	case map[string]interface{}:
+		if v == nil {
+			return v
+		}
 		out := make(map[string]interface{}, len(v))
 		for key, item := range v {
 			out[key] = copyPropertyValue(item)
